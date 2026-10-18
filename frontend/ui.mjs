@@ -1077,9 +1077,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const expireApproval=(key,item,card)=>{
       if(!current() || owner!==state.user?.id || state.session?.id!==session.id
           || approvalCards.get(key)!==card || !card.isConnected
-          || approvalItems.get(key)!==item || !approvalPending.has(key) || !approvalExpired(item))return;
+          || approvalItems.get(key)!==item || approvalPending.get(key)!==item)return;
       const actionState=approvalActionStates.get(key);
       if(actionState?.decisionStarted || actionState?.uncertain){clearApprovalExpiry(key);return;}
+      if(!approvalExpired(item)){scheduleApprovalExpiry(key,item,card);return;}
       if(actionState){actionState.pending=false;actionState.decisionStarted=false;actionState.error='';}
       const finalItem={...item,status:'expired',executable:false,choices:[]};
       approvalPending.delete(key);approvalItems.set(key,finalItem);
@@ -1091,9 +1092,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(existing?.item===item)return;
       clearApprovalExpiry(key);
       if(!Number.isFinite(item?.expires_at))return;
-      const delay=Math.max(0,item.expires_at*1000-Date.now());
-      const timer=win.setTimeout(()=>expireApproval(key,item,card),Math.min(delay,2147483647));
-      approvalExpiryTimers.set(key,{item,timer});
+      const delay=Math.max(1,Math.ceil(item.expires_at*1000-Date.now()));
+      const entry={item,timer:null};
+      entry.timer=win.setTimeout(()=>{
+        if(approvalExpiryTimers.get(key)!==entry)return;
+        approvalExpiryTimers.delete(key);
+        expireApproval(key,item,card);
+      },Math.min(delay,2147483647));
+      approvalExpiryTimers.set(key,entry);
     };
     const placeApprovalCard=(card,item)=>{
       const anchor=[...messages.querySelectorAll('[data-history-run]')].find(node=>
@@ -1208,7 +1214,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const labels={pending:'Approval required',expired:'Expired',resolved:'Resolved',
         resolved_external:'No longer pending',cancelled:'Cancelled',unknown:'Decision status unknown',
         sending:'Decision pending',unavailable:'Approval unavailable',details_unavailable:'Approval details unavailable'};
-      const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown':approvalExpired(item)?'expired':status;
+      const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown'
+        :status==='pending' && approvalExpired(item)?'expired':status;
       view.heading.textContent=labels[effectiveStatus] || 'Approval unavailable';
       view.error.textContent=actionState.error;view.error.hidden=!actionState.error;
       view.itemError.hidden=typeof item.error!=='string' || !item.error;
@@ -1372,9 +1379,18 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
               renderApprovals();focusApprovalTarget();return;
             }else if(listChanged){
-              const revalidatedListRevision=approvalListRevision;
+              const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
+                revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
+                revalidatedHandled=handledApprovals.has(key),revalidatedDetails=handledApprovalDetails.get(key);
               const latestDetail=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
               if(!current())return;
+              const actionState=approvalActionStates.get(key);
+              if(revalidatedRevision!==approvalRevision || revalidatedItem!==approvalItems.get(key)
+                  || revalidatedPending!==approvalPending.get(key) || revalidatedHandled!==handledApprovals.has(key)
+                  || revalidatedDetails!==handledApprovalDetails.get(key)
+                  || actionState?.pending || actionState?.decisionStarted || actionState?.uncertain){
+                renderApprovals();focusApprovalTarget();return;
+              }
               if(revalidatedListRevision!==approvalListRevision || !matches(latestDetail)){
                 if(approvalTargetPlaceholder){
                   approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';

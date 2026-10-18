@@ -429,6 +429,105 @@ test('manual older-history loading repositions an already rendered approval card
  assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
 }));
 
+test('generated approval expiry rearms an early callback and a capped distant deadline',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ for(const distance of [10000,2147483647+10000]){
+  const now=1800000000000;
+  control.notificationTarget=approvalTarget;
+  control.approvals=[approvalRecord({expires_at:(now+distance)/1000})];
+  control.approvalDetail=control.approvals[0];
+  await page.addInitScript(({now})=>{
+   window.expiryClock={now,next:0,timers:new Map()};
+   Date.now=()=>expiryClock.now;
+   window.setTimeout=(callback,delay)=>{const id=++expiryClock.next;expiryClock.timers.set(id,{callback,delay});return id;};
+   window.clearTimeout=id=>expiryClock.timers.delete(id);
+   window.fireExpiry=delay=>{
+    const entry=[...expiryClock.timers].find(([,timer])=>timer.delay===delay);
+    if(!entry)throw new Error(`No armed expiry timer for ${delay}ms`);
+    expiryClock.timers.delete(entry[0]);entry[1].callback();
+   };
+  },{now});
+  await mount(page,'?notification=notice-target');
+  const card=page.locator('[data-approval-id="approval-1"]');
+  await card.getByRole('button',{name:'Approve once'}).waitFor();
+  const handle=await card.elementHandle();
+  await page.evaluate(({distance,now})=>{
+   expiryClock.now=now+(distance>2147483647?2147483647:distance-1);
+   fireExpiry(Math.min(distance,2147483647));
+  },{distance,now});
+  assert.equal(await handle.evaluate(node=>node.isConnected),true);
+  assert.equal(await card.getByRole('heading').innerText(),'Approval required');
+  await page.evaluate(({distance,now})=>{
+   const remaining=now+distance-expiryClock.now;expiryClock.now=now+distance;fireExpiry(remaining);
+  },{distance,now});
+  assert.equal(await card.getByRole('heading').innerText(),'Expired');
+  assert.equal(await card.getByRole('button').count(),0);
+  await page.evaluate(()=>app.destroy());
+  await page.waitForFunction(()=>expiryClock.timers.size===0);
+  assert.equal(await page.evaluate(()=>expiryClock.timers.size),0);
+ }
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
+test('generated expired non-pending approval details retain status through same-owner reentry',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ control.notificationTarget=approvalTarget;
+ for(const [status,label] of Object.entries({resolved:'Resolved',resolved_external:'No longer pending',cancelled:'Cancelled',sending:'Decision pending',unknown:'Decision status unknown'})){
+  control.approvals=[];control.approvalDetail=approvalRecord({status,expires_at:1});
+  await mount(page,'?notification=notice-target');
+  const card=page.locator('[data-approval-id="approval-1"]');
+  await card.getByRole('heading',{name:label,exact:true}).waitFor();
+  assert.equal(await card.getByRole('button').count(),0);
+  await settings(page);await page.getByRole('button',{name:'Sign out',exact:true}).click();
+  await page.getByRole('button',{name:'Sign in with a passkey',exact:true}).waitFor();
+  await page.evaluate(()=>app.start());
+  await card.getByRole('heading',{name:label,exact:true}).waitFor();
+  assert.equal(await card.getByRole('button').count(),0);
+ }
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
+test('generated second detail GET cannot replay a successfully answered approval',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[];
+ const item=approvalRecord();control.approvalDetail=item;
+ control.activeRun={id:item.run_id,session_id:item.session_id,status:'waiting_for_approval'};
+ await page.addInitScript(()=>{
+  window.EventSource=class {
+   constructor(){this.listeners={};window.approvalStream=this;}
+   addEventListener(name,fn){this.listeners[name]=fn;}
+   emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+   close(){}
+  };
+ });
+ let releaseFirst,releaseSecond,reads=0;
+ const first=new Promise(resolve=>releaseFirst=resolve),second=new Promise(resolve=>releaseSecond=resolve);
+ await page.route('**/app-api/approvals/approval-1',async route=>{
+  await (++reads===1?first:second);
+  await route.fulfill({json:item});
+ });
+ const listResponse=page.waitForResponse(response=>response.url().endsWith('/approvals'));
+ await mount(page,'?notification=notice-target');await listResponse;
+ await page.waitForTimeout(20);
+ releaseFirst();
+ const deadline=Date.now()+2500;
+ while(reads<2 && Date.now()<deadline)await page.waitForTimeout(10);
+ assert.equal(reads,2,'an empty list forces the second exact-detail GET');
+ let releaseRefresh;control.approvalHold=new Promise(resolve=>releaseRefresh=resolve);
+ await page.evaluate(item=>approvalStream.emit('approval',item),item);
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+ await holdPasskey(page);
+ await card.getByRole('button',{name:'Approve once'}).click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ await page.evaluate(()=>finishPasskey());
+ await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ const response=page.waitForResponse(response=>response.url().endsWith('/approvals/approval-1'));
+ releaseSecond();await response;
+ await page.waitForTimeout(50);
+ assert.equal(await card.getByRole('heading').innerText(),'Resolved');
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,1);
+ await page.evaluate(()=>app.destroy());releaseRefresh();
+}));
+
 test('approval controls retain pending and card-scoped errors across focus refresh',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
  const item=approvalRecord();control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
  await mount(page,'?notification=notice-target');await page.getByRole('button',{name:'Approve once'}).waitFor();
