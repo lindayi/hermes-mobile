@@ -291,6 +291,22 @@ def create_app(settings=None, *, gateway_client=None):
         user=notification_user(user_id)
         return notification_session(user,session_id) if user else None
 
+    def approval_notification_binding(user_id,run_id,request_id,approval_id,session_id):
+        from contextlib import closing
+        user=notification_user(user_id)
+        if not user:
+            return None
+        with closing(journal.connect()) as db:
+            row=db.execute('''SELECT r.session_id FROM runs r JOIN orchestration_approvals a ON a.run_id=r.id
+                WHERE r.id=? AND r.user_id=? AND r.profile=? AND a.id=? AND a.request_id=?''',
+                (run_id,user_id,user['profile'],approval_id,request_id)).fetchone()
+        if not row or row['session_id']!=session_id:
+            return None
+        canonical=notification_session(user,row['session_id'])
+        if not canonical:
+            return None
+        return {'session_id':canonical,'run_session_id':row['session_id']}
+
     def valid_presence(user_id,session_id):
         return resolve_presence(user_id,session_id) is not None
 
@@ -335,6 +351,7 @@ def create_app(settings=None, *, gateway_client=None):
     notifications.presence_validator=valid_presence
     notifications.request_validator=valid_request_notification
     notifications.request_target_resolver=request_notification_binding
+    notifications.approval_target_resolver=approval_notification_binding
     notifications.presence_resolver=resolve_presence
     notifications.event_validator=valid_notification_event
     request_notifications=RequestNotificationService(notifications,journal,
@@ -409,6 +426,15 @@ def create_app(settings=None, *, gateway_client=None):
                     and owner['profile'] in catalog.profiles and binding.matches(owner))
 
     notifications.approval_validator=valid_approval
+
+    def approval_chat_binding(user,item):
+        source=item.get('session_id')
+        if not isinstance(source,str):
+            return item
+        canonical=notification_session(user,source)
+        return ({**item,'session_id':canonical,'run_session_id':source}
+                if canonical else item)
+
     for runtime in runtimes.values():
         runtime.approval_notifier=notifications.ingest_approval
         runtime.approval_validator=valid_approval
@@ -882,12 +908,13 @@ def create_app(settings=None, *, gateway_client=None):
 
     @app.get(BASE+'/approvals')
     async def approvals(user=Depends(ready_user)):
-        return runtime_for(user).approvals(user)
+        result=runtime_for(user).approvals(user)
+        return {'items':[approval_chat_binding(user,item) for item in result['items']]}
 
     @app.get(BASE+'/approvals/{aid}')
     async def approval(aid:str,user=Depends(ready_user)):
         try:
-            return runtime_for(user).approval(user,aid)
+            return approval_chat_binding(user,runtime_for(user).approval(user,aid))
         except KeyError:
             raise HTTPException(404,'Approval unavailable') from None
 

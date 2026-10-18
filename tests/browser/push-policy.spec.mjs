@@ -20,21 +20,25 @@ async function fixture(run){
    const requestURL=new URL(req.url,'http://fixture'),path=requestURL.pathname;
    if(path.startsWith('/hermes/app-api/')){
     let raw='';for await(const part of req)raw+=part;
-    const p=path.slice('/hermes/app-api'.length),call={p,method:req.method,body:raw?JSON.parse(raw):null,csrf:req.headers['x-csrf-token']};calls.push(call);
+    const p=path.slice('/hermes/app-api'.length),call={p,query:requestURL.search,method:req.method,body:raw?JSON.parse(raw):null,csrf:req.headers['x-csrf-token']};calls.push(call);
     let data={items:[]},status=200;
     if(p==='/auth/me'){if(control.authHold)await control.authHold;data={user:{id:control.user,status:'ready'},csrf_token:control.csrf || 'fixture-csrf'};}
     if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
     if(p==='/push/presence' && call.body.visible && control.presenceHold)await control.presenceHold;
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
     if(p==='/inbox/notice-target/target' && control.notificationTarget)data=control.notificationTarget;
-    if(p==='/sessions/session-one' && control.notificationTarget)data={id:'session-one',title:'Exact notification chat'};
+    if(control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}`)data={id:control.notificationTarget.session_id,title:'Exact notification chat'};
     if(p==='/push/key')data={public_key:'AQID'};
-    if(p==='/sessions/session-one/messages' && control.notificationTarget){
-     data=requestURL.searchParams.has('offset')
+    if(control.notificationTarget && p===`/sessions/${control.notificationTarget.session_id}/messages`){
+     if(control.realHistory){
+      const offset=requestURL.searchParams.get('offset');
+      data=offset===null?control.realHistory.latest:control.realHistory.pages[offset]||{items:[],offset:Number(offset),total:control.realHistory.latest.total};
+     }else data=requestURL.searchParams.has('offset')
       ? {items:[{id:1,role:'user',content:'Original request',run_id:'older-run',session_id:'session-one'}],offset:0,total:11}
       : {items:[{id:20,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}],offset:10,total:11};
     }else if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
-    if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
+    if(p.startsWith('/runs/') && control.realHistory)data=control.realHistory.runs[p.slice('/runs/'.length)]||{items:[]};
+    else if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
     if(p==='/push/preferences'){
      if(control.hold)await control.hold;
      if(req.method==='GET' && control.getError || req.method==='PUT' && control.putError){status=503;data={detail:'Synthetic unavailable'};}
@@ -336,6 +340,25 @@ test('generated app restores opaque and legacy notification links to the exact o
   assert.equal(await page.locator('.bottom-nav [aria-current="page"]').getAttribute('data-view'),'chats');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
  }
+}));
+test('generated request routing uses composed native+journal anchors beyond a history page',{timeout:60000},()=>fixture(async({page,control,calls,mount})=>{
+ const python=process.env.HERMES_TEST_PYTHON||repo+'.venv/bin/python';
+ const history=JSON.parse(execFileSync(python,[repo+'tests/browser/request_target_history_fixture.py'],{cwd:repo,encoding:'utf8'}));
+ assert.equal(history.latest.items.some(item=>item.run_id===history.old_run_id),false,'the target starts beyond the latest page');
+ assert.equal(history.latest.run.id,history.new_run_id,'the latest page has a newer active run');
+ control.realHistory=history;
+ control.notificationTarget={kind:'request',session_id:history.session_id,run_id:history.old_run_id,run_session_id:history.session_id};
+ await mount(page,'?notification=notice-target');
+ const target=page.locator(`[data-notification-run="${history.old_run_id}"]`);
+ await target.waitFor();
+ const oldRequest=page.locator('.user-message').filter({hasText:'Old notification request'}).first();
+ const newerRequest=page.locator('.user-message').filter({hasText:'New active request'}).first();
+ await oldRequest.waitFor();await newerRequest.waitFor();
+ assert.match(await target.innerText(),/Old notification result/);
+ assert.equal(await target.evaluate(node=>node.previousElementSibling?.textContent.includes('Old notification request')),true);
+ assert.equal(await newerRequest.evaluate((newer,node)=>Boolean(node.compareDocumentPosition(newer)&Node.DOCUMENT_POSITION_FOLLOWING),await target.elementHandle()),true);
+ assert.ok(calls.filter(call=>call.p===`/sessions/${history.session_id}/messages`&&call.query.includes('offset=')).length>=2,'the target required multiple older pages');
+ assert.deepEqual(await page.locator('.user-message').filter({hasText:'Old notification request'}).count(),1);
 }));
 test('pending presence cannot renew during account revalidation or after a new owner',{timeout:30000},()=>fixture(async({page,control,calls})=>{
  await page.clock.install();

@@ -6,7 +6,7 @@ const {JSDOM}=createRequire('/usr/local/lib/hermes-agent/package.json')('jsdom')
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const fakeCredential=()=>({id:'cred',rawId:new Uint8Array([1]).buffer,type:'public-key',getClientExtensionResults:()=>({}),response:{clientDataJSON:new Uint8Array([2]).buffer,authenticatorData:new Uint8Array([3]).buffer,signature:new Uint8Array([4]).buffer,userHandle:null}});
-const approvalItem=()=>({id:'a',run_id:'r',request_id:'native-a',session_id:'s',title:'Execute fixture',command:'echo fixture',target:'fixture target',expires_at:2000000000,executable:true,choices:['once','deny']});
+const approvalItem=()=>({id:'a',run_id:'r',request_id:'native-a',session_id:'s',run_session_id:'s',title:'Execute fixture',command:'echo fixture',target:'fixture target',expires_at:2000000000,executable:true,choices:['once','deny']});
 for(const status of ['pending','expired'])test(`approval notification opens exact chat without deciding (${status})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];let scrolled;
  win.HTMLElement.prototype.scrollIntoView=function(){scrolled=this;};
@@ -29,6 +29,26 @@ for(const status of ['pending','expired'])test(`approval notification opens exac
    assert.match(doc.querySelector('[data-approval-id="a"]').textContent,/Expired/);
    assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
   }
+ }finally{app.destroy();win.close();}
+});
+
+test('opening a canonical chat normally discovers its pending compressed-session approval',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
+ const item={...approvalItem(),session_id:'tip',run_session_id:'wa-1'};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'tip',title:'Canonical chat'}],total:1};
+  if(p==='/sessions/tip/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[item]};
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row[aria-label="Canonical chat"]').click();await tick();
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.ok(card,'approval is discoverable without opening the notification');
+  assert.match(card.textContent,/Approval required/);
+  assert.equal(card.dataset.historySession,'tip');
+  assert.equal(card.querySelectorAll('button').length,2);
  }finally{app.destroy();win.close();}
 });
 

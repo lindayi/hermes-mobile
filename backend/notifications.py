@@ -47,7 +47,7 @@ class NotificationService:
                  vapid_subject='https://lindayi.me', send_push=None, *,
                  clock=time.time, session_validator=None, approval_validator=None, presence_validator=None,
                  event_validator=None, presence_resolver=None, request_validator=None,
-                 request_target_resolver=None,
+                 request_target_resolver=None, approval_target_resolver=None,
                  device_claim_guard=None):
         self.db_path = str(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -66,6 +66,7 @@ class NotificationService:
         self.presence_resolver = presence_resolver
         self.request_validator = request_validator
         self.request_target_resolver = request_target_resolver
+        self.approval_target_resolver = approval_target_resolver
         self.device_claim_guard = device_claim_guard
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS inbox (
@@ -614,9 +615,18 @@ class NotificationService:
         if row is None:
             raise HTTPException(404, 'Inbox item not found')
         if row['approval_id'] and row['session_id']:
-            return {'kind': 'approval', 'session_id': row['session_id'],
-                    'run_id': row['run_id'], 'approval_id': row['approval_id'],
-                    'request_id': row['request_id']}
+            resolver = self.approval_target_resolver
+            binding = resolver(user_id, row['run_id'], row['request_id'],
+                               row['approval_id'], row['session_id']) if resolver else {
+                                   'session_id': row['session_id'], 'run_session_id': row['session_id']}
+            if (isinstance(binding, dict)
+                    and isinstance(binding.get('session_id'), str)
+                    and isinstance(binding.get('run_session_id'), str)):
+                return {'kind': 'approval', 'session_id': binding['session_id'],
+                        'run_session_id': binding['run_session_id'],
+                        'run_id': row['run_id'], 'approval_id': row['approval_id'],
+                        'request_id': row['request_id']}
+            raise HTTPException(404, 'Notification target unavailable')
         if (row['session_id'] and row['category'] in ('completion', 'attention')
                 and row['delivery_id'].startswith('request:')):
             parts = row['delivery_id'].split(':')

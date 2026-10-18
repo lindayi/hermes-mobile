@@ -1166,13 +1166,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const target=notificationTarget;
       const targetKey=[...approvalItems].find(([,item])=>item.id===target.approval_id
         && item.run_id===target.run_id && item.request_id===target.request_id
-        && item.session_id===session.id)?.[0];
+        && item.session_id===session.id
+        && (!target.run_session_id || item.run_session_id===target.run_session_id))?.[0];
       if(!targetKey){
         try{
           const item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
           if(!current())return;
           if(item?.id===target.approval_id && item.run_id===target.run_id
               && item.request_id===target.request_id && item.session_id===session.id
+              && (!target.run_session_id || item.run_session_id===target.run_session_id)
               && typeof item.status==='string'){
             const key=approvalKey(item);approvalItems.set(key,item);
             if(item.status==='pending' && item.executable===true)approvalPending.set(key,item);
@@ -2358,7 +2360,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(destroyed || version!==routeVersion)return;
           if(['request','approval'].includes(target?.kind)
               && typeof target.session_id==='string' && target.session_id.length<=256
-              && typeof target.run_id==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(target.run_id)){
+              && typeof target.run_id==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(target.run_id)
+              && (target.kind!=='approval' || target.run_session_id===undefined
+                  || typeof target.run_session_id==='string')){
             await openSession({id:target.session_id},{...target,notification_id:notification});
             return;
           }
