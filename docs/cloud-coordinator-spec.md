@@ -2014,6 +2014,12 @@ including attempt and repair metadata.
 Canonical value or presence conflicts deny source and reviewer publication and
 remain retained; identical or reordered canonical copies and authentic legacy
 omissions remain valid.
+An unauthenticated live copy that asserts a well-formed typed blocker may be
+ignored only when it differs from a valid retained proof solely in `receipt_result`
+and `receipt_body`. It is not blocker or receipt authority; the retained proof
+remains authoritative. Any mismatch in identity, attempt, binding, head, or another
+projection field still fails closed. Typed blockers prevent progress only when
+their remote receipt is authenticated.
 An authenticated live v1 projection may supply omitted legacy values to a
 read-only candidate only after the receipt pair matches. Conflicting copies block
 their affected start and result heads, including initial or separately authorized

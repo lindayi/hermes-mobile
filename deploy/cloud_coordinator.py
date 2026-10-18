@@ -3537,13 +3537,14 @@ def _receipt_projection(action):
     }
 
 
-def _receipt_proof_matches_live(proof, action, *, require_proven_branch=False):
+def _receipt_proof_matches_live(
+        proof, action, *, require_proven_branch=False, ignored_fields=()):
     if not isinstance(proof, dict) or not isinstance(action, dict):
         return False
     if (require_proven_branch and "head_ref" in action
             and "head_ref" not in proof):
         return False
-    fields = _RECEIPT_PROOF_FIELDS | proof.keys()
+    fields = (_RECEIPT_PROOF_FIELDS | proof.keys()) - set(ignored_fields)
     legacy_fields = {"key", "head_ref"}
     if (proof.get("receipt_version", "v1") == "v1"
             and action.get("receipt_version", "v1") == "v1"):
@@ -4054,16 +4055,48 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 or proof["task_id"] != task_id
                 or not _receipt_proof_matches_live(proof, candidate)
                 for proof in matching_proofs):
-            mark_conflict(candidate, *matching_proofs)
-            invalid_proof_keys.update(linked_keys)
-            invalid_proof_keys.update(
-                proof["key"] for proof in matching_proofs
-                if isinstance(proof.get("key"), str)
-            )
-            invalid_task_ids.update(linked_tasks)
-            invalid_task_ids.update(
-                proof["task_id"] for proof in matching_proofs
-            )
+            matching_proofs = list(matching_proofs)
+            unauthenticated_blocker_copy = False
+            if (matching_proofs
+                    and candidate.get("receipt_result") in {
+                        "conflict_incompatible", "policy_broken",
+                    }
+                    and isinstance(candidate.get("receipt_body"), str)
+                    and all(
+                        _valid_receipt_proof(proof, comments)
+                        and _receipt_proof_matches_live(
+                            proof, candidate,
+                            ignored_fields={"receipt_result", "receipt_body"},
+                        )
+                        for proof in matching_proofs
+                    )):
+                try:
+                    unauthenticated_blocker_copy = receipt_body_matches(
+                        candidate["receipt_body"],
+                        candidate["receipt_nonce"],
+                        candidate["receipt_task_id"],
+                        candidate["receipt_session_id"],
+                        candidate.get("issue"),
+                        candidate["receipt_start_head"],
+                        candidate["receipt_head"],
+                        candidate["receipt_base"],
+                        candidate["receipt_result"],
+                        version=candidate.get("receipt_version", "v1"),
+                        legacy_neutral=candidate.get("receipt_legacy_neutral", False),
+                    )
+                except (OverflowError, TypeError, ValueError):
+                    pass
+            if not unauthenticated_blocker_copy:
+                mark_conflict(candidate, *matching_proofs)
+                invalid_proof_keys.update(linked_keys)
+                invalid_proof_keys.update(
+                    proof["key"] for proof in matching_proofs
+                    if isinstance(proof.get("key"), str)
+                )
+                invalid_task_ids.update(linked_tasks)
+                invalid_task_ids.update(
+                    proof["task_id"] for proof in matching_proofs
+                )
             continue
 
     authenticated_blockers = [
