@@ -43,9 +43,31 @@ The schema-bypassing silent release observer retains legacy compatibility: only
 an absent policy table omits the category clause; receipt filtering remains and
 SQL errors propagate. No schema is created by attention queries.
 
-Approvals, main-request completion/attention, scheduled updates and operational
-incidents keep their existing eligibility, ownership and push policy. Push
-preferences remain independent of both retention and this attention view.
+Main-request outcomes and session-bound execution approvals keep their existing
+eligibility, ownership, push preferences, presence suppression, deduplication,
+receipts and retry history, but are not attention-Inbox entries. The shared
+attention predicate excludes session-bound request notifications identified by
+their stored request event and session-bound approval rows identified by
+`approval_notifications`. Listing, pagination, read counts, mark-all-read and
+clear-read use the same predicate. These rows are not deleted or marked read by
+the projection. Scheduled updates, operational incidents and genuinely non-chat
+approvals remain visible in Inbox.
+
+Web Push carries the opaque stored notification ID, not a trusted destination.
+The service worker builds a same-origin `?notification=ID` URL from that ID and
+never uses a payload-supplied URL. After authentication, the API resolves an
+owned notification to its session and run/request identity. Legacy delivered
+`?inbox=ID` links use the same lookup; non-chat notifications retain Inbox.
+Request targets load their exact authorized run and older history as needed.
+Approval targets focus the exact chat card and never decide an action. Opening a
+chat also reconciles pending session approvals, so push is not required to find
+them. The existing step-up, CSRF, owner/run/request binding, expiry and
+single-use decision endpoint remain the only decision path. Approval actions are
+rendered inline with their command/target and explicit controls, not copied into
+Inbox. If no chat is bound, retain the prior Inbox approval destination.
+
+Push preferences remain independent of Inbox visibility and retention. Visibility
+changes do not alter outbox status, receipts, acknowledgements, or retry history.
 Regression gates cover HTTP delivery/ACK plus Activity, API list/count/cleanup,
 legacy reopen and newest-page saturation, category-only ingestion, title
 lookalikes, foreign provenance, legacy schema and failed-query safety. Prior

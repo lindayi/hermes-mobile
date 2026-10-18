@@ -208,18 +208,25 @@ def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approva
     service.approval_validator = lambda *identity: True
     request = service.ingest(user['id'], 'request:run-1:terminal', 'Finished', 'Public result',
         'chat-1', category='completion')
+    failed = service.ingest(user['id'], 'request:run-failed:terminal', 'Needs attention',
+        'Safe failure summary', 'chat-1', category='attention')
     approval = service.ingest_approval(user['id'], 'run-2', 'native-2', 'approval-2',
         'chat-1', now[0] + 100)
+    foreign = service.ingest('foreign', 'request:foreign-run:terminal', 'Finished', 'Private',
+        'foreign-chat', category='completion')
 
     request_target = client.get(BASE + f"/inbox/{request['id']}/target")
+    failed_target = client.get(BASE + f"/inbox/{failed['id']}/target")
     approval_target = client.get(BASE + f"/inbox/{approval['id']}/target")
 
     assert request_target.status_code == 200
     assert request_target.json() == {'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-1'}
+    assert failed_target.json() == {'kind': 'request', 'session_id': 'chat-1', 'run_id': 'run-failed'}
     assert approval_target.status_code == 200
     assert approval_target.json() == {
         'kind': 'approval', 'session_id': 'chat-1', 'run_id': 'run-2',
         'approval_id': 'approval-2', 'request_id': 'native-2'
     }
     assert client.get(BASE + f"/inbox/{request['id']}/target").status_code == 200
+    assert client.get(BASE + f"/inbox/{foreign['id']}/target").status_code == 404
     assert client.get(BASE + '/inbox/foreign-notice/target').status_code == 404

@@ -54,6 +54,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   const storage = {get(key,persistent=false) { try { return (persistent ? win.localStorage : win.sessionStorage).getItem(key); } catch { return null; } }, set(key,value,persistent=false) {try { const store=persistent ? win.localStorage : win.sessionStorage;value == null ? store.removeItem(key) : store.setItem(key,value); } catch { /* private browsing may disable storage */ }}};
   const key = name => `hermes:${state.user?.id}:${name}`;
   const photoURL=(sessionId,id)=>`${BASE}app-api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}`;
+  const validNotificationId=value=>typeof value==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
   const h = (tag, attrs = {}, ...children) => {
     const el = doc.createElement(tag);
     for (const [key,value] of Object.entries(attrs)) {
@@ -430,10 +431,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const pendingApproval=item=>approvals.status==='fulfilled' && (approvals.value.items || []).find(a=>a.id===item.approval_id && a.run_id===item.run_id && a.request_id===item.request_id);
     const approvalCard=item=>[...section.querySelectorAll('[data-approval-id]')].find(el=>el.dataset.approvalId===item.approval_id);
     if(approvals.status==='fulfilled')for(const item of approvals.value.items || []) {
-      const actionText=typeof item.action==='string' ? item.action : JSON.stringify(item.action || item.payload || item);
+      if(item.session_id)continue;
+      const actionText=typeof item.command==='string' ? item.command
+        : typeof item.action==='string' ? item.action : 'Action details are unavailable.';
       section.append(h('article',{class:'card approval inbox-approval','data-approval-id':item.id,tabindex:'-1'},h('details',{},
         h('summary',{class:'inbox-summary inbox-approval-summary'},disclosure(),h('span',{class:'inbox-summary-text'},h('span',{class:'eyebrow'},'NEEDS YOUR REVIEW'),h('h2',{},item.title || 'Action requested'),h('span',{class:'caption'},'Expires: ',date(item.expires_at)))),
-        h('div',{class:'inbox-body'},h('pre',{class:'review-payload'},actionText),h('p',{},'Target: ',typeof item.target==='string' ? item.target : JSON.stringify(item.target || 'See action details')),
+        h('div',{class:'inbox-body'},h('pre',{class:'review-payload'},actionText),h('p',{},'Target: ',typeof item.target==='string' ? item.target : 'See action details'),
         h('div',{class:'actions'},button('Approve once',e=>inboxAction(e.currentTarget,async()=>{await ceremony('verify');if(!current())return;await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'once'}});if(!current())return;handledApprovals.add(approvalKey(item));await navigate('inbox');}),'primary'),
         button('Deny',e=>inboxAction(e.currentTarget,async()=>{await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'deny'}});if(!current())return;handledApprovals.add(approvalKey(item));await navigate('inbox');}),'secondary'))))));
     } else section.append(h('p',{class:'inline-error'},'Approvals unavailable: ',errorMessage(approvals.reason)));
@@ -472,7 +475,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(!deliveries.value.items?.length)section.append(empty('No updates',''));
     } else section.append(h('p',{class:'inline-error'},'Inbox unavailable: ',errorMessage(deliveries.reason)));
     content.replaceChildren(h('div',{class:'page-heading inbox-heading'},h('div',{},h('h1',{},'Inbox')),h('div',{class:'actions'},button(icon('refresh'),()=>navigate('inbox'),'quiet icon-button',{'aria-label':'Refresh',title:'Refresh'}),bulk,clear)),bulkStatus,section);
-    const target=new URL(win.location.href).searchParams.get('inbox');
+    const params=new URL(win.location.href).searchParams;
+    const target=params.get('notification') || params.get('inbox');
     if(target){const item=deliveries.status==='fulfilled' && deliveries.value.items?.find(item=>item.id===target);const card=item?.approval_id && pendingApproval(item)?approvalCard(item):[...section.querySelectorAll('[data-inbox-id]')].find(el=>el.dataset.inboxId===target);card?.scrollIntoView?.({block:'center'});if(card?.matches('.approval'))card.focus();}
   }
   async function chats(version) {
@@ -775,7 +779,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(live){live=false;send(false);}
     };
   }
-  async function openSession(session) {
+  async function openSession(session, notificationTarget=null) {
     if(deletions.get(deletionKey(state.user?.id,session.id))==='deleted'){inform('This conversation was deleted. Its stored history is no longer available.');return;}
     disconnect();leaveConversation();
     const version = ++routeVersion,owner=state.user?.id;
@@ -798,7 +802,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!current())return;
         if(error.status===401){expiredSession();return;}
         const heading=header.querySelector('h1');heading.textContent=heading.title='Conversation unavailable';
-        content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id}));},'secondary'));
+        content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
         return;
       }
     }
@@ -843,7 +847,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       messages.removeEventListener('keydown',markInitialScrollIntent);
       messages.removeEventListener('scroll',noteInitialScroll);
     };
-    const shouldFollowInitialRestore=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString() && (!initialRestorePending || !initialScrollAway);
+    const shouldFollowInitialRestore=()=>!notificationTarget
+      && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100
+      && !win.getSelection()?.toString() && (!initialRestorePending || !initialScrollAway);
     stopDisclosureReachability=observeDisclosureReachability(messages,current);
     const resultIds=new Set();
     let reflowBackground=()=>({changed:false,tail:false});
@@ -883,29 +889,71 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let oldestOffset=result.offset ?? 0;
     const turnHint=h('p',{class:'caption turn-continuation',hidden:!result.turn_boundary?.truncated},'This turn continues earlier. Load older messages to see the rest.');
     messages.prepend(turnHint);
+    let more;
+    const loadOlder=async()=>{
+      if(!current() || oldestOffset<=0)return false;
+      const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
+      const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
+      if(version!==routeVersion)return false;
+      const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
+      const fragment=doc.createDocumentFragment();
+      const olderNodes=renderPage(page.items),earliest=turnHint.nextElementSibling;
+      const seam=olderNodes.at(-1);
+      if(seam?.matches?.('details.tool-activity') && earliest?.matches?.('details.tool-activity')) {
+        earliest.querySelector('.tool-rows').prepend(...seam.querySelector('.tool-rows').children);
+        refreshToolActivity(earliest);olderNodes.pop();
+      }
+      fragment.append(...olderNodes);
+      turnHint.after(fragment);
+      turnHint.hidden=!page.turn_boundary?.truncated;
+      oldestOffset=page.offset ?? offset;
+      reflowBackground();
+      if(!page.items?.length || oldestOffset===0)more?.remove();
+      messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
+      return Boolean(page.items?.length);
+    };
     if(oldestOffset > 0){
-      const more=button('Load older messages',e=>action(e.currentTarget,async()=>{
-        const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
-        const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
-        if(version !== routeVersion)return;
-        const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
-        const fragment=doc.createDocumentFragment();
-        const olderNodes=renderPage(page.items),earliest=turnHint.nextElementSibling;
-        const seam=olderNodes.at(-1);
-        if(seam?.matches?.('details.tool-activity') && earliest?.matches?.('details.tool-activity')) {
-          earliest.querySelector('.tool-rows').prepend(...seam.querySelector('.tool-rows').children);
-          refreshToolActivity(earliest);olderNodes.pop();
-        }
-        fragment.append(...olderNodes);
-        turnHint.after(fragment);
-        turnHint.hidden=!page.turn_boundary?.truncated;
-        oldestOffset=page.offset ?? offset;
-        reflowBackground();
-        if(!page.items?.length || oldestOffset === 0)more.remove();
-        messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
-      }),'secondary');messages.prepend(more);
+      more=button('Load older messages',e=>action(e.currentTarget,loadOlder),'secondary');
+      messages.prepend(more);
     }
     if (!result.items?.length) messages.append(empty('New chat',''));
+    let notificationTargetNode=null;
+    if(notificationTarget?.kind==='request'){
+      try{
+        const run=await api.request(`/runs/${encodeURIComponent(notificationTarget.run_id)}`);
+        if(!current())return;
+        if(run?.id!==notificationTarget.run_id || run.session_id!==session.id
+            || typeof run.input!=='string' || !run.input.trim())throw new Error('Request identity mismatch.');
+        const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
+          .find(node=>node.dataset.historyRun===run.id && node.dataset.historySession===session.id);
+        let anchor=findAnchor(),pages=0;
+        while(!anchor && oldestOffset>0 && pages++<100){
+          if(!await loadOlder())break;
+          anchor=findAnchor();
+        }
+        const target=h('article',{class:'message notification-target','data-notification-run':run.id,
+          'data-history-run':run.id,'data-history-session':session.id,tabindex:'-1'},
+        h('div',{class:'message-author'},run.status==='failed'?'Request needs attention'
+          :run.status==='completed'?'Request finished':'Request outcome unavailable',
+          messageTime(run.updated_at || run.created_at)),
+        h('p',{class:'notification-request-input'},run.input),
+        h('strong',{},run.status==='completed'?'Result':'Status'),
+        run.status==='completed' && typeof run.output==='string' && run.output.trim()
+          ? renderMarkdown(doc,run.output)
+          : h('p',{class:'notification-request-result'},run.status==='failed'
+            ? 'The request failed. Review its conversation for details.'
+            : `The request status is ${typeof run.status==='string'?run.status:'unavailable'}.`));
+        messages.querySelector('.empty')?.remove();
+        if(anchor)anchor.after(target);else messages.append(target);
+        notificationTargetNode=target;
+      }catch(error){
+        if(!current())return;
+        if(error.status===401){expiredSession();return;}
+        const unavailable=h('section',{class:'clarification-card notification-unavailable',role:'status'},
+          h('h3',{},'Request unavailable'),h('p',{},'This request is no longer available in this chat.'));
+        messages.append(unavailable);unavailable.scrollIntoView?.({block:'center'});
+      }
+    }
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
@@ -981,12 +1029,147 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
-    let approvalRevision=0, approvalPending=new Map(), genericApproval=false, currentApprovalRun=accepted?.id;
-    const renderApprovals=()=>{const count=approvalPending.size;approvalNotice.hidden=!count && !genericApproval;approvalNotice.textContent=count?`${count} action${count===1?'':'s'} needs your review. Open Inbox to see the exact request.`:genericApproval?'An action needs your review. Open Inbox to see the exact request.':'';};
-    const reconcileApprovals=async()=>{const revision=++approvalRevision;try{const data=await api.request('/approvals');if(version!==routeVersion || revision!==approvalRevision || !Array.isArray(data.items))return;const next=new Map(data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id) && !handledApprovals.has(approvalKey(item))).map(item=>[approvalKey(item),item]));for(const [key] of approvalPending)if(!next.has(key))handledApprovals.add(key);approvalPending=next;genericApproval=false;renderApprovals();if(next.size)connection.run('waiting_for_approval');}catch(error){if(version===routeVersion && error.status===401)expiredSession();}};
-    approvalState={reconcile:reconcileApprovals,run(id){currentApprovalRun=id;},event(item,runId){if(version!==routeVersion || handledApprovals.has(approvalKey({...item,run_id:runId})))return false;approvalRevision++;if(item.id || item.request_id){const value={...item,run_id:runId};approvalPending.set(approvalKey(value),value);}else genericApproval=true;renderApprovals();return true;},finish(runId){approvalRevision++;for(const [key,item] of approvalPending)if(item.run_id===runId){handledApprovals.add(key);approvalPending.delete(key);}genericApproval=false;renderApprovals();}};
+    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map();
+    let approvalRevision=0,approvalPending=new Map(),genericApproval=false,
+      currentApprovalRun=accepted?.id || notificationTarget?.run_id;
+    const placeApprovalCard=(card,item)=>{
+      const anchor=[...messages.querySelectorAll('[data-history-run]')].find(node=>
+        node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
+        && !node.matches('.approval-card'));
+      if(anchor?.matches('.live-message'))anchor.append(card);
+      else if(anchor)anchor.after(card);
+      else messages.append(card);
+    };
+    const renderApprovalCard=(item,status)=>{
+      const key=approvalKey(item);
+      let card=approvalCards.get(key);
+      if(!card){
+        card=h('section',{class:'card approval approval-card','data-approval-id':item.id,
+          'data-history-run':item.run_id,'data-history-session':session.id,tabindex:'-1',
+          'aria-labelledby':`approval-title-${item.id}`});
+        approvalCards.set(key,card);
+      }
+      const labels={pending:'Approval required',expired:'Expired',resolved:'Resolved',
+        resolved_external:'No longer pending',cancelled:'Cancelled',unknown:'Decision status unknown',
+        sending:'Decision pending',unavailable:'Approval unavailable',details_unavailable:'Approval details unavailable'};
+      const command=typeof item.command==='string'?item.command
+        :typeof item.action==='string'?item.action:'';
+      const target=typeof item.target==='string'?item.target:'';
+      const canDecide=status==='pending' && item.executable===true
+        && Array.isArray(item.choices) && item.choices.includes('once') && item.choices.includes('deny');
+      const detailsUnavailable=item.details_unavailable===true || status==='details_unavailable';
+      const contents=[h('h3',{id:`approval-title-${item.id}`},labels[status] || 'Approval unavailable')];
+      if(typeof item.title==='string' && item.title.trim())contents.push(h('p',{},item.title));
+      if(command)contents.push(h('pre',{class:'review-payload'},command));
+      if(target)contents.push(h('p',{},'Target: ',target));
+      if(!command && typeof item.error==='string')contents.push(h('p',{class:'caption'},item.error));
+      if(status==='pending' && Number.isFinite(item.expires_at))
+        contents.push(h('p',{class:'caption'},'Expires: ',date(item.expires_at)));
+      if(detailsUnavailable)contents.push(h('p',{class:'caption'},'No decision was sent. Review this action in the native client.'));
+      const decisions=h('div',{class:'actions'});
+      const decide=(choice,control)=>action(control,async()=>{
+        const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+          && approvalCards.get(key)===card && card.isConnected && approvalPending.get(key)===item;
+        if(!sameApproval())return;
+        if(choice==='once')await ceremony('verify');
+        if(!sameApproval())return;
+        try{
+          await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
+            {method:'POST',body:{decision:choice}});
+        }catch(error){
+          if([404,409].includes(error.status) && sameApproval()){await reconcileApprovals();return;}
+          throw error;
+        }
+        if(!sameApproval())return;
+        handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'resolved');
+        renderApprovals();
+      });
+      if(canDecide){
+        decisions.append(button('Approve once',event=>decide('once',event.currentTarget),'primary'),
+          button('Deny',event=>decide('deny',event.currentTarget),'secondary'));
+        contents.push(decisions);
+      }
+      card.replaceChildren(...contents);
+      placeApprovalCard(card,item);
+      return card;
+    };
+    const renderApprovals=()=>{
+      const count=approvalPending.size;
+      approvalNotice.hidden=!count && !genericApproval;
+      approvalNotice.textContent=count?`${count} approval${count===1?'':'s'} require your review.`
+        :genericApproval?'An approval needs review. Open this chat to check its current state.':'';
+      for(const [key,item] of approvalItems){
+        if(item.session_id!==session.id && item.run_id!==currentApprovalRun)continue;
+        renderApprovalCard(item,approvalPending.has(key)?'pending':approvalFinals.get(key) || 'unavailable');
+      }
+    };
+    const reconcileApprovals=async()=>{
+      const revision=++approvalRevision;
+      try{
+        const data=await api.request('/approvals');
+        if(version!==routeVersion || revision!==approvalRevision || !Array.isArray(data.items))return;
+        const items=data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id)
+          && !handledApprovals.has(approvalKey(item)));
+        const next=new Map(items.map(item=>[approvalKey(item),item]));
+        for(const [key,item] of approvalPending)if(!next.has(key)){
+          handledApprovals.add(key);
+          if(!approvalFinals.has(key))approvalFinals.set(key,'unavailable');
+        }
+        approvalPending=next;
+        for(const [key,item] of next){approvalItems.set(key,item);approvalFinals.delete(key);}
+        genericApproval=false;renderApprovals();
+        if(next.size)connection.run('waiting_for_approval');
+      }catch(error){if(version===routeVersion && error.status===401)expiredSession();}
+    };
+    approvalState={
+      reconcile:reconcileApprovals,
+      run(id){currentApprovalRun=id;renderApprovals();},
+      event(item,runId){
+        const value={...item,run_id:runId,session_id:session.id},key=approvalKey(value);
+        if(version!==routeVersion || handledApprovals.has(key))return false;
+        approvalRevision++;
+        if(value.id || value.request_id){approvalItems.set(key,value);approvalPending.set(key,value);}
+        else genericApproval=true;
+        renderApprovals();return true;
+      },
+      finish(runId){
+        approvalRevision++;
+        for(const [key,item] of approvalPending)if(item.run_id===runId){
+          handledApprovals.add(key);approvalPending.delete(key);approvalFinals.set(key,'unavailable');
+        }
+        genericApproval=false;renderApprovals();
+      }
+    };
     win.addEventListener('focus',reconcileApprovals);stopExtras=()=>{approvalRevision++;win.removeEventListener('focus',reconcileApprovals);};
-    void reconcileApprovals();
+    await reconcileApprovals();
+    if(notificationTarget?.kind==='approval'){
+      const target=notificationTarget;
+      const targetKey=[...approvalItems].find(([,item])=>item.id===target.approval_id
+        && item.run_id===target.run_id && item.request_id===target.request_id
+        && item.session_id===session.id)?.[0];
+      if(!targetKey){
+        try{
+          const item=await api.request(`/approvals/${encodeURIComponent(target.approval_id)}`);
+          if(!current())return;
+          if(item?.id===target.approval_id && item.run_id===target.run_id
+              && item.request_id===target.request_id && item.session_id===session.id
+              && typeof item.status==='string'){
+            const key=approvalKey(item);approvalItems.set(key,item);
+            if(item.status==='pending' && item.executable===true)approvalPending.set(key,item);
+            else approvalFinals.set(key,item.status);
+            renderApprovals();
+          }
+        }catch(error){if(error.status===401){expiredSession();return;}}
+      }
+      const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===target.approval_id);
+      if(card){card.scrollIntoView?.({block:'center'});card.focus();}
+      else{
+        const unavailable=h('section',{class:'card approval approval-card notification-unavailable',
+          role:'status',tabindex:'-1'},h('h3',{},'Approval unavailable'),
+          h('p',{},'This approval is no longer pending in this chat.'));
+        messages.append(unavailable);unavailable.scrollIntoView?.({block:'center'});unavailable.focus();
+      }
+    }
     let pending=attempts.get(session.id);
     try {pending ||= JSON.parse(storage.get(key(`attempt:${session.id}`)));}catch{}
     if(pending && !Array.isArray(pending.attachment_ids) && pending.upload_pending!==true){
@@ -1382,6 +1565,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     content.classList.add('conversation');
     const priorExtras=stopExtras;stopExtras=()=>{stopInitialRestoreWatch();priorExtras?.();};
     messages.scrollTop=messages.scrollHeight;
+    if(notificationTargetNode){
+      notificationTargetNode.scrollIntoView?.({block:'center'});notificationTargetNode.focus();
+    }else if(notificationTarget?.kind==='approval'){
+      const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===notificationTarget.approval_id);
+      card?.scrollIntoView?.({block:'center'});card?.focus();
+    }
     if(!result.run && result.last_run)composerAction.attach(result.last_run);
     if(Object.hasOwn(result,'run')) {
       if(result.run) {
@@ -2134,7 +2323,37 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   async function start() {
     if(destroyed)return;
     disconnect();leaveConversation();releasePresenceIdentity();const version=++routeVersion;
-    try { const data = await api.request('/auth/me');if(destroyed || version!==routeVersion)return;await preparePresenceIdentity(data,()=>!destroyed && version===routeVersion);if(destroyed || version!==routeVersion)return; if(state.user?.id!==data.user.id){state.kind='chats';state.query='';state.searchOpen=false;state.offset=0;state.session=null;drafts.clear();attempts.clear();}state.user = data.user; shell(); await navigate(new URL(win.location.href).searchParams.has('inbox') ? 'inbox' : 'chats'); }
+    try {
+      const data=await api.request('/auth/me');
+      if(destroyed || version!==routeVersion)return;
+      await preparePresenceIdentity(data,()=>!destroyed && version===routeVersion);
+      if(destroyed || version!==routeVersion)return;
+      if(state.user?.id!==data.user.id){state.kind='chats';state.query='';state.searchOpen=false;state.offset=0;state.session=null;drafts.clear();attempts.clear();}
+      state.user=data.user;shell();
+      const params=new URL(win.location.href).searchParams;
+      const notification=params.get('notification') || params.get('inbox');
+      if(notification && validNotificationId(notification)){
+        try{
+          const target=await api.request(`/inbox/${encodeURIComponent(notification)}/target`);
+          if(destroyed || version!==routeVersion)return;
+          if(['request','approval'].includes(target?.kind)
+              && typeof target.session_id==='string' && target.session_id.length<=256
+              && typeof target.run_id==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(target.run_id)){
+            await openSession({id:target.session_id},{...target,notification_id:notification});
+            return;
+          }
+          await navigate('inbox');
+          return;
+        }catch(error){
+          if(destroyed || version!==routeVersion)return;
+          if(error.status===401){expiredSession();return;}
+          await navigate(params.has('inbox')?'inbox':'chats');
+          inform('This notification is no longer available.',true);
+          return;
+        }
+      }
+      await navigate(params.has('inbox')?'inbox':'chats');
+    }
     catch(error) { if(destroyed || version!==routeVersion)return;state.user = null; showAuth(); if (error.status !== 401) inform(errorMessage(error),true); }
   }
   await start();

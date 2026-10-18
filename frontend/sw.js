@@ -19,16 +19,16 @@ self.addEventListener('fetch',event=>{
   })());
 });
 function safeInboxId(value) {return typeof value==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;}
-function safeTarget(value) {
+function safeTarget(target) {
   const base=self.location.origin+'/hermes/';
   try {
-    const url=new URL(value || base,base);
-    if(url.origin!==self.location.origin || url.pathname!=='/hermes/' || url.hash)return base;
-    const entries=[...url.searchParams.entries()];
-    if(entries.length!==1)return base;
-    const [name,value]=entries[0],id=safeInboxId(value);
-    return id && ['notification','inbox'].includes(name)
-      ? base+'?'+name+'='+encodeURIComponent(id) : base;
+    const url=new URL(target || base,base);
+    if(url.origin!==self.location.origin || url.pathname!=='/hermes/')return base;
+    const targets=['notification','inbox'].flatMap(name=>
+      url.searchParams.getAll(name).map(value=>[name,value]));
+    if(targets.length!==1)return base;
+    const [name,idValue]=targets[0],id=safeInboxId(idValue);
+    return id ? base+'?'+name+'='+encodeURIComponent(id) : base;
   }catch{return base;}
 }
 self.addEventListener('push',event=>event.waitUntil((async()=>{

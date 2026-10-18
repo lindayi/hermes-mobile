@@ -912,23 +912,43 @@ class Orchestrator:
         ready = (getattr(self.gateway, 'action_approvals_ready', False) is True
                  and getattr(self.gateway, 'execution_ready', False) is True)
         action = json.loads(row['action'])
+        session_id = row['session_id'] if 'session_id' in row.keys() else None
+        status = row['status'] if 'status' in row.keys() else 'pending'
         if action.get('details_unavailable') is True:
             return dict(id=row['id'], run_id=row['run_id'], request_id=row['request_id'],
-                        expires_at=None, choices=[], executable=False,
+                        session_id=session_id, status=status, expires_at=None, choices=[], executable=False,
                         error='Native approval details are unavailable after interruption; review in the native client')
         return dict(action, id=row['id'], run_id=row['run_id'], request_id=row['request_id'],
-                    expires_at=row['expires_at'], choices=['once', 'deny'], executable=ready,
+                    session_id=session_id, status=status, expires_at=row['expires_at'], choices=['once', 'deny'], executable=ready,
                     error=None if ready else 'Native API cannot atomically bind decisions to this action')
 
     def approvals(self, user):
         if user['profile'] != self.profile:
             return {'items': []}
         with closing(self.journal.connect()) as c:
-            rows = c.execute("""SELECT a.* FROM orchestration_approvals a JOIN runs r ON a.run_id=r.id
+            rows = c.execute("""SELECT a.*,r.session_id FROM orchestration_approvals a JOIN runs r ON a.run_id=r.id
                 WHERE r.user_id=? AND r.profile=? AND r.status='waiting_for_approval'
                 AND ((a.status='pending' AND a.expires_at>?) OR a.status='details_unavailable') ORDER BY a.rowid LIMIT 1000""",
                 (user['id'], user['profile'], time.time())).fetchall()
         return {'items': [self._approval_view(row) for row in rows]}
+
+    def approval(self, user, approval_id):
+        if user['profile'] != self.profile:
+            raise KeyError(approval_id)
+        with closing(self.journal.connect()) as c:
+            row = c.execute("""SELECT a.*,r.user_id,r.profile,r.session_id,r.status AS run_status
+                FROM orchestration_approvals a JOIN runs r ON a.run_id=r.id
+                WHERE a.id=? AND r.user_id=? AND r.profile=?""",
+                (approval_id, user['id'], user['profile'])).fetchone()
+        if row is None:
+            raise KeyError(approval_id)
+        status = row['status']
+        if (status == 'pending' and type(row['expires_at']) in (int, float)
+                and row['expires_at'] <= time.time()):
+            status = 'expired'
+        elif status == 'pending' and row['run_status'] != 'waiting_for_approval':
+            status = 'unavailable'
+        return {**self._approval_view(row), 'status': status}
 
     async def decide(self, user, approval_id, decision):
         with closing(self.journal.connect()) as c:

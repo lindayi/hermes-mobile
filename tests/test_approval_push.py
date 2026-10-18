@@ -57,6 +57,6 @@ def test_resolved_approval_is_suppressed_but_cron_delivery_is_unchanged(tmp_path
     service.approval_validator = lambda *args: False
     result = service.flush()
     assert result['sent'] == 1, 'Resolved approval must not be pushed'
-    assert sent[0]['url'] == '/hermes/?inbox=' + cron['id']
+    assert sent[0]['url'] == '/hermes/?notification=' + cron['id']
     with service._db() as db:
         assert db.execute("SELECT count(*) FROM outbox WHERE status='suppressed'").fetchone()[0] == 1

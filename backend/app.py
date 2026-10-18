@@ -877,6 +877,13 @@ def create_app(settings=None, *, gateway_client=None):
     async def approvals(user=Depends(ready_user)):
         return runtime_for(user).approvals(user)
 
+    @app.get(BASE+'/approvals/{aid}')
+    async def approval(aid:str,user=Depends(ready_user)):
+        try:
+            return runtime_for(user).approval(user,aid)
+        except KeyError:
+            raise HTTPException(404,'Approval unavailable') from None
+
     @app.post(BASE+'/approvals/{aid}/decision')
     async def decide(aid:str,request:Request,user=Depends(ready_user)):
         auth.require_mutation(request,user)

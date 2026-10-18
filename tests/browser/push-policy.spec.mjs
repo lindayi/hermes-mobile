@@ -12,12 +12,12 @@ const repo=fileURLToPath(new URL('../../',import.meta.url));
 const defaults=()=>({revision:0,enabled:true,categories:{completion:true,approval:true,attention:true,scheduled:true,operational:true},hide_details:false});
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner'};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
   server=createServer(async(req,res)=>{
-   const path=new URL(req.url,'http://fixture').pathname;
+   const requestURL=new URL(req.url,'http://fixture'),path=requestURL.pathname;
    if(path.startsWith('/hermes/app-api/')){
     let raw='';for await(const part of req)raw+=part;
     const p=path.slice('/hermes/app-api'.length),call={p,method:req.method,body:raw?JSON.parse(raw):null,csrf:req.headers['x-csrf-token']};calls.push(call);
@@ -26,8 +26,15 @@ async function fixture(run){
     if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
     if(p==='/push/presence' && call.body.visible && control.presenceHold)await control.presenceHold;
     if(p==='/sessions')data={items:[{id:'session-one',title:'First conversation'},{id:'session-two',title:'Second conversation'}]};
+    if(p==='/inbox/notice-target/target' && control.notificationTarget)data=control.notificationTarget;
+    if(p==='/sessions/session-one' && control.notificationTarget)data={id:'session-one',title:'Exact notification chat'};
     if(p==='/push/key')data={public_key:'AQID'};
-    if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
+    if(p==='/sessions/session-one/messages' && control.notificationTarget){
+     data=requestURL.searchParams.has('offset')
+      ? {items:[{id:1,role:'user',content:'Original request',run_id:'older-run',session_id:'session-one'}],offset:0,total:11}
+      : {items:[{id:20,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}],offset:10,total:11};
+    }else if(p.endsWith('/messages')){if(control.messagesDelay)await new Promise(resolve=>setTimeout(resolve,control.messagesDelay));data={items:[],total:0};}
+    if(p==='/runs/older-run')data={id:'older-run',session_id:'session-one',input:'Original request',status:'completed',output:'Exact notification result',created_at:1,updated_at:2};
     if(p==='/push/preferences'){
      if(control.hold)await control.hold;
      if(req.method==='GET' && control.getError || req.method==='PUT' && control.putError){status=503;data={detail:'Synthetic unavailable'};}
@@ -45,8 +52,8 @@ async function fixture(run){
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const url=`http://127.0.0.1:${server.address().port}/hermes/`;
   // Mount the actual generated UI/API, retaining its disposal handle. No production auth or data.
-  async function mount(page){
-   await page.goto(url+'styles.'+ui.split('.')[1]+'.css');
+  async function mount(page,target=''){
+   await page.goto(url+'styles.'+ui.split('.')[1]+'.css'+target);
    await page.evaluate(async({ui})=>{document.body.innerHTML='<div id="app"></div>';const style=document.createElement('link');style.rel='stylesheet';style.href='./styles.'+ui.split('.')[1]+'.css';document.head.append(style);const {createAPI}=await import('./api.'+ui.split('.')[1]+'.mjs');const {mountApp}=await import('./'+ui);window.app=await mountApp(document,createAPI(),window);},{ui});
   }
   await mount(page);
@@ -259,7 +266,7 @@ test('generated service worker renders validated informative previews with inbox
  const payload={title:'Request complete',body:'Your document is ready for review.',inbox_id:'notice-123',url:fixture.url+'?inbox=notice-123'};
  const displayed=await push(payload);
  assert.equal(displayed.title,payload.title);assert.equal(displayed.body,payload.body);
- assert.equal(displayed.tag,'hermes-notice-123');assert.equal(displayed.data.url,payload.url);
+ assert.equal(displayed.tag,'hermes-notice-123');assert.equal(displayed.data.url,fixture.url+'?notification=notice-123');
  assert.equal(displayed.icon,new URL('./'+(await readdir(fixture.dir+'/icons')).find(n=>/^icon-192\./.test(n)),fixture.url+'icons/').pathname);
  assert.equal(displayed.image,undefined);assert.equal(displayed.actions,undefined);
  const privacy=await push({...payload,title:'Hermes',body:'Open Hermes to read your update.'});
@@ -302,18 +309,33 @@ test('service worker rejects malformed previews and binds navigation and tag to 
  }
  for(const url of ['https://evil.test/hermes/?inbox=other',base+'?inbox=other#approve',base+'../app-api/approvals/a',base+'?inbox=notice-123&approve=yes']){
   const shown=await push({title:'Safe',body:'Safe',inbox_id:'notice-123',url});
-  assert.equal(shown.tag,'hermes-notice-123');assert.equal(shown.data.url,base+'?inbox=notice-123','tag and destination refer to the same inbox receipt');
+  assert.equal(shown.tag,'hermes-notice-123');assert.equal(shown.data.url,base+'?notification=notice-123','tag and destination refer to the same opaque notification');
  }
  const clicks=await worker.evaluate(async()=>{
   const calls=[];self.clients.matchAll=async()=>[{url:self.location.origin+'/hermes/',navigate:async url=>calls.push(['navigate',url]),focus:async()=>calls.push(['focus'])}];
   self.clients.openWindow=async url=>calls.push(['open',url]);
   self.fetch=async()=>{throw new Error('notification click must not fetch or mutate');};
-  for(const url of ['https://evil.test/hermes/?inbox=n',self.location.origin+'/hermes/?inbox=notice-123&approve=1#send']){
+  for(const url of ['https://evil.test/hermes/?inbox=n',self.location.origin+'/hermes/?inbox=notice-123&approve=1#send',self.location.origin+'/hermes/?notification=notice-123&approve=1']){
    const event=new Event('notificationclick');event.notification={data:{url},close:()=>calls.push(['close'])};let pending;event.waitUntil=p=>pending=p;self.dispatchEvent(event);await pending;
   }
   return calls;
  });
- assert.deepEqual(clicks,[['close'],['navigate',base],['focus'],['close'],['navigate',base+'?inbox=notice-123'],['focus']]);
+ assert.deepEqual(clicks,[['close'],['navigate',base],['focus'],['close'],['navigate',base+'?inbox=notice-123'],['focus'],['close'],['navigate',base+'?notification=notice-123'],['focus']]);
+}));
+test('generated app restores opaque and legacy notification links to the exact older request',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ control.notificationTarget={kind:'request',session_id:'session-one',run_id:'older-run'};
+ for(const target of ['?notification=notice-target','?inbox=notice-target']){
+  await mount(page,target);
+  await page.locator('[data-notification-run="older-run"]').waitFor();
+  const card=page.locator('[data-notification-run="older-run"]');
+  assert.match(await card.innerText(),/Original request/);assert.match(await card.innerText(),/Exact notification result/);
+  assert.equal(await page.getByRole('heading',{name:'Exact notification chat'}).count(),1);
+  assert.ok(calls.some(call=>call.p==='/inbox/notice-target/target'));
+  assert.ok(calls.some(call=>call.p==='/sessions/session-one/messages' && call.method==='GET'));
+  assert.ok(calls.some(call=>call.p==='/runs/older-run'));
+  assert.equal(await page.locator('.bottom-nav [aria-current="page"]').getAttribute('data-view'),'chats');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ }
 }));
 test('pending presence cannot renew during account revalidation or after a new owner',{timeout:30000},()=>fixture(async({page,control,calls})=>{
  await page.clock.install();

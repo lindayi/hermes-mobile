@@ -492,7 +492,7 @@ class NotificationService:
                     prefs = self._preferences(db, row['user_id'], row['device_id'])
                     preview = GENERIC_PREVIEW if prefs['hide_details'] else safe_preview(notice['title'], notice['body'])
                     payload = {**preview,
-                               'url': '/hermes/?inbox=' + row['inbox_id'], 'tag': row['inbox_id'],
+                               'url': '/hermes/?notification=' + row['inbox_id'], 'tag': row['inbox_id'],
                                'inbox_id': row['inbox_id']}
                     db.commit()
                 # After this committed claim, revocation cannot recall a payload.
