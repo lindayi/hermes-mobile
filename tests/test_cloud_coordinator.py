@@ -10887,6 +10887,306 @@ def test_owner_abandonment_legacy_lineage_seam_apply_restart(
 
 
 @pytest.mark.parametrize("publication", ["source", "reviewer"])
+def test_owner_abandonment_direct_v1_live_main_sha_fills_read_only_view(
+        tmp_path, publication):
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if (action.get("kind") == "fix"
+            and action["key"] != abandoned["key"]
+            and action.get("owner_abandonment_binding"))
+    )
+    assert successor.get("task_type") != "neutral"
+    result_head = successor["head"]
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=result_head, base_sha=CURRENT_MAIN,
+    )
+    api.head_sha = api.pull["head"]["sha"] = result_head
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(draft=True, mergeable=True, mergeable_state="clean")
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.unresolved = True
+    api.review_state = "APPROVED"
+    api.review_sha = result_head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    before = StateStore(store.path).snapshot()
+    proof = next(
+        proof for proof in before["enrollments"]["16"]["receipt_proofs"]
+        if proof["task_id"] == successor["task_id"]
+    )
+    live = before["actions"][successor["key"]]
+    assert proof["receipt_version"] == "v1"
+    assert "main_sha" in live and live["main_sha"]
+    assert "main_sha" in proof
+    recovery = before["enrollments"]["16"]["owner_abandonments"][0]
+    snapshot = {"issue": 16, "pull": api.pull, "comments": api.comments}
+    assert Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_successor_proven(snapshot, recovery)
+    StateStore(store.path)._mutate(
+        lambda state: next(
+            proof for proof in state["enrollments"]["16"]["receipt_proofs"]
+            if proof["task_id"] == successor["task_id"]
+        ).pop("main_sha"),
+    )
+    before = StateStore(store.path).snapshot()
+    assert Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._owner_abandonment_successor_proven(snapshot, recovery)
+    _, authorized, blocked = cloud_coordinator._authorized_result_heads(
+        16, before["enrollments"]["16"], before["actions"], api.comments,
+        CURRENT_MAIN,
+    )
+    assert result_head in authorized and result_head not in blocked
+    retained = deepcopy(before["enrollments"]["16"]["receipt_proofs"])
+    reservation = deepcopy(before["actions"][abandoned["key"]])
+    posts = api.task_posts
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    assert Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._authorized_dispatch_head(16, result_head, CURRENT_MAIN)
+    if publication == "source":
+        api.pull["draft"] = False
+        api.unresolved = False
+        api.source_failure = True
+        api.source_failure_sha = result_head
+        api.review_state = "APPROVED"
+        api.review_sha = result_head
+    else:
+        api.pull["draft"] = False
+        api.unresolved = False
+        api.review_state = api.review_sha = None
+        api.requested_reviewers = []
+
+    for poll in range(2):
+        result = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.task_posts == posts + int(
+            poll == 0 and publication == "source"
+        )
+        assert "unauthorized-continuation" not in result["pull_requests"][0]["reasons"]
+        assert len([
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ]) == len(reviewer_writes) + int(
+            poll == 0 and publication == "reviewer"
+        )
+        after = StateStore(store.path).snapshot()
+        assert after["enrollments"]["16"]["receipt_proofs"] == retained
+        assert after["actions"][abandoned["key"]] == reservation
+        if poll == 0:
+            posts = api.task_posts
+            reviewer_writes = [
+                write for write in api.writes
+                if write[0].endswith("/requested_reviewers")
+            ]
+        else:
+            assert api.task_posts == posts
+            assert [
+                write for write in api.writes
+                if write[0].endswith("/requested_reviewers")
+            ] == reviewer_writes
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
+@pytest.mark.parametrize("authority", ["initial", "owner-authorized"])
+def test_sha_bound_receipt_conflict_blocks_head_publication_after_restart(
+        tmp_path, publication, authority):
+    api, store, _, action = _ready_sha_bound_handoff(tmp_path)
+    head = RESULT_HEAD
+
+    def configure(state):
+        enrollment = state["enrollments"]["16"]
+        if authority == "initial":
+            enrollment["authorized_head"] = head
+            enrollment.pop("owner_authorized_head", None)
+        else:
+            enrollment["owner_authorized_head"] = head
+        state["actions"][action["key"]]["attempt"] += 1
+
+    StateStore(store.path)._mutate(configure)
+    api.current_main_sha = BASE
+    api.pull["base"]["sha"] = BASE
+    api.pull.update(mergeable=True, mergeable_state="clean")
+    api.unresolved = False
+    api.requested_reviewers = []
+    if publication == "source":
+        api.source_failure = True
+        api.source_failure_sha = head
+        api.review_state = "APPROVED"
+        api.review_sha = head
+    else:
+        api.source_failure = False
+        api.source_failure_sha = None
+        api.review_state = api.review_sha = None
+
+    before = StateStore(store.path).snapshot()
+    posts = api.task_posts
+    reviewer_writes = [
+        write for write in api.writes
+        if write[0].endswith("/requested_reviewers")
+    ]
+    coordinator = Coordinator(api, StateStore(store.path), clock=lambda: 1790856660)
+    assert not coordinator._authorized_dispatch_head(
+        16, head, BASE, require_base_match=True,
+    )
+    for poll in range(2):
+        Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        ).run(apply=True)
+        assert api.task_posts == posts
+        assert len([
+            write for write in api.writes
+            if write[0].endswith("/requested_reviewers")
+        ]) == len(reviewer_writes)
+        after = StateStore(store.path).snapshot()
+        for field in ("attempt", "receipt_body", "receipt_comment_id", "task_id"):
+            assert after["actions"][action["key"]][field] == before["actions"][
+                action["key"]
+            ][field]
+        assert after["enrollments"]["16"]["receipt_proofs"] == before[
+            "enrollments"
+        ]["16"]["receipt_proofs"]
+        assert after["enrollments"]["16"]["attempts"] == before[
+            "enrollments"
+        ]["16"]["attempts"]
+        if poll == 0:
+            posts = api.task_posts
+            reviewer_writes = [
+                write for write in api.writes
+                if write[0].endswith("/requested_reviewers")
+            ]
+        else:
+            assert api.task_posts == posts
+            assert [
+                write for write in api.writes
+                if write[0].endswith("/requested_reviewers")
+            ] == reviewer_writes
+
+
+@pytest.mark.parametrize("authority", ["initial", "owner-authorized"])
+def test_sha_bound_matched_live_receipt_preserves_head_authority(
+        tmp_path, authority):
+    api, store, _, _ = _ready_sha_bound_handoff(tmp_path)
+    head = RESULT_HEAD
+
+    def configure(state):
+        enrollment = state["enrollments"]["16"]
+        if authority == "initial":
+            enrollment["authorized_head"] = head
+            enrollment.pop("owner_authorized_head", None)
+        else:
+            enrollment["owner_authorized_head"] = head
+
+    StateStore(store.path)._mutate(configure)
+    assert Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )._authorized_dispatch_head(16, head, BASE, require_base_match=True)
+
+
+def test_sha_bound_receipt_conflict_does_not_block_unrelated_authorized_head(
+        tmp_path):
+    api, store, _, action = _ready_sha_bound_handoff(tmp_path)
+    unrelated_head = "f" * 40
+
+    def configure(state):
+        state["enrollments"]["16"]["authorized_head"] = unrelated_head
+        state["actions"][action["key"]]["attempt"] += 1
+
+    StateStore(store.path)._mutate(configure)
+    enrollment = StateStore(store.path).snapshot()["enrollments"]["16"]
+    _, authorized, blocked = cloud_coordinator._authorized_result_heads(
+        16, enrollment, StateStore(store.path).actions(), api.comments, BASE,
+    )
+
+    assert unrelated_head in authorized
+    assert unrelated_head not in blocked
+    assert RESULT_HEAD in blocked
+
+
+def test_owner_abandonment_continuation_fallback_rejects_attempt_conflict(
+        tmp_path):
+    api, store, abandoned = _owner_abandonment_case(tmp_path)
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    successor = next(
+        action for action in StateStore(store.path).actions().values()
+        if action.get("owner_abandonment_binding")
+        and action["key"] != abandoned["key"]
+    )
+    start_head = successor["head"]
+    result_head = start_head
+    api.complete_task(
+        successor["task_id"], successor,
+        head_sha=result_head, base_sha=CURRENT_MAIN,
+    )
+    api.pull["draft"] = True
+    api.unresolved = True
+    api.source_failure = False
+    api.source_failure_sha = None
+    api.review_state = "APPROVED"
+    api.review_sha = start_head
+    Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    ).run(apply=True)
+
+    before = StateStore(store.path).snapshot()
+    action = before["actions"][successor["key"]]
+    assert action["receipt_start_head"] == start_head
+    assert action["receipt_head"] == result_head
+    restarted = Coordinator(
+        api, StateStore(store.path), clock=lambda: 1790856660,
+    )
+    assert restarted._authorized_dispatch_head(
+        16, start_head, CURRENT_MAIN, continuation_action=action,
+    )
+    StateStore(store.path)._mutate(
+        lambda state: state["actions"][successor["key"]].__setitem__(
+            "attempt", action["attempt"] + 1,
+        ),
+    )
+    writes, posts = deepcopy(api.writes), api.task_posts
+    for _ in range(2):
+        restarted = Coordinator(
+            api, StateStore(store.path), clock=lambda: 1790856660,
+        )
+        assert not restarted._authorized_dispatch_head(
+            16, start_head, CURRENT_MAIN, continuation_action=action,
+        )
+        result = restarted.run(apply=True)["pull_requests"][0]
+        assert "task-result-blocked" not in result["reasons"]
+        assert api.writes == writes
+        assert api.task_posts == posts
+        after = StateStore(store.path).snapshot()
+        assert after["actions"][abandoned["key"]] == before["actions"][
+            abandoned["key"]
+        ]
+        assert after["enrollments"]["16"]["receipt_proofs"] == before[
+            "enrollments"
+        ]["16"]["receipt_proofs"]
+        assert after["enrollments"]["16"]["attempts"] == before[
+            "enrollments"
+        ]["16"]["attempts"]
+        assert after["actions"][successor["key"]]["attempt"] == (
+            action["attempt"] + 1
+        )
+        before = after
+
+
+@pytest.mark.parametrize("publication", ["source", "reviewer"])
 @pytest.mark.parametrize("conflict", ["attempt", "receipt_body", "absent", "empty"])
 def test_bare_final_authorization_reconciles_existing_live_receipt(
         tmp_path, monkeypatch, publication, conflict):
@@ -13967,9 +14267,9 @@ def test_reviewer_publication_fences_late_owner_continuation_removal(
     proof_reads = 0
     removed = []
 
-    def prove_then_remove(snapshot):
+    def prove_then_remove(snapshot, **kwargs):
         nonlocal proof_reads
-        proved = prove_head(snapshot)
+        proved = prove_head(snapshot, **kwargs)
         proof_reads += 1
         if proof_reads == 4:
             StateStore(store.path)._mutate(

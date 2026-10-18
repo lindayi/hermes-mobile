@@ -2014,6 +2014,11 @@ including attempt and repair metadata.
 Canonical value or presence conflicts deny source and reviewer publication and
 remain retained; identical or reordered canonical copies and authentic legacy
 omissions remain valid.
+An authenticated live v1 projection may supply omitted legacy values to a
+read-only candidate only after the receipt pair matches. Conflicting copies block
+their affected start and result heads, including initial or separately authorized
+heads and continuation fallbacks; unrelated authorized history remains usable.
+Authenticated typed blockers remain visible during planning.
 An authenticated retained receipt may omit its legacy reservation key. Reconcile
 that proof by its exact task ID, without adding a key to persisted history.
 Explicit null, empty, or malformed keys remain invalid. Keyless successor proofs
@@ -2033,8 +2038,9 @@ Missing or ambiguous original evidence and explicit malformed keys fail closed.
 A live action may omit its embedded key when its action-map key proves it;
 explicit key mismatches and task aliases still conflict. Key and task joins use
 the existing v1 omission rules for receipt version, main SHA and task type, while
-retaining authenticated supplied values for downstream checks. Require receipt
-base equality for v2 or an explicitly supplied main SHA, not an omitted v1 field.
+retaining authenticated supplied values in a read-only candidate for downstream
+checks. Never backfill the retained proof. Require receipt base equality for v2
+or an explicitly supplied main SHA, not an omitted v1 field.
 Historical-base ancestry checks and active-writer exclusion remain mandatory.
 
 ACK-backed lifecycle retirement does not erase history. The optional

@@ -3948,6 +3948,17 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
     }
     proof_task_ids = {proof["task_id"] for proof in proof_records}
     invalid_proof_keys, invalid_task_ids = set(), set()
+    conflicting_heads = set()
+
+    def mark_conflict(*records):
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            conflicting_heads.update(
+                head for field in ("receipt_start_head", "receipt_head")
+                if _is_sha(head := record.get(field))
+            )
+
     proofs_by_key, proofs_by_task = {}, {}
     for proof in proof_records:
         if isinstance(proof.get("key"), str):
@@ -3960,6 +3971,7 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 _canonical_receipt_json(record) != canonical for record in records[1:]):
             invalid_proof_keys.add(key)
             invalid_task_ids.update(record["task_id"] for record in records)
+            mark_conflict(*records)
     for task_id, records in proofs_by_task.items():
         canonical = _canonical_receipt_json(records[0])
         if (len({record.get("key") for record in records}) != 1
@@ -3972,6 +3984,7 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 record["key"] for record in records
                 if isinstance(record.get("key"), str)
             )
+            mark_conflict(*records)
 
     for proof in proofs:
         if type(proof["issue"]) is int and proof["issue"] != issue:
@@ -3982,12 +3995,14 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 invalid_task_ids.update(
                     item["task_id"] for item in proofs_by_key[proof_key]
                 )
+                mark_conflict(*proofs_by_key[proof_key])
             if isinstance(task_id, str) and task_id in proof_task_ids:
                 invalid_task_ids.add(task_id)
                 invalid_proof_keys.update(
                     item["key"] for item in proofs_by_task[task_id]
                     if isinstance(item.get("key"), str)
                 )
+                mark_conflict(*proofs_by_task[task_id])
 
     live_records = []
     for key, candidate in actions.items():
@@ -4039,6 +4054,7 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 or proof["task_id"] != task_id
                 or not _receipt_proof_matches_live(proof, candidate)
                 for proof in matching_proofs):
+            mark_conflict(candidate, *matching_proofs)
             invalid_proof_keys.update(linked_keys)
             invalid_proof_keys.update(
                 proof["key"] for proof in matching_proofs
@@ -4070,6 +4086,7 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 for record in records[1:]):
             invalid_proof_keys.add(key)
             invalid_task_ids.update(record["task_id"] for record in records)
+            mark_conflict(*records)
     for task_id, records in live_by_task.items():
         canonical = _canonical_receipt_json(_receipt_projection(records[0]))
         if (len({
@@ -4087,6 +4104,7 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
                 else ("legacy-task", record["task_id"])
                 for record in records
             )
+            mark_conflict(*records)
 
     candidates_by_key = {
         key: records[0] for key, records in proofs_by_key.items()
@@ -4100,6 +4118,10 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
         if key in invalid_proof_keys or records[0]["task_id"] in invalid_task_ids:
             continue
         if key in candidates_by_key:
+            candidates_by_key[key] = {
+                **_receipt_projection(records[0]),
+                **candidates_by_key[key],
+            }
             continue
         candidates_by_key[key] = records[0]
     candidates = [
@@ -4107,8 +4129,11 @@ def _reconciled_receipt_records(issue, enrollment, actions, comments):
         if candidate.get("task_id") not in invalid_task_ids
         and _valid_receipt_proof(candidate, comments)
     ]
-    return candidates, authenticated_blockers, not (
-        invalid_proof_keys or invalid_task_ids
+    return (
+        candidates,
+        authenticated_blockers,
+        not (invalid_proof_keys or invalid_task_ids),
+        conflicting_heads,
     )
 
 
@@ -4141,11 +4166,15 @@ def _authorized_result_heads(issue, enrollment, actions, comments, base_sha):
             enrollment, actions,
         )
     ]
-    blocked = set()
     reconciled = _reconciled_receipt_records(issue, enrollment, actions, comments)
     if reconciled is None:
         return initial, set(), set()
-    candidates, authenticated_blockers, _ = reconciled
+    candidates, authenticated_blockers, reconciliation_complete, conflicting_heads = (
+        reconciled
+    )
+    blocked = set(conflicting_heads)
+    if not reconciliation_complete and not blocked:
+        blocked.update(authorized)
     while True:
         changed = False
         for action in [*candidates, *authenticated_blockers]:
@@ -6479,7 +6508,7 @@ class Coordinator:
                             )
                     else:
                         if snapshot["enrollment"].get("authorized_head") is not None:
-                            _, authorized_heads, _ = _authorized_result_heads(
+                            _, authorized_heads, blocked_heads = _authorized_result_heads(
                                 number, snapshot["enrollment"], self.store.actions(),
                                 snapshot["comments"],
                                 snapshot["pull"].get("base", {}).get("sha"),
@@ -6502,8 +6531,9 @@ class Coordinator:
                                     snapshot["enrollment"], actions,
                                 )
                             )
-                            if (action.get("head") not in authorized_heads
-                                    and not continuation_start):
+                            if (action.get("head") in blocked_heads
+                                    or (action.get("head") not in authorized_heads
+                                        and not continuation_start)):
                                 if apply and not receipt_recovery:
                                     self._record_receipt_wait(key, action)
                                 mark_busy()
@@ -9622,6 +9652,8 @@ class Coordinator:
         )
         if head in authorized and head not in blocked:
             return True
+        if head in blocked:
+            return False
         if (not isinstance(continuation_action, dict)
                 or continuation_action.get("issue") != issue
                 or continuation_action.get("kind") != "fix"
