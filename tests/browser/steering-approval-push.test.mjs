@@ -1092,6 +1092,132 @@ test('request notification follows verified compression lineage',async()=>{
  }finally{app.destroy();win.close();}
 });
 
+for(const transport of ['events','polling'])test(`approval notification resumes an active aliased run over ${transport}`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ let owner='owner';
+ const approval={...approvalItem(),session_id:'s',run_session_id:'old-alias'};
+ const run={id:'r',session_id:'old-alias',status:'waiting_for_approval',input:'Aliased request',created_at:1};
+ let polledRun={...run};
+ class Events{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){this.closed=true;}
+ }
+ if(transport==='events')win.EventSource=Events;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target'){
+   if(owner!=='owner')throw Object.assign(new Error('No target for this owner'),{status:404});
+   return {kind:'approval',session_id:'s',run_session_id:'old-alias',run_id:'r',approval_id:'a',request_id:'native-a'};
+  }
+  if(p==='/sessions/s')return {id:'s',title:'Canonical chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,run};
+  if(p==='/approvals')return {items:[approval]};
+  if(p==='/approvals/a')return {...approval,status:'pending'};
+  if(p==='/runs/r/clarifications')return {run_id:'r',status:'waiting_for_approval',items:[],available:true};
+  if(p==='/runs/r')return polledRun;
+  if(p==='/auth/verify/options')return {challenge_id:'fixture',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {verified:true};
+  if(p==='/approvals/a/decision')return {status:'resolved'};
+  return {items:[]};
+ }},win);
+ try{
+  const card=doc.querySelector('[data-approval-id="a"]');
+  await waitFor(()=>card?.querySelector('button.primary'));
+  assert.equal(doc.querySelector('h1').textContent,'Canonical chat');
+  assert.equal(doc.querySelector('.live-message')?.dataset.historySession,'old-alias',
+   'the live run retains its original authorized session identity');
+  if(transport==='events'){
+   await waitFor(()=>win.activeStream);
+   const oldStream=win.activeStream;
+   oldStream.emit('delta',{text:'Resumed synthetic output'});
+   await waitFor(()=>doc.querySelector('.live-message')?.textContent.includes('Resumed synthetic output'));
+   card.querySelector('button.primary').click();
+   await waitFor(()=>calls.some(call=>call.p==='/approvals/a/decision'));
+   oldStream.emit('status',{status:'completed',output:'Terminal synthetic result',updated_at:2});
+  }else{
+   card.querySelector('button.primary').click();
+   await waitFor(()=>calls.some(call=>call.p==='/approvals/a/decision'));
+   const reads=()=>calls.filter(call=>call.p==='/runs/r').length;
+   for(const mismatched of [
+    {...run,id:'other-run',status:'completed',output:'Wrong run'},
+    {...run,session_id:'unrelated-alias',status:'completed',output:'Wrong session'}
+   ]){
+    const before=reads();polledRun=mismatched;win.dispatchEvent(new win.Event('focus'));
+    await waitFor(()=>reads()===before+1);await tick();
+    assert.doesNotMatch(doc.querySelector('.live-message').textContent,/Wrong run|Wrong session/,
+     'polling rejects a mismatched run or source-session identity');
+   }
+   polledRun={...run,status:'completed',output:'Polled synthetic result',updated_at:2};
+   const before=reads();win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>reads()===before+1);
+  }
+  const expected=transport==='events'?'Terminal synthetic result':'Polled synthetic result';
+  await waitFor(()=>doc.querySelector('.live-message')?.textContent.includes(expected));
+  assert.equal(doc.querySelector('.live-message')?.dataset.historySession,'old-alias');
+  assert.equal(calls.some(call=>call.p==='/inbox'),false);
+  assert.equal(calls.filter(call=>call.p==='/approvals/a/decision').length,1);
+ }finally{app.destroy();win.close();}
+});
+
+test('an aliased run stream cannot update the view after its owner changes',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ let owner='owner';
+ class Events{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){this.closed=true;}
+ }
+ win.EventSource=Events;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target'){
+   if(owner!=='owner')throw Object.assign(new Error('No target for this owner'),{status:404});
+   return {kind:'request',session_id:'s',run_session_id:'old-alias',run_id:'r'};
+  }
+  if(p==='/sessions/s')return {id:'s',title:'Canonical chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,run:{id:'r',session_id:'old-alias',status:'running',input:'Aliased request'}};
+  if(p==='/runs/r/clarifications')return {run_id:'r',status:'running',items:[],available:true};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>win.activeStream);
+  const stream=win.activeStream;
+  owner='another-owner';await app.start();
+  stream.emit('delta',{text:'Stale owner output'});
+  assert.equal(stream.closed,true);
+  assert.doesNotMatch(doc.body.textContent,/Stale owner output/);
+ }finally{app.destroy();win.close();}
+});
+
+test('an aliased run snapshot cannot attach after its canonical chat is left',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ let release;const delayed=new Promise(resolve=>release=resolve);
+ class Events{constructor(){this.listeners={};win.activeStream=this;}addEventListener(name,fn){this.listeners[name]=fn;}close(){}}
+ win.EventSource=Events;
+ const mounting=mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'request',session_id:'s',run_session_id:'old-alias',run_id:'r'};
+  if(p==='/sessions/s')return {id:'s',title:'Canonical chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,run:{id:'r',session_id:'old-alias',status:'running',input:'Aliased request'}};
+  if(p==='/runs/r/clarifications')return delayed;
+  return {items:[]};
+ }},win);
+ await waitFor(()=>calls.includes('/runs/r/clarifications'));
+ doc.querySelector('[data-view="chats"]').click();await tick();
+ release({run_id:'r',status:'running',items:[],available:true});
+ const app=await mounting;await tick();
+ try{assert.equal(win.activeStream,undefined,'a stale canonical view cannot resume its aliased run');}
+ finally{app.destroy();win.close();}
+});
+
 test('active run does not reset a request target and following resumes at the bottom',async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  Object.defineProperty(win.HTMLElement.prototype,'scrollHeight',{configurable:true,get(){return this.classList?.contains('messages')?1000:0;}});

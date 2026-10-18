@@ -2093,6 +2093,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   async function trackRun(run,messages,composerAction,replay=null,initialRestore={}) {
     disconnect();
     const version=routeVersion,connection=headerState;
+    const viewedSessionId=state.session.id;
     const sessionId=run.session_id || state.session.id;
     const atTail=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString();
     const followTail=()=>initialRestore.follow?.() ?? atTail();
@@ -2226,7 +2227,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               || currentClarificationQuestion!==item.question_id)return;
           const answerRevision=++clarificationRevision;
           const sameRoute=()=>version===routeVersion && state.user?.id===clarificationOwner
-            && state.session?.id===sessionId && run.id===article.dataset.historyRun
+            && state.session?.id===viewedSessionId && run.id===article.dataset.historyRun
             && article.isConnected;
           const answerStillCurrent=()=>sameRoute()
             && clarificationRevision===answerRevision && !stopPending
@@ -2333,7 +2334,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       try{
         const result=await api.request(`/runs/${encodeURIComponent(run.id)}/clarifications`);
         if(version!==routeVersion || state.user?.id!==clarificationOwner
-            || state.session?.id!==sessionId || run.id!==article.dataset.historyRun
+            || state.session?.id!==viewedSessionId || run.id!==article.dataset.historyRun
             || !article.isConnected || stopPending || clarificationRevision!==revision
             || sequence!==clarificationReconcileSequence
             || !Array.isArray(result?.items))return null;
@@ -2374,7 +2375,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         return {...result,status};
       }catch(error){
         if(version!==routeVersion || state.user?.id!==clarificationOwner
-            || state.session?.id!==sessionId || !article.isConnected
+            || state.session?.id!==viewedSessionId || !article.isConnected
             || clarificationRevision!==revision
             || sequence!==clarificationReconcileSequence)return null;
         clarificationUnavailable=true;
@@ -2492,7 +2493,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     const reconciledClarifications=await reconcileClarifications();
     if(version!==routeVersion || state.user?.id!==clarificationOwner
-        || state.session?.id!==sessionId || run.id!==article.dataset.historyRun
+        || state.session?.id!==viewedSessionId || run.id!==article.dataset.historyRun
         || !article.isConnected){
       initialRestore.finish?.();
       return;
