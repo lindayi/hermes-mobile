@@ -22,6 +22,7 @@ def genuine_review(api, head, *, state="COMMENTED"):
     api.review_sha = head
     api.review_state = state
     api.review_submitted_at = "2026-10-02T11:00:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.missing_review = False
 
 
@@ -132,6 +133,12 @@ def test_bound_proof_is_durable_before_compaction_and_survives_restart(tmp_path,
 def test_new_owner_sha_command_renews_active_enrollment_without_reset(tmp_path, pending):
     api, store, worker, action = bound_worker(tmp_path, sensitive=True)
     store.authorize_sensitive(16, HEAD)
+    seeded_enrollment = store.snapshot()["enrollments"]["16"]
+    legacy_sensitive_history = {
+        field: deepcopy(seeded_enrollment[field])
+        for field in ("sensitive_sha", "sensitive_authorization", "targeted_review")
+        if field in seeded_enrollment
+    }
     if not pending:
         api.tasks[action["task_id"]]["state"] = "failed"
         api.unresolved = False
@@ -151,7 +158,9 @@ def test_new_owner_sha_command_renews_active_enrollment_without_reset(tmp_path, 
     assert enrollment["authorized_head"] == HEAD
     assert enrollment["comment"] == 10001
     assert enrollment["attempts"] == 1
-    assert enrollment["sensitive_sha"] is None
+    assert {
+        field: enrollment.get(field) for field in legacy_sensitive_history
+    } == legacy_sensitive_history
     assert api.fix_attempts == 1
     if pending:
         assert store.action(action["key"])["task_id"] == action["task_id"]
@@ -197,22 +206,28 @@ def test_starter_rejects_edited_or_unverifiable_owner_commands(tmp_path, updated
     assert not any(route.endswith("/tasks") for route, _ in api.posts)
 
 
-def test_bound_result_head_clears_sensitive_authorization(tmp_path):
+def test_bound_result_head_preserves_legacy_sensitive_history(tmp_path):
     api, store, worker, action = bound_worker(tmp_path, sensitive=True, authorize=True)
+    legacy_history = {
+        "sensitive_sha": HEAD,
+        "sensitive_generation": 4,
+        "sensitive_authorization": {"legacy": "authorization"},
+        "targeted_review": {"legacy": "review"},
+    }
+    data = store.snapshot()
+    data["enrollments"]["16"].update(legacy_history)
+    store._save(data)
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["sensitive_sha"] == HEAD
-    assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
-    assert enrollment["targeted_review"]["head_sha"] == HEAD
     finish(api, action)
     api.unresolved = False
     result = worker.run(apply=True)["pull_requests"][0]
-    assert "sensitive" in result["reasons"]
-    assert not result["auto_merge_requested"]
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    assert "sensitive" not in result["reasons"]
+    assert result["auto_merge_requested"]
+    assert not any(event["reason"] == "sensitive_approval"
+                   for event in store.snapshot()["lifecycle_events"])
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_authorization"] is None
-    assert enrollment["targeted_review"] is None
-    # Select a fresh Copilot review for the result head with a new owner command.
+    assert {key: enrollment[key] for key in legacy_history} == legacy_history
     api.authorize_sha = RESULT_HEAD
     api.set_copilot_review(
         review_id=api.copilot_review_id + 1,
@@ -228,13 +243,8 @@ def test_bound_result_head_clears_sensitive_authorization(tmp_path):
         "updated_at": "2026-10-01T12:11:00Z",
     })
     result = worker.run(apply=True)["pull_requests"][0]
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] == RESULT_HEAD
     enrollment = store.snapshot()["enrollments"]["16"]
-    assert enrollment["sensitive_authorization"]["head_sha"] == RESULT_HEAD
-    assert enrollment["sensitive_authorization"]["review_id"] == api.copilot_review_id
-    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_review_digest
-    assert enrollment["targeted_review"]["head_sha"] == RESULT_HEAD
-    assert enrollment["targeted_review"]["review_id"] == api.copilot_review_id
+    assert {key: enrollment[key] for key in legacy_history} == legacy_history
     assert result["auto_merge_requested"]
 
 
@@ -1082,6 +1092,7 @@ def test_actual_paired_v2_main_advance_keeps_authority_but_requires_neutral_repa
     assert not run()["auto_merge_requested"]  # Previous review names the old head.
     api.review_sha = repaired_head
     api.review_submitted_at = "2026-10-01T12:07:01Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.pending_required = True
     assert not run()["auto_merge_requested"]
     api.pending_required = False

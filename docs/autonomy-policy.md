@@ -13,7 +13,11 @@ threads, and all three successful required CI checks. Coding bot ID `198982749`
 does not qualify. Missing, stale, pending, dismissed or rejecting reviews block.
 No independent report or `agent-review` publication is required for ordinary merge
 decisions. Historical pin/evidence notes below do not reinstate that requirement.
-Sensitive authorization and guarded exact-main deployment remain separate.
+Sensitive-path classification is informative only; owner enrollment defines
+permitted work. Current exact-head Copilot review, resolved conversations, required
+checks, and guarded exact-main deployment remain separate safeguards.
+The ordinary review gate requires affirmative authenticated unchanged submission
+metadata. Missing edit fields or failed actor, body, or head binding cannot qualify.
 
 GitHub's automatic Copilot review ruleset requests reviews. The coordinator,
 read-only validator, and manual operator require genuine current-head Copilot
@@ -26,7 +30,7 @@ a workflow wrapper, review service, independent reviewer, or human-review gate.
 A supervised operator may disposition a generic request for a non-required
 reviewer role only under the bounded
 [Supervised manual qualification contract](git-development-spec.md#supervised-manual-qualification);
-automatic evidence and authorization remain unchanged.
+automatic review evidence remains unchanged.
 
 ## Read-only validator
 
@@ -53,12 +57,10 @@ uses the executing trusted checkout's coordinator implementation, an explicit
 read-only coordinator state snapshot, and the positional baseline evidence file.
 There are no default state/evidence paths or candidate-source imports. It assembles
 `copilot_review` through the actual coordinator pull snapshot (including full-media
-reviews, authenticated edit metadata, complete check runs and thread pagination),
-classifies the changed files, and independently fetches the current owner command
-with `_current_sensitive_owner_command`. Persisted authorization alone is not proof.
-The selected enrollment must be explicitly active; disabled or malformed enrollment
-state cannot supply retained authorization. The final state fence detects revocation
-during collection.
+reviews, authenticated edit metadata, complete check runs and thread pagination)
+and classifies the changed files. It does not fetch or revalidate legacy sensitive
+authorization fields. The selected enrollment must be explicitly active; disabled
+or malformed enrollment state cannot supply permission.
 
 ```sh
 python3 scripts/autonomy_policy.py --phase staging --collect-review \
@@ -66,24 +68,30 @@ python3 scripts/autonomy_policy.py --phase staging --collect-review \
   /private/path/evidence.json
 ```
 
-Collection fences the authenticated owner/repository, current remote main, exact PR
-identity/head/base/open state, and protections before and after assembly. Only review
-and protection evidence is refreshed. Baseline `main.files`, `source_ci`, artifact
-and attestation evidence remains unchanged and must already be independently trusted;
+The bounded reads collect authenticated owner/repository identity, current main, the
+exact PR, branch protection and required-check policy, and the review, thread and
+check-run snapshot. After assembly, the final reads recheck identity, current main,
+pull identity/state, branch protection and required-check policy, and unchanged local
+state. The final fence does not re-fetch reviews, threads or check runs; review
+metadata, threads and check runs are validated from the earlier snapshot. Baseline
+`main.files`, `source_ci`, artifact and
+attestation evidence remains unchanged and must already be independently trusted;
 this mode does not qualify it as freshly collected or recreate artifact collection.
 The output includes the assembled evidence and the normal validator report. It writes
 no files or state and never plans/applies coordinator actions. A collection error
-blocks without emitting partial evidence or clearing persisted authorization.
-Malformed current owner-comment responses at either the initial or final read
-abort collection with `invalid-evidence`, not `sensitive-review-authorization`;
-no partial evidence is emitted and no authorization is cleared. HTTP 404 or a
-well-formed changed command still blocks sensitive authorization; a change at the
-final fence blocks the entire collection.
+blocks without emitting partial evidence or changing persisted state. Changes to
+identity, pull/head/base/state, main, protection policy or local state detected by
+the final reads block there. Review metadata, threads and check runs are validated
+from the collected snapshot, not re-read at that final fence. Old sensitive grant or
+owner-comment state is not fetched.
 
 Acceptance cases use only synthetic transports/state through the real CLI assembly
-and validator: valid sensitive evidence passes; absent, edited or wrong-context owner
-comments block; transient API failures preserve state and fail closed; final identity,
-head/base/main and protection changes block. The existing offline mode stays unchanged.
+and validator: sensitive evidence passes without a separate owner grant; missing,
+edited, or wrong-context legacy owner comments do not block or trigger a fetch;
+transient failures in unrelated required reads preserve state and fail closed; final
+identity, pull/head/base/main, and protection-policy changes block. Reviews, threads
+and check runs are validated from the collected snapshot. The existing offline mode
+stays unchanged.
 These tests are not live activation evidence or genuine Copilot review.
 
 The evidence must be collected independently from authenticated, read-only GitHub
@@ -107,11 +115,12 @@ resolves relative package imports and initializers and rejects unresolved local 
 unsupported dynamic imports. It does not discover arbitrary subprocess roots or
 establish complete execution-source coverage by itself.
 
-### Combined sensitive authorization and rendered-review candidate
+### Historical issue #100 authorization and rendered-review candidate
 
-The PR101 + PR103 assembly preserves issue #100's genuine Copilot-bound sensitive
+The PR101 + PR103 assembly preserved issue #100's former Copilot-bound sensitive
 review, separate immutable owner command and chronology, and read-only collector
-whose malformed/transient reads abort without clearing durable authority. It also
+whose malformed/transient reads aborted without clearing durable authority. This
+section is historical provenance, not current eligibility policy. It also
 preserves issue #102's rendered h3/p framing, strict counted inventories, unique
 discussion targets across sections, and conservative ambiguous-prose handling.
 The shared review source pin and newest literal fixture describe the combined
@@ -122,14 +131,27 @@ bytes; neither parent's separate review-source digest describes this assembly.
 | `deploy/cloud_coordinator.py` | `0e43fae886f34b897fd62dfd365869718ec40abc0c7e1e26b75adc445c158b33` |
 | `deploy/review_evidence.py` | `191c9633f7a50b8f8b8b58094795984bcedcf10643378e0c15d70da5e575b3f4` |
 
-Earlier fixture overlays and historical tables remain provenance only. These pins
-are not exact-head review acceptance, hosted CI evidence, merge authorization, or
-permission to deploy. Both behavioral contracts remain specified in
+Earlier fixture overlays and historical tables remain provenance only. These historical pins are not current source fingerprints, exact-head review
+acceptance, hosted CI evidence, merge authorization, or permission to deploy. Both
+behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
-### Issue #106 verification-status parser overlay
+### Issue #115 current coordinator source pin
 
-The current PR107 review-evidence overlay recognizes exactly two complete `COMMENTED`
+The current autonomy-policy source pins reflect the issue #115 coordinator and
+review-evidence bytes. Supplied review edit metadata must still prove an unchanged
+submission; retiring sensitive grants does not waive current-review validity.
+It is a source-integrity value only, not exact-head review, CI, merge, or deployment
+evidence.
+
+| Current source path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `672ee5b7072f4ed7221b39a8242cc9a0971f14d637a833029e7ad4989f590f45` |
+| `deploy/review_evidence.py` | `e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6` |
+
+### Historical Issue #106 verification-status parser overlay
+
+The PR107 review-evidence overlay recognized exactly two complete `COMMENTED`
 overview sentences as verification status:
 
 `The operationally sensitive coordinator gate lacks verified latest-head CI and required review evidence.`
@@ -142,12 +164,11 @@ stripped substantive prefix does not extend this set. It does not confer review,
 CI, or owner authority; the earlier issue #100 pin remains retained as
 historical provenance.
 
-| Current candidate path | SHA-256 |
+| Historical candidate path | SHA-256 |
 | --- | --- |
 | `deploy/review_evidence.py` | `7a30ae1ea17916f415aee7d4967aec5995df783bca3d36c2c2f8d958a53d7a69` |
 
-This candidate still requires fresh exact-head review and all required checks.
-Sensitive owner authorization remains a separate gate.
+The historical source overlay did not establish current review, CI, or merge evidence.
 
 ### PR #105 owner-authorized task-abandonment and anchor-retention candidate
 
@@ -758,10 +779,11 @@ requirements, or protection maps are relaxed. There is no caller override:
 or other caller claims cannot bypass a failed component.
 
 Complete synthetic fixtures now expect readiness and an empty blocker list in all
-three phases, including valid sensitive authorization. Negative fixtures continue
-to assert their actual component blockers without filtering them; malicious caller
-flags are tested against broken components. Synthetic readiness proves only the
-source policy behavior, not evidence authenticity or permission to operate.
+three phases when sensitive evidence is present without a separate owner grant.
+Negative fixtures continue to assert their actual component blockers without
+filtering them; missing or invalid Copilot review, failing CI, and other broken
+components remain blockers. Synthetic readiness proves only the source policy
+behavior, not evidence authenticity or permission to operate.
 
 The activation follow-up in issue #35 must still verify the actual current-main
 coordinator and complete control contract, authenticated API/source provenance and
@@ -810,26 +832,15 @@ current-main readback. Readiness requires:
   not strings or review-ID order. Every review and thread page must be complete
   and every thread resolved. All three required CI checks must also succeed.
 
-If the PR under review changes sensitive files, readiness additionally requires
-owner ID `5164171` authorization for that exact head, bound to one genuine current
-Copilot review in the complete authenticated `copilot_review.reviews` collection.
-The command is
-`/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`;
-the former head-only command cannot authorize sensitive work. The review must be a
-unique positive review ID authored by reviewer bot `175728472`, submitted with a
-valid timezone-aware timestamp, in state `COMMENTED` or `APPROVED`, on the exact
-head. Its raw UTF-8 body must match the command's SHA-256; complete rendered
-`body_html` and unchanged authenticated edit metadata are required. Historical
-independent reports and coding bot `198982749` do not authorize sensitive work.
-The selected record must remain the unique latest Copilot
-review; a missing, malformed, edited, removed, dismissed, duplicate, stale, negative,
-or conflicting record blocks with `sensitive-review-authorization`. Both the owner
-authorization and selected review are re-read during planning and the fresh status
-and merge fences. The positive proof also requires authenticated GraphQL
-`PullRequestReview` edit metadata bound to the same REST review identity/body/head;
-missing metadata, mismatches, or any edit signal block exactly like an edited
-record. A later head clears the authorization; approval is not blanket
-consent for future commits.
+Sensitive-path classification is informative and does not require a separate
+owner command or targeted review. Owner enrollment and its immutable authorized
+head define permitted work. Readiness still requires the unique latest genuine
+Copilot review from reviewer bot `175728472` on the exact head in state `COMMENTED`
+or `APPROVED`, complete review and thread pagination, resolved threads, and all
+three successful required checks. Its raw UTF-8 body, rendered `body_html`, and
+authenticated edit metadata remain bound and unchanged. Missing, malformed,
+edited, removed, dismissed, duplicate, stale, negative, or conflicting review
+evidence still blocks.
 
 ## Policy phases and activation
 
@@ -850,8 +861,8 @@ conversation resolution. In every phase, complete `source-ci` includes the publi
 native suite. Installed-runtime compatibility remains an exact-main guarded
 deployment gate, not a premerge host task. The validator never publishes statuses
 or performs a settings transition. It requires complete source/run/artifact
-provenance, changed-file classification, current genuine Copilot review, and
-sensitive owner authorization where applicable. Phase names remain for compatibility;
+provenance, changed-file classification, and current genuine Copilot review.
+Sensitive classification is not a separate authorization gate. Phase names remain for compatibility;
 they do not authorize changing the active three-check map.
 
 No coding task or validator performs settings changes or service activation. Do not
@@ -873,13 +884,8 @@ positive `pull_author_id`, open/draft state, complete changed-file classificatio
 for its exact head, complete review/thread pagination, review IDs, authors, valid
 timestamps, states and commit SHAs, resolved thread state, and real required
 check-run evidence. Ordinary merge evidence has no structured independent report.
-For a sensitive change it also carries the exact-head owner authorization and
-targeted-review identities. The collector must independently re-read the current
-owner comment from the authenticated GitHub issue-comment endpoint, verify its
-repository and PR `issue_url`, and supply `copilot_review.change.owner_command`
-with exactly `comment_id`, `actor_id`, `body`, `created_at`, and `updated_at`.
-The comment ID, owner identity, raw command body digest and creation time must
-match the authorization; `updated_at` must equal `created_at`. Missing, removed,
-edited or mismatched commands block readiness. Never reconstruct this record
-from the persisted authorization. Consult `deploy/autonomy_policy.py` for the executable
-field contract; missing fields block rather than defaulting to success.
+Sensitive classification does not require an owner command; the collector does
+not fetch or revalidate legacy sensitive-grant comments. Owner enrollment, source
+receipts, task occupancy, exact-head review evidence, and required checks retain
+their existing bindings. Consult `deploy/autonomy_policy.py` for the executable
+field contract; missing required fields block rather than defaulting to success.

@@ -4,7 +4,6 @@ import re
 from deploy.review_evidence import (
     current_copilot_review_valid,
     review_body_disposition,
-    sensitive_review_authorized,
 )
 
 REPOSITORY = 'lindayi/hermes-mobile'
@@ -189,8 +188,8 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    # Issue #108 / PR #109 reconciled with the merged Issue #111 continuation candidate.
-    'deploy/cloud_coordinator.py': '3c0e922cfb1ac77c4935fef2ca45fb2e75194d629e077533e740a4c05c358ec9',
+    # Issue #115 removes the separate sensitive-change owner-authorization gate.
+    'deploy/cloud_coordinator.py': '672ee5b7072f4ed7221b39a8242cc9a0971f14d637a833029e7ad4989f590f45',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -258,9 +257,14 @@ SOURCE_FINGERPRINTS = {
 }
 # Issue #106 verification-status parser overlay; preserve the earlier review pin above.
 ISSUE106_REVIEW_EVIDENCE_OVERLAY = {
-    'deploy/review_evidence.py': '7a30ae1ea17916f415aee7d4967aec5995df783bca3d36c2c2f8d958a53d7a69',
+    'deploy/review_evidence.py': '697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be',
 }
 SOURCE_FINGERPRINTS.update(ISSUE106_REVIEW_EVIDENCE_OVERLAY)
+# Issue #115 retains authenticated unchanged metadata in the ordinary review gate.
+ISSUE115_REVIEW_EVIDENCE_OVERLAY = {
+    'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
+}
+SOURCE_FINGERPRINTS.update(ISSUE115_REVIEW_EVIDENCE_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
@@ -517,17 +521,6 @@ def _check_review(evidence, main_sha, phase, blockers):
             or change.get('files_complete') is not True
             or type(change.get('sensitive')) is not bool):
         blockers.add('change-scope-evidence')
-    elif change['sensitive']:
-        authorization = change.get('owner_authorization')
-        targeted = change.get('targeted_review')
-        if not sensitive_review_authorized(
-                reviews, head, authorization, targeted, owner_id=OWNER_ID,
-                owner_command=change.get('owner_command'),
-                pull_author_id=review.get('pull_author_id'),
-                complete=review.get('reviews_complete')):
-            blockers.add('sensitive-review-authorization')
-
-
 def validate_transition(evidence, *, phase):
     """Validate injected read-only GitHub evidence and main-source contracts; perform no I/O."""
     blockers = set()

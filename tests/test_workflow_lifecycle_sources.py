@@ -25,6 +25,53 @@ HEAD = "a" * 40
 MERGE = "b" * 40
 
 
+def test_full_legacy_approval_queue_retires_without_forging_acknowledgements(tmp_path):
+    from deploy.cloud_coordinator import Coordinator, MAX_LIFECYCLE_EVENTS
+    from deploy.workflow_lifecycle import build_export
+
+    notification_paths, state_dir, _, _, _ = app_fixture(tmp_path / "app")
+    paths = LifecycleSourcePaths(
+        notifications=notification_paths, starter_state=tmp_path / "absent-starter.json",
+    )
+    store = StateStore(tmp_path / "coordinator" / "state.json")
+    legacy = [
+        pull_event(
+            {"issue": number + 1, "head": HEAD, "enrollment": {"comment": number + 1}},
+            "sensitive_approval", occurred_at="2026-10-01T20:58:00Z",
+            decision="authorize_sensitive_action",
+        )
+        for number in range(MAX_LIFECYCLE_EVENTS)
+    ]
+    for event in legacy:
+        store.record_lifecycle(event, now=NOW)
+    export = state_dir / "workflow-events.json"
+    export.write_text(json.dumps(build_export([legacy[0]], APP_OWNER, now=NOW)))
+    export.chmod(0o600)
+    os.utime(export, (NOW.timestamp(), NOW.timestamp()))
+    assert process(notification_paths, apply=True, now=NOW)["inbox_items"] == 1
+    adapter = state_dir / "workflow-notifications.sqlite"
+    acknowledged = adapter.read_bytes()
+
+    Coordinator(
+        EmptyLifecycleApi(), store, clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    restarted = StateStore(store.path)
+    assert restarted.snapshot()["lifecycle_events"] == []
+    assert restarted.snapshot()["lifecycle_context"]["events"] == legacy
+    assert adapter.read_bytes() == acknowledged
+    meaningful = issue_event(
+        31, "issue_failed", occurred_at="2026-10-01T20:59:00Z", incident="ordinary",
+    )
+    restarted.record_lifecycle(meaningful, now=NOW)
+    Coordinator(
+        EmptyLifecycleApi(), restarted, clock=NOW.timestamp, lifecycle_source_paths=paths,
+    ).run(apply=True)
+    assert restarted.snapshot()["lifecycle_events"] == [meaningful]
+    assert restarted.snapshot()["lifecycle_context"]["events"] == legacy
+    assert json.loads(export.read_text())["events"] == [meaningful]
+    assert adapter.read_bytes() == acknowledged
+
+
 def test_pull_lifecycle_events_preserve_authenticated_linked_issue_identity():
     linked = pull_event(
         {
@@ -500,23 +547,21 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
             if self.armed:
                 self.committed = True
                 if change == "authorized":
-                    # ACK retirement alone can clear the approval event: prove
-                    # authorization was committed before any handoff or race.
                     enrollment = self.snapshot()["enrollments"]["16"]
-                    assert enrollment["sensitive_sha"] == HEAD
-                    assert enrollment["sensitive_authorization"]["head_sha"] == HEAD
-                    assert enrollment["sensitive_authorization"]["review_id"] == api.copilot_review_id
-                    assert enrollment["sensitive_authorization"]["body_sha256"] == api.copilot_review_digest
-                    assert enrollment["targeted_review"]["head_sha"] == HEAD
-                    assert enrollment["targeted_review"]["review_id"] == api.copilot_review_id
+                    assert {
+                        key: enrollment[key] for key in legacy_history
+                    } == legacy_history
                 if failure == "race":
                     api.head_sha = "c" * 40
                     api.pull["head"]["sha"] = api.head_sha
             return result
 
     class FailingApi(FakeApi):
+        post_scan_reads = 0
+
         def get(self, route):
             if store.committed and failure == "api":
+                self.post_scan_reads += 1
                 raise error
             return super().get(route)
 
@@ -536,13 +581,19 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     merged = pull_event({"issue": 31, "head": HEAD, "enrollment": {"comment": 55}},
                         "merged", occurred_at="2026-10-01T20:58:00Z", merge_sha=MERGE)
     store.record_lifecycle(merged, now=NOW)
+    approval = pull_event({"issue": 16, "head": HEAD, "enrollment": {"comment": 123}},
+                          "sensitive_approval", occurred_at="2026-10-01T20:58:00Z",
+                          decision="authorize_sensitive_action")
+    store.record_lifecycle(approval, now=NOW)
     api = FailingApi(sensitive=True, unresolved=True)
     Coordinator(api, store, clock=NOW.timestamp, lifecycle_source_paths=paths).run(apply=True)
+    legacy_history = {}
     export = state_dir / "workflow-events.json"
     os.utime(export, (NOW.timestamp(), NOW.timestamp()))
     old_events = json.loads(export.read_bytes())["events"]
-    approval = next(e for e in old_events if e["reason"] == "sensitive_approval")
-    outcomes = [e for e in old_events if e["reason"] != "sensitive_approval"]
+    assert approval not in old_events
+    assert approval in store.snapshot()["lifecycle_context"]["events"]
+    outcomes = old_events
     assert {e["reason"] for e in outcomes} == {"merged", "controller_verified"}
     process(notification_paths, apply=True, now=NOW)
     ack_db = state_dir / "workflow-notifications.sqlite"
@@ -566,12 +617,30 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     else:
         api.head_sha = "c" * 40
         api.pull["head"]["sha"] = api.head_sha
+    if change == "authorized":
+        legacy_history = {
+            "sensitive_sha": HEAD,
+            "sensitive_generation": 4,
+            "sensitive_authorization": {"legacy": "authorization"},
+            "targeted_review": {"legacy": "review"},
+        }
+        data = store.snapshot()
+        data["enrollments"]["16"].update(legacy_history)
+        store._save(data)
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
     store.armed = True
     coordinator = Coordinator(api, store, clock=lambda: NOW.timestamp() + 60,
                               lifecycle_source_paths=paths)
     if failure == "race":
         coordinator.run(apply=True)
+    elif change == "head_changed":
+        # A blocked changed head no longer fetches evidence to send an obsolete
+        # sensitive approval prompt after the scan has committed.
+        result = coordinator.run(apply=True)["pull_requests"][0]
+        assert api.post_scan_reads == 0
+        assert "sensitive" not in result["reasons"]
+        assert "review" in result["reasons"]
+        assert not result["auto_merge_eligible"]
     else:
         with pytest.raises(type(error)) as caught:
             coordinator.run(apply=True)
@@ -579,9 +648,10 @@ def test_committed_scan_refreshes_source_export_before_handoff(tmp_path, change,
     assert api.writes == writes and api.graphql_writes == graphql_writes
     state = store.snapshot()
     if failure == "commit":
-        assert approval in state["lifecycle_events"]
+        assert approval in state["lifecycle_context"]["events"]
         assert all(event in state["lifecycle_events"] for event in outcomes)
     else:
+        assert approval not in state["lifecycle_events"]
         assert approval in state["lifecycle_context"]["events"]
         assert all(event in state["lifecycle_context"]["events"] for event in outcomes)
     if failure == "commit":

@@ -43,8 +43,7 @@ def collect_review(evidence, number, expected_head, *, api, store):
     from copy import deepcopy
     from deploy.autonomy_policy import REPOSITORY, REPOSITORY_ID
     from deploy.cloud_coordinator import (
-        Coordinator, _current_sensitive_owner_command, _required_checks,
-        classify_sensitive_paths,
+        Coordinator, _required_checks, classify_sensitive_paths,
     )
 
     evidence = deepcopy(evidence)
@@ -81,7 +80,6 @@ def collect_review(evidence, number, expected_head, *, api, store):
         'required_conversation_resolution': protection['required_conversation_resolution']['enabled'],
         'required_checks': required['checks'],
     }
-    authorization = enrollment.get('sensitive_authorization')
     evidence['copilot_review'] = {
         'pull_number': number, 'pull_id': pull['id'],
         'repository_id': pull['base']['repo']['id'],
@@ -98,9 +96,6 @@ def collect_review(evidence, number, expected_head, *, api, store):
             'head_sha': expected_head, 'files_complete': snapshot['files_complete'],
             'sensitive': classify_sensitive_paths(
                 snapshot['files'], complete=snapshot['files_complete']),
-            'owner_authorization': authorization,
-            'owner_command': _current_sensitive_owner_command(api, number, authorization),
-            'targeted_review': enrollment.get('targeted_review'),
         },
     }
     coordinator._identity()
@@ -110,9 +105,7 @@ def collect_review(evidence, number, expected_head, *, api, store):
             or _required_checks(api) != (
                 snapshot['required'], snapshot['policy_complete'],
                 snapshot['up_to_date_required'], snapshot['conversation_resolution_required'])
-            or store.snapshot() != state
-            or _current_sensitive_owner_command(api, number, authorization)
-            != evidence['copilot_review']['change']['owner_command']):
+            or store.snapshot() != state):
         raise ValueError('Final review collection fence changed')
     return evidence
 

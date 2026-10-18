@@ -262,9 +262,8 @@ def test_supervised_review_qualification_contract_is_separate_and_fail_closed():
         'complete authenticated raw and rendered review',
         'complete paginated nested review threads',
         'current on the exact head and in `COMMENTED` or `APPROVED` state',
-        'exact-head sensitive owner command',
+        'Do not collect or revalidate a separate sensitive owner command',
         'SHA-256 of the exact raw UTF-8 review body',
-        'command must be created no earlier than the unchanged review submission',
         'no active or unknown task occupancy',
         'certain source receipt and reservation provenance',
         'fresh-main ancestry',
@@ -272,7 +271,7 @@ def test_supervised_review_qualification_contract_is_separate_and_fail_closed():
         'same-run complete `source-ci` aggregate',
         'durable supervised qualification record',
         'does not change `review_valid`, the owner-authorization ledger',
-        'Any head, base, review, or command change invalidates',
+        'Any head, base, review, or provenance change invalidates',
         'missing, uncertain, or failing evidence blocks',
         'does not alter receipts, claims, budgets',
         'not an autonomous-trial success',
@@ -1912,6 +1911,15 @@ def test_active_gate_contract_preserves_exact_head_review():
         assert 'COMMENT' in text
         assert 'APPROVED' in text
 
+    copilot = ' '.join((ROOT / '.github/copilot-instructions.md').read_text().split())
+    assert (
+        'Sensitive-path classification is informative only; it adds no separate owner '
+        'authorization or targeted review. Owner enrollment defines permitted work, '
+        'while current Copilot review, resolved conversations, and required checks '
+        'remain mandatory. Guarded exact-main deployment remains separate.'
+    ) in copilot
+    assert 'exact-SHA owner authorization and targeted review' not in copilot
+
     policy = ' '.join((ROOT / 'docs/autonomy-policy.md').read_text().split())
     for clause in (
         'The default offline CLI performs no network calls, writes, status publication, '
@@ -1920,8 +1928,12 @@ def test_active_gate_contract_preserves_exact_head_review():
         'read-only coordinator state snapshot',
         'authenticated edit metadata, complete check runs and thread pagination',
         'It writes no files or state and never plans/applies coordinator actions.',
-        'A collection error blocks without emitting partial evidence or clearing persisted authorization.',
-        'Malformed current owner-comment responses at either the initial or final read abort collection with `invalid-evidence`, not `sensitive-review-authorization`;',
+        'A collection error blocks without emitting partial evidence or changing persisted state.',
+        'The final fence does not re-fetch reviews, threads or check runs',
+        'review metadata, threads and check runs are validated from the earlier snapshot',
+        'Reviews, threads and check runs are validated from the collected snapshot.',
+        'It does not fetch or revalidate legacy sensitive authorization fields.',
+        'sensitive evidence passes without a separate owner grant',
         'does not authenticate the JSON file',
         'Ordinary merge evidence has no structured independent report',
         'Installed-runtime compatibility remains an exact-main guarded deployment gate',
@@ -1937,11 +1949,10 @@ def test_active_gate_contract_preserves_exact_head_review():
     ):
         assert clause in ' '.join((ROOT / 'AGENTS.md').read_text().split()), clause
     for clause in (
-        '`copilot_review.reviews`',
-        '`copilot_review.change.owner_command`',
-        '`sensitive-review-authorization`',
+        'Sensitive-path classification is informative and does not require a separate owner command or targeted review.',
         'current genuine Copilot review',
-        'Never reconstruct this record from the persisted authorization',
+        'does not fetch or revalidate legacy sensitive-grant comments',
+        'all three successful required checks',
     ):
         assert clause in policy, clause
 

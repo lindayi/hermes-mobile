@@ -170,63 +170,29 @@ even without a local reviewer action.
 This fence is admission-only. Later body reports or changed canonical linkage do
 not revoke a durably admitted PR; PR45 receipt-result heads, restart/compaction,
 manual renewal and existing repair budgets retain their original contracts.
-Provenance does not replace immutable `authorized_head` or sensitive-head gates.
+Provenance does not replace immutable `authorized_head` or authenticated
+result-head receipt gates.
 GitHub reads, durable local commit and remote mutations are not a single atomic
 transaction. Acceptance records the final coherent admission snapshot; edits after
 that read remain a remote race, not a claim of permanent body immutability.
 Legacy SHA-only starter output cannot be distinguished from manual authority:
 review in-flight old commands and deploy both sides together before activation.
 
-For a sensitive head, the owner must separately comment
-`/hermes authorize-sensitive <head-sha> review <positive-review-id> <body-sha256>`.
-The command is scoped to the exact current head and one complete authenticated
-Copilot review from reviewer bot ID `175728472`. That review must be the unique
-latest review by that bot, have a unique positive ID and timezone-aware submission
-time no later than the immutable owner command creation time, be `COMMENTED` or
-`APPROVED` on the exact head, and include unchanged REST
-metadata and the complete rendered `body_html`. The lowercase SHA-256 in the command
-is over the exact raw UTF-8 review `body`; the selected review identity, head, state,
-and digest are persisted with the owner authorization. Coding bot ID `198982749`,
-the PR author, owner-authored reviews, historical independent-review reports, and
-the previous head-only command do not authorize a sensitive head.
-
-Review edit metadata enrichment binds the authenticated REST actor to GraphQL by
-strict positive integer numeric ID, identical nonempty node ID, and actor type:
-the owner is a User and reviewer `175728472` is a Bot. Both API identities and
-logins must be present. The owner's logins must match exactly. For reviewer
-`175728472`, REST login must be exactly `copilot-pull-request-reviewer` or
-`copilot-pull-request-reviewer[bot]`, and GraphQL login must be exactly
-`copilot-pull-request-reviewer`; equality between any other pair is not identity.
-A suffix alone never establishes identity. Missing, malformed or mismatched actor
-identity cannot supply edit metadata.
-This binding does not change the prose disposition or make an ambiguous overview
-automatic review acceptance, even when the separate sensitive command binds.
-Request numeric and node IDs through the supported User/Bot fragments. Partial
-GraphQL errors or malformed response envelopes block collection. Review ID/node,
-repository, PR, head, body, submission and edit bindings remain required.
-
-This owner command is a separate, explicit authorization, not an automatic approval
-from enrollment or review prose. Planning and fresh status/merge fences re-read and
-revalidate the command and selected Copilot review, including author, state,
-timestamp, edit metadata, ID uniqueness, full rendered body and head. Removal,
-edit, dismissal, a newer negative or ambiguous Copilot review, or a head change
-invalidates authorization; it is not blanket consent for future commits. Complete
-scan validation clears all three persisted fields (`sensitive_sha`,
-`sensitive_authorization`, `targeted_review`) atomically with commands,
-observations and lifecycle events before export. Historical independent-review
-records remain readable but do not authorize new decisions; unsupported legacy
-enrollment identities are not migrated. Plan mode only projects the change.
-Incomplete collection, preparation or scan-commit failure preserves prior durable
-state, export and consumer ACKs and performs no external write. A malformed
-single-comment response (non-object, missing or invalid user/ID/body/timestamps/
-issue URL fields) raises `ApiError` before command parsing: it is incomplete
-collection, not confirmed revocation. HTTP 404 and well-formed but edited,
-foreign-owner or mismatched commands remain confirmed invalid authorization;
-other API failures abort collection. Revocation itself
-consumes no repair attempt and never authorizes merge. Sensitive authorization does
-not replace the separate complete Copilot findings/threads and required-CI merge
-gates: a bounded source repair may proceed while findings remain unresolved, but
-merge remains blocked until all merge gates pass.
+Sensitive-path classification is informational only. Owner enrollment and its
+immutable `authorized_head` define permitted work; there is no separate
+`/hermes authorize-sensitive` prerequisite, grant revalidation, or sensitive-owner
+approval outcome in planning, status publication, notification eligibility, or
+auto-merge. Legacy authorization fields and lifecycle records remain readable for
+compatibility, but they do not block new processing. Pending legacy sensitive
+approval notices are marked superseded, and `sensitive_approval` events are omitted
+from exports without changing retained history or consumer ACKs. Current exact-head
+Copilot review, resolved conversations, all required CI checks, complete source
+evidence, task occupancy, and receipt bindings remain mandatory. A bounded source
+repair may proceed while findings remain unresolved, but merge remains blocked
+until all merge gates pass.
+The ordinary review gate requires authenticated unchanged submission metadata.
+Missing edit fields or failed metadata enrichment cannot qualify at planning,
+publication, final merge fencing, or downstream autonomy validation.
 
 This is a source/first-activation boundary, not an upgrade path for historical
 coordinator state. Version-1 records remain readable for inspection, but active
@@ -237,7 +203,7 @@ The coordinator does not backfill legacy identity, reset cursors/budgets, or dis
 unresolved claims. A newer exact-SHA command may renew an already identity-bound,
 SHA-bound active enrollment: it preserves the initial `authorized_head`, receipt
 proofs, unresolved claims and attempt budget, records the new owner-authorized head,
-and clears sensitive authorization. It cannot migrate a legacy enrollment.
+and does not reuse legacy sensitive authorization. It cannot migrate a legacy enrollment.
 If such state exists, stop activation and preserve it for separately reviewed
 operator recovery; do not delete/reset state or use re-enrollment as a migration.
 First activation must use the current identity-bound enrollment contract and must
@@ -631,13 +597,12 @@ unchanged, authenticated `ready` receipt may extend authorization from a previou
 authorized head to that exact result head. The initial `authorized_head` never
 changes; each later result head needs its own receipt rooted in an already
 authorized head. Missing, edited, copied, stale, mismatched, or blocker receipts
-do not authorize continuation. Sensitive authorization remains bound to its
-original SHA, and review/check evidence must be independently fresh for each result
-head. Validated task/session/nonce and unchanged-comment proof is persisted with
+do not authorize continuation. Review/check evidence must be independently fresh
+for each result head. Validated task/session/nonce and unchanged-comment proof is persisted with
 completion in the enrollment before lifecycle compaction can retire its action.
 Restart and final dispatch revalidate the retained proof against the remote comment.
 Deferred ready/review handoffs recheck it after the scan commit; a new observed bound
-head clears stale sensitive authorization. A typed blocker remains `task-result-blocked`,
+head does not replace owner enrollment or receipt provenance. A typed blocker remains `task-result-blocked`,
 not an unrelated push. A receipt is not review or CI success. Bare manual enrollments
 retain PR33 lifecycle and receipt handoff behavior.
 
@@ -670,7 +635,7 @@ duplicate POST or a false `execution_exhausted` lifecycle event. Superseded comp
 handoffs are terminal for retirement,
 while their validated receipt proofs remain in the enrollment across compaction and
 re-enrollment. Validated owner-abandonment records also survive inactive
-re-enrollment as deep-copied audit bindings; this does not preserve sensitive
+re-enrollment as deep-copied audit bindings; this does not copy legacy sensitive
 authorization or reset the existing counters, progress, receipt proofs, or claims.
 Replay does not dispatch an accepted task twice. Historical-base
 scope is not current-main eligibility: stale PRs receive no status action or merge
@@ -731,8 +696,8 @@ state, uncertainty and lifecycle history unchanged. The command's exact current
 head may authorize only a distinct bounded source, review-followup, or neutral fix
 reserved after recovery commits. It is not result provenance or merge authority.
 Only that later task's valid ready receipt may add its result head to general
-provenance; an older task or the abandoned task cannot do so. Normal current-main
-and sensitive-review fences still apply. Before every later dispatch, collect
+provenance; an older task or the abandoned task cannot do so. Normal current-main,
+Copilot-review, and required-check fences still apply. Before every later dispatch, collect
 complete fresh remote task occupancy and recheck the recovered task's exact identity
 and terminal state. A neutral continuation that reconciles after `main` advances
 must keep the recovery record's historical base in `recorded_base_sha` while its
@@ -874,8 +839,8 @@ lineage and is rejected.
 Live and retained copies must agree on reservation `created_at`, including field
 presence and value, before that timestamp can establish same-head root ordering.
 This only proves terminal occupancy; ordinary
-source authorization, fresh review/check, current-main and sensitive-head fences
-remain separate. The recovery head remains continuation-only only while it lacks
+source authorization, fresh review/check, current-main and owner-authorized
+result-head fences remain separate. The recovery head remains continuation-only only while it lacks
 general receipt provenance. A distinct, bound ready receipt that returns the same
 head releases this restriction, including after a cold restart; recovery alone
 never does.
@@ -1531,7 +1496,7 @@ review and a new head-bound reservation; no old success is copied.
 
 The following report/publication contract records the former implementation.
 It does not authorize new reviewer dispatch or publication and is not a current
-merge requirement. Sensitive owner authorization above remains a separate guard.
+merge requirement. Sensitive-path classification does not add an owner-approval guard.
 
 The existing task API exposes task identity, GitHub pull/branch artifacts and
 authenticated session metadata. After a source task reaches a verified `ready`
@@ -1771,7 +1736,7 @@ fails closed rather than weakening protection.
 Auto-merge is requested through GitHub's protected `enablePullRequestAutoMerge`
 operation only when the same-repository main base is current, the PR is not a
 draft or conflict, all three required checks are green, the Copilot review gate
-passes, no fixer may be running, and any sensitive authorization is current. Both
+passes, and no fixer may be running. Both
 the PR head and the current `main` SHA are re-read before enabling
 auto-merge; the mutation supplies `expectedHeadOid` as the server-side head
 fence. The owner-managed branch rule must also require the PR branch to be
@@ -1849,31 +1814,18 @@ The prepared retirement and scan commit together before export or external
 mutation, followed by a fresh owner binding check immediately before commit.
 Plan mode neither reads ACK state nor changes producer or consumer state.
 
-Before each export, sensitive approval events are filtered against durable
-active enrollment, the exact last observed open head, and still-pending
-`authorize_sensitive_action` authorization. Apply commits the complete scan's
-head observations, owner commands, and retirements before exporting; an old
-enrollment head is not a fallback for missing current-head observation. Authorized,
-head-superseded, retired, unobserved, or unsupported decisions are omitted from
-the exported view only. Durable incident payloads/IDs/times and all other outcomes
-remain unchanged; consumer ACK history is neither read nor rewritten, and export
-never grants or revokes an approval. If filtering leaves no events, the previous
-export is removed rather than refreshing an obsolete request. This is a polling
-snapshot of observed state, not a live authorization endpoint.
-
-Each enrollment has an optional bounded `sensitive_generation` (absent means zero,
-maximum `2**31 - 1`). Invalidating a persisted grant advances it exactly once in
-the same scan commit; repeated invalid polls/restarts do not advance it. It feeds
-the existing lifecycle `incident` identity, so a renewed approval request reaches
-the unchanged consumer even if the prior request was ACKed and retired. A new
-owner command may select the same restored review ID/body, but revoking that new
-grant advances the generation again. Export includes only the current enrollment,
-head and generation's approval request, excluding older unACKed requests without
-rewriting canonical events or ACK history. A fresh valid selected review/command
-suppresses the current request. Head changes clear old-head authority and use the
-head-bound event identity; new enrollment commands reset the generation under
-their distinct enrollment identity. Invalid or exhausted generation fails closed.
-No event schema, consumer protocol, credential or notification framework changes.
+Sensitive approval lifecycle events and outbox outcomes are legacy history only.
+They are not generated for current processing, and pending legacy approval outcomes
+are marked superseded rather than replaced with a new request. Lifecycle export
+omits legacy `sensitive_approval` events without deleting durable records or changing
+consumer ACK history. With a trusted application owner binding, preparation moves
+obsolete approvals into the existing replay context even without an ACK, releasing
+active queue capacity. Context is audit history, not delivery proof; no consumer
+ACK is created or changed. Legacy `sensitive_generation` and grant fields remain readable
+for compatibility but are not revalidated, advanced, or used as a processing gate.
+If filtering leaves no events, the previous export is removed rather than refreshing
+an obsolete request. This is a polling snapshot of observed state, not a live
+authorization endpoint.
 
 The export is written to the existing state directory selected by application
 configuration, not the coordinator's private state directory. The coordinator
@@ -1974,7 +1926,7 @@ body/metadata consistency, v2 dispatch-base equality and exactly one unchanged
 remote receipt for that authenticated author/nonce.
 
 The paired PR29 consumer uses this receipt to prove result-head continuation
-without inheriting review/check or sensitive authorization. Proven HEAD authority
+without inheriting review/check evidence. Proven HEAD authority
 survives unrelated main advances; the recorded base remains provenance, not a
 fresh eligibility predicate. Handoff mutations fence against freshly scanned and
 live current main, not historical receipt base. A behind authorized result head
@@ -2097,7 +2049,7 @@ and new verification. The coordinator cannot alter branch protection.
 Issue #92 synchronizes the current contributor review contract without changing
 native compatibility, CI or deployment guards. Any future transition should
 follow verified coordinator and branch-protection rollout, preserve exact-head
-evidence and sensitive owner decisions, and keep guarded deployment separate.
+evidence and owner-enrollment/receipt provenance, and keep guarded deployment separate.
 
 ### Issue #92 coordinator test migration
 

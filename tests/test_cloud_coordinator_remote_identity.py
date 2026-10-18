@@ -287,7 +287,7 @@ def test_review_report_requires_expected_reviewer_session_principal_ids(
     assert api.review_attempts == 1
 
 
-@pytest.mark.parametrize("stage", ["enrollment", "snapshot", "authorization"])
+@pytest.mark.parametrize("stage", ["enrollment", "snapshot", "retired-command"])
 @pytest.mark.parametrize("field", ["number", "id", "head_repo", "base_repo"])
 @pytest.mark.parametrize("kind", KINDS)
 def test_pull_collection_requires_numeric_identity(tmp_path, stage, field, kind):
@@ -305,15 +305,43 @@ def test_pull_collection_requires_numeric_identity(tmp_path, stage, field, kind)
             with pytest.raises(CoordinatorError, match="identity"):
                 coordinator._snapshot_pull(16, enrolled_record(), BASE)
     else:
-        api.authorize_sha_review = True
+        assert store.authorize_sensitive(16, api.head_sha)
+        original_enrollment = store.snapshot()["enrollments"]["16"]
+        legacy_sensitive_history = {
+            key: deepcopy(original_enrollment[key])
+            for key in ("sensitive_sha", "sensitive_authorization", "targeted_review")
+            if key in original_enrollment
+        }
         api.comments = [{"id": 124, "user": {"id": OWNER_ID},
                          "body": (f"/hermes authorize-sensitive {api.head_sha} review "
                                   f"{api.copilot_review_id} {api.copilot_review_digest}"),
                          "created_at": "2026-10-01T12:10:00Z",
                          "updated_at": "2026-10-01T12:10:00Z"}]
-        _, commands, _, candidates = coordinator._scan_enrollments(store.snapshot())
-        assert bool(candidates["16"].get("sensitive_sha")) is (kind == "valid")
-        assert bool(commands[0][1].get("validated")) is (kind == "valid")
+        pull_reads = []
+        original_get = api.get
+
+        def get(route):
+            if route == "repos/lindayi/hermes-mobile/pulls/16":
+                pull_reads.append(route)
+            return original_get(route)
+
+        api.get = get
+        state = store.snapshot()
+        _, commands, processed, candidates = coordinator._scan_enrollments(state)
+        assert commands == []
+        assert "124" in processed
+        assert not pull_reads
+        assert {
+            key: candidates["16"].get(key)
+            for key in legacy_sensitive_history
+        } == legacy_sensitive_history
+        store.commit_scan(state["cursor"], processed, commands=commands)
+        committed = StateStore(store.path).snapshot()
+        assert "124" in committed["events"]
+        assert {
+            key: committed["enrollments"]["16"].get(key)
+            for key in legacy_sensitive_history
+        } == legacy_sensitive_history
 
 
 @pytest.mark.parametrize("route,expected", [("user", OWNER_ID), ("repos/lindayi/hermes-mobile", REPOSITORY_ID)])

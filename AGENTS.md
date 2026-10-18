@@ -114,7 +114,7 @@ and all three successful required CI checks. Coding bot ID `198982749` does not
 qualify. Missing, stale, pending, dismissed or rejecting reviews block. Do not
 dispatch independent review/report-correction tasks or publish `agent-review` for
 new merge decisions. Preserve historical records and active task occupancy.
-Sensitive changes retain separate exact-SHA owner authorization and targeted review.
+Sensitive-path classification is informative only; it adds no separate owner authorization or targeted review. Owner enrollment defines permitted work, while current Copilot review, resolved conversations, and required checks remain mandatory.
 
 GitHub's automatic Copilot review ruleset requests reviews. Coordinator and manual
 operators validate the separate mandatory review evidence before merge. The

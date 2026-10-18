@@ -64,6 +64,7 @@ def test_accepted_receipt_handoff_uses_fresh_scanned_main(tmp_path, monkeypatch,
     api.pull["mergeable_state"] = "behind"
     api.review_state = "COMMENTED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     from copy import deepcopy
     original_get = api.get
     pull_reads = 0
@@ -250,6 +251,12 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     fix = next(action for action in store.actions().values()
                if action.get("kind") == "fix")
     assert store.authorize_sensitive(16, HEAD)
+    legacy_enrollment = store.snapshot()["enrollments"]["16"]
+    legacy_sensitive_history = {
+        field: deepcopy(legacy_enrollment[field])
+        for field in ("sensitive_sha", "sensitive_authorization", "targeted_review")
+        if field in legacy_enrollment
+    }
     task = api.tasks[fix["task_id"]]
     session_id = "session-1"
     task.update(
@@ -286,6 +293,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     refresh_owner_review(api, result_head)
     api.review_sha = result_head
     api.review_submitted_at = "2026-10-01T12:04:01Z"
+    api.copilot_review_updated_at = api.review_submitted_at
 
     Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
 
@@ -298,7 +306,11 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert completed["receipt_session_id"] == session_id
     assert completed["receipt_nonce"] == fix["dispatch_nonce"]
     assert store.snapshot()["enrollments"]["16"]["authorized_head"] == HEAD
-    assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
+    completed_enrollment = store.snapshot()["enrollments"]["16"]
+    assert {
+        field: completed_enrollment.get(field)
+        for field in legacy_sensitive_history
+    } == legacy_sensitive_history
     assert api.fix_attempts == 1
     assert api.review_attempts == 0
     assert "Hermes-Task-Receipt: v2" in fix["body"]
@@ -331,6 +343,15 @@ def _accepted_compacted_receipt_case(tmp_path, issue=16):
                 return _original(route, *args, **kwargs)
 
             setattr(api, name, route_issue_one)
+        original_graphql = api.graphql
+
+        def graphql_issue_one(query, variables):
+            response = original_graphql(query, variables)
+            if "PullRequestReview" in query:
+                response["data"]["node"]["pullRequest"]["number"] = issue
+            return response
+
+        api.graphql = graphql_issue_one
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     path = tmp_path / "coordinator-state.json"
     store = StateStore(path)
@@ -2051,7 +2072,6 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
         statuses=[],
         checks_complete=True,
         review_valid=True,
-        sensitive_authorized=True,
         up_to_date_required=True,
         conversation_resolution_required=True,
         agent_running=False,
@@ -2060,7 +2080,6 @@ def test_auto_merge_requires_current_main_review_checks_and_idle_agent():
     for key, value in (
         ("current_main_sha", "c" * 40),
         ("review_valid", False),
-        ("sensitive_authorized", False),
         ("up_to_date_required", False),
         ("conversation_resolution_required", False),
         ("agent_running", True),
@@ -2092,7 +2111,7 @@ def test_auto_merge_uses_current_three_checks_without_cloud_review():
     assert eligible_for_auto_merge(
         pr, current_main_sha=BASE, required_checks=required, check_runs=runs,
         statuses=[], checks_complete=True, review_valid=True,
-        sensitive_authorized=True, up_to_date_required=True,
+        up_to_date_required=True,
         conversation_resolution_required=True, agent_running=False,
     )
 
@@ -2118,6 +2137,8 @@ def test_completed_copilot_comment_accepts_review_without_independent_report():
     copilot_comment = {
         "id": 64002, "state": "COMMENTED", "commit_id": HEAD,
         "submitted_at": "2026-10-01T12:11:00Z",
+        "updatedAt": "2026-10-01T12:11:00Z", "lastEditedAt": None,
+        "includesCreatedEdit": False,
         "body": "",
         "user": {"id": COPILOT_REVIEWER},
     }
@@ -3746,6 +3767,7 @@ def test_neutral_waiting_review_serializes_source_failure(
     if review_state == "stale":
         api.review_sha = RESULT_HEAD
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.source_failure = True
     api.source_failure_sha = NEXT_RESULT_HEAD
     if failure == "check" or review_state == "wrong_author":
@@ -3935,6 +3957,7 @@ def test_stale_base_reconciliation_accepts_a_validated_new_head_handoff(tmp_path
     api.review_state = "COMMENTED"
     api.review_sha = NEXT_RESULT_HEAD
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     requests_before = [write for write in api.writes
                        if write[0].endswith("/requested_reviewers")]
 
@@ -4294,6 +4317,7 @@ def _owner_abandonment_historical_neutral_case(tmp_path, *, bare=False):
     api.review_state = "COMMENTED"
     api.review_sha = api.head_sha
     api.review_submitted_at = "2026-10-01T12:09:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.source_failure = False
     api.source_failure_sha = None
     return api, store, neutral
@@ -5470,6 +5494,7 @@ def test_owner_continuation_disposition_records_missing_root_before_successor_di
     api.review_state = "CHANGES_REQUESTED"
     api.review_sha = successor_head
     api.review_submitted_at = "2026-10-01T12:15:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.unresolved = False
     api.progress_review = _progress_review(
         successor_head, 63002, "The synthetic source failure remains.",
@@ -7622,6 +7647,16 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     ).run(apply=True)
     assert store.snapshot()["enrollments"]["16"]["active"] is True
 
+    legacy_history = {
+        "sensitive_sha": HEAD,
+        "sensitive_generation": 5,
+        "sensitive_authorization": {"legacy": "authorization"},
+        "targeted_review": {"legacy": "review"},
+    }
+    data = store.snapshot()
+    data["enrollments"]["16"].update(legacy_history)
+    store._save(data)
+
     command_time = "2026-10-15T03:01:00Z"
     api.issue["updated_at"] = command_time
     api.comments.extend([
@@ -7700,7 +7735,9 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     assert pending["event_watermark"] > 7774
     assert pending["enrollments"]["16"]["attempts"] == 2
     assert pending["enrollments"]["16"]["comment"] == 123
-    assert pending["enrollments"]["16"].get("sensitive_authorization") is None
+    assert {
+        key: pending["enrollments"]["16"][key] for key in legacy_history
+    } == legacy_history
     assert api.writes == writes
     assert api.task_posts == task_posts
 
@@ -7730,7 +7767,9 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     assert after_read_error["pending_events"] == ["7773", "7774"]
     assert after_read_error["cursor"] == "2026-10-15T03:10:00Z"
     assert after_read_error["enrollments"]["16"]["comment"] == 123
-    assert after_read_error["enrollments"]["16"].get("sensitive_authorization") is None
+    assert {
+        key: after_read_error["enrollments"]["16"][key] for key in legacy_history
+    } == legacy_history
 
     def record_exact_reads(route):
         if route.startswith("repos/lindayi/hermes-mobile/issues/comments/"):
@@ -7765,7 +7804,7 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     assert recovered["event_watermark"] > 7774
     assert enrollment["comment"] == 7773
     assert enrollment["attempts"] == 2
-    assert enrollment["sensitive_authorization"]["command_comment_id"] == 7774
+    assert {key: enrollment[key] for key in legacy_history} == legacy_history
     assert "owner_abandonments" not in enrollment
     assert api.writes == writes
     assert api.task_posts == task_posts
@@ -7776,8 +7815,8 @@ def test_pending_commands_recover_by_exact_id_after_cursor_advance_and_restart(
     ).run(apply=True)
     final = StateStore(store.path).snapshot()
     assert final["enrollments"]["16"]["comment"] == 7773
-    assert final["enrollments"]["16"]["sensitive_authorization"] == (
-        enrollment["sensitive_authorization"]
+    assert {key: final["enrollments"]["16"][key] for key in legacy_history} == (
+        legacy_history
     )
     assert final["pending_events"] == []
     assert api.writes == writes
@@ -13745,6 +13784,7 @@ def test_prepared_receipt_isolated_after_plan_without_initial_source(
     api.review_state = "APPROVED"
     api.review_sha = RESULT_HEAD
     api.review_submitted_at = "2026-10-01T12:04:01Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     before = StateStore(store.path).snapshot()
     before_issue = _pull_issue_state(before, 16)
     before_writes = deepcopy(api.writes)
@@ -14250,11 +14290,17 @@ def test_malformed_pull_identity_does_not_stop_another_enrolled_pull(tmp_path):
     StateStore(store.path).enroll(enrollment)
     pull17 = deepcopy(api.pull)
     pull17.update(number=17, id=170017, node_id="PR_node_17")
-    api.review_state = "APPROVED"
-    api.review_sha = source_head
+    api.set_copilot_review(
+        review_id=api.copilot_review_id,
+        head_sha=source_head,
+        body=api.copilot_review_body,
+        submitted_at="2026-10-01T12:06:00Z",
+        state="APPROVED",
+    )
     api.pull.update(mergeable=True, mergeable_state="clean")
     original_get = api.get
     original_get_all = api.get_all
+    original_graphql = api.graphql
     original_write = api.write
     unrelated_writes = []
 
@@ -14270,6 +14316,12 @@ def test_malformed_pull_identity_does_not_stop_another_enrolled_pull(tmp_path):
         route = route.replace("/issues/17/comments", "/issues/16/comments")
         return original_get_all(route, collection=collection)
 
+    def graphql(query, variables):
+        response = original_graphql(query, variables)
+        if "PullRequestReview" in query:
+            response["data"]["node"]["pullRequest"]["number"] = 17
+        return response
+
     def write(route, body):
         if "/pulls/17/" in route:
             unrelated_writes.append(route)
@@ -14278,6 +14330,7 @@ def test_malformed_pull_identity_does_not_stop_another_enrolled_pull(tmp_path):
 
     api.get = get
     api.get_all = get_all
+    api.graphql = graphql
     api.write = write
     graphql_writes_before = list(api.graphql_writes)
     api.pull["id"] += 1
@@ -16932,18 +16985,28 @@ def test_apply_replay_does_not_repeat_enrollment_or_auto_merge(tmp_path):
     assert store.event_seen("123")
 
 
-def test_sensitive_change_needs_owner_authorization_for_the_exact_current_sha(tmp_path):
-    denied = FakeApi(sensitive=True, authorize=False)
-    denied_store = StateStore(tmp_path / "denied.json")
-    result = Coordinator(denied, denied_store).run(apply=True)
-    assert result["pull_requests"][0]["sensitive"]
-    assert not denied.graphql_writes
+def test_owner_enrollment_allows_sensitive_change_without_extra_authorization(tmp_path):
+    plans = []
+    for index, sensitive in enumerate((False, True)):
+        api = FakeApi(sensitive=sensitive)
+        store = StateStore(tmp_path / f"state-{index}.json")
+        result = Coordinator(api, store).run(apply=True)
+        plan = result["pull_requests"][0]
+        enrollment = store.snapshot()["enrollments"]["16"]
 
-    allowed = FakeApi(sensitive=True, authorize=True)
-    allowed_store = StateStore(tmp_path / "allowed.json")
-    Coordinator(allowed, allowed_store).run(apply=True)
-    assert allowed.graphql_writes
-    assert allowed_store.snapshot()["enrollments"]["16"]["sensitive_sha"] == HEAD
+        assert plan["sensitive"] is sensitive
+        assert plan["auto_merge_eligible"] is True
+        assert plan["auto_merge_requested"] is True
+        assert "sensitive" not in plan["reasons"]
+        assert enrollment["active"] is True
+        assert enrollment.get("sensitive_authorization") is None
+        assert not any(
+            event["reason"] == "sensitive_approval"
+            for event in store.snapshot()["lifecycle_events"]
+        )
+        plans.append((plan["review_valid"], plan["required_checks_green"],
+                      plan["auto_merge_eligible"], plan["auto_merge_requested"]))
+    assert plans[0] == plans[1]
 
 
 def test_sensitive_authorization_command_selects_review_and_body_digest():
@@ -16972,7 +17035,7 @@ def test_sensitive_authorization_command_selects_review_and_body_digest():
     }) is None
 
 
-def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
+def test_legacy_sensitive_command_does_not_create_current_head_grant(tmp_path):
     new_head = "c" * 40
     api = FakeApi(
         sensitive=True, authorize=True, authorize_sha=new_head, head_sha=new_head,
@@ -16980,10 +17043,13 @@ def test_owner_can_authorize_a_new_current_head_after_enrollment(tmp_path):
     store = StateStore(tmp_path / "state.json")
     store.enroll(enrolled_record(comment=122))
     store.record_event("123")
-    Coordinator(api, store).run(apply=True)
+    result = Coordinator(api, store).run(apply=True)
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["head"] == HEAD
-    assert enrollment["sensitive_sha"] == new_head
+    assert enrollment["sensitive_sha"] is None
+    assert enrollment.get("sensitive_authorization") is None
+    assert store.event_seen("124")
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
 
 
 @pytest.mark.parametrize("sensitive", [False, True], ids=["routine", "sensitive"])
@@ -16999,7 +17065,7 @@ def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive
             values = super().get_all(route, collection=collection)
             if route.endswith("/pulls/16/reviews?per_page=100"):
                 self.review_reads += 1
-                if self.review_reads == 4:
+                if self.review_reads == 3:
                     if final_state == "removed":
                         values = [review for review in values
                                   if review["user"]["id"] != COPILOT_REVIEWER]
@@ -17013,7 +17079,7 @@ def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive
     api = FinalReviewRace(sensitive=sensitive, authorize=True)
     store = StateStore(tmp_path / "state.json")
     result = Coordinator(api, store).run(apply=True)
-    assert api.review_reads == 4
+    assert api.review_reads == 3
     assert not api.graphql_writes
     assert store.action(f"auto-merge:16:{HEAD}:{BASE}")["status"] == "blocked"
     assert not result["pull_requests"][0]["auto_merge_eligible"]
@@ -17021,8 +17087,8 @@ def test_final_review_read_revoked_copilot_blocks_auto_merge(tmp_path, sensitive
     assert "review" in result["pull_requests"][0]["reasons"]
 
 
-@pytest.mark.parametrize("invalid_on_read", [2, 3, 4])
-def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fences(
+@pytest.mark.parametrize("invalid_on_read", [2, 3])
+def test_edited_copilot_review_blocks_status_or_merge_fences(
         tmp_path, invalid_on_read):
     class ChangingOwnerReview(FakeApi):
         review_reads = 0
@@ -17046,12 +17112,8 @@ def test_sensitive_owner_review_is_revalidated_at_planning_status_and_merge_fenc
 
     assert api.review_reads >= invalid_on_read
     assert not api.graphql_writes
-    assert not any(
-        body.get("context") == "cloud-review" and body.get("state") == "success"
-        for route, body in api.writes if "/statuses/" in route
-    )
-    reason = "sensitive"
-    assert reason in result["pull_requests"][0]["reasons"]
+    assert result["pull_requests"][0]["auto_merge_requested"] is False
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
 
 
 @pytest.mark.parametrize("merged", [False, True])
@@ -17308,6 +17370,8 @@ def _progress_review(head, review_id, text, submitted_at):
     )
     return {
         "id": review_id, "state": "COMMENTED", "commit_id": head,
+        "updatedAt": submitted_at, "lastEditedAt": None,
+        "includesCreatedEdit": False,
         "submitted_at": submitted_at, "user": {"id": COPILOT_REVIEWER},
         "body": body, "body_html": body.removeprefix("<!-- ccr-overview-v2 -->"),
     }
@@ -17340,6 +17404,8 @@ class InlineProgressApi(ProgressApi):
         )
         self.progress_review = {
             "id": review_id, "state": "COMMENTED", "commit_id": head,
+            "updatedAt": submitted_at, "lastEditedAt": None,
+            "includesCreatedEdit": False,
             "submitted_at": submitted_at, "user": {"id": COPILOT_REVIEWER},
             "body": "<!-- ccr-overview-v2 -->\n" + rendered,
             "body_html": rendered,
@@ -17880,6 +17946,7 @@ def test_rejecting_review_progress_uses_non_review_checks_in_the_planner(
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
     api.review_state = "CHANGES_REQUESTED"
     api.review_submitted_at = "2026-10-01T12:10:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.progress_review = _progress_review(
         HEAD, 63002, "Finding A remains.", "2026-10-01T12:10:00Z",
     ) | {"state": "CHANGES_REQUESTED"}
@@ -17960,6 +18027,7 @@ def test_commented_findings_evaluate_completed_receipt_and_resume_once(
     api.review_state = "COMMENTED"
     api.review_sha = result_head
     api.review_submitted_at = "2026-10-01T12:11:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.progress_review = _progress_review(
         result_head, 63003, finding, "2026-10-01T12:11:00Z",
     )
@@ -18057,6 +18125,7 @@ def test_body_only_commented_progress_requires_complete_unique_inventory(
     api.review_state = "COMMENTED"
     api.review_sha = result_head
     api.review_submitted_at = "2026-10-01T12:11:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     api.progress_review = _progress_review(
         result_head, 63003, finding, "2026-10-01T12:11:00Z",
     )
@@ -20641,6 +20710,7 @@ def test_incomplete_verification_does_not_consume_stagnation_decision(tmp_path, 
         refresh_owner_review(api, result_head, submitted_at="2026-10-01T12:07:00Z")
         api.review_state = "COMMENTED"
         api.review_submitted_at = "2026-10-01T12:07:00Z"
+        api.copilot_review_updated_at = api.review_submitted_at
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
 
     enrollment = StateStore(path).snapshot()["enrollments"]["16"]
@@ -21036,24 +21106,8 @@ def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
     path = tmp_path / "state.json"
     store = StateStore(path)
     enrollment = {"issue": 16, "comment": 123, "head": HEAD, "base": BASE}
-    body = json.dumps({
-        "schema": "hermes-independent-agent-review-v1",
-        "reviewed_head_sha": "c" * 40,
-        "review_method": "independent-agent",
-        "verdict": "pass",
-        "evidence_sha256": "d" * 64,
-    }, separators=(",", ":"))
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     authorization = {
-        "issue": 16, "comment": "124", "head": "c" * 40, "validated": True,
-        "owner_authorization": {
-            "actor_id": OWNER, "head_sha": "c" * 40, "state": "approved",
-            "review_id": 64001, "body_sha256": digest,
-        },
-        "targeted_review": {
-            "review_id": 64001, "reviewer_id": OWNER, "head_sha": "c" * 40,
-            "state": "COMMENTED", "body_sha256": digest, "evidence_sha256": "d" * 64,
-        },
+        "issue": 16, "comment": "124", "head": "c" * 40,
     }
     store.commit_scan(
         "2026-10-01T12:00:00Z", ["123", "124"],
@@ -21063,15 +21117,19 @@ def test_scan_cursor_and_owner_commands_commit_atomically(tmp_path):
     state = restarted.snapshot()
     assert state["cursor"] == "2026-10-01T12:00:00Z"
     assert set(state["events"]) == {"123", "124"}
-    assert state["enrollments"]["16"]["sensitive_sha"] == "c" * 40
+    assert state["enrollments"]["16"].get("sensitive_sha") is None
+    assert state["enrollments"]["16"].get("sensitive_authorization") is None
+    assert state["enrollments"]["16"].get("targeted_review") is None
 
 
-def test_stale_owner_sensitive_authorization_does_not_carry_to_current_head(tmp_path):
+def test_stale_owner_sensitive_authorization_does_not_block_current_head(tmp_path):
     api = FakeApi(sensitive=True, authorize=True, authorize_sha=BASE)
     store = StateStore(tmp_path / "state.json")
-    Coordinator(api, store).run(apply=True)
+    result = Coordinator(api, store).run(apply=True)
     assert store.snapshot()["enrollments"]["16"]["sensitive_sha"] is None
-    assert not api.graphql_writes
+    assert api.graphql_writes
+    assert result["pull_requests"][0]["auto_merge_requested"] is True
+    assert "sensitive" not in result["pull_requests"][0]["reasons"]
 
 
 def source_run(**changes):
@@ -22596,6 +22654,7 @@ def test_copilot_review_timing_must_be_valid_for_handoff(
     api.source_failure = False
     api.review_state = review_state
     api.review_submitted_at = submitted_at
+    api.copilot_review_updated_at = submitted_at
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
@@ -22638,6 +22697,7 @@ def test_post_task_review_still_requires_exact_head_and_authenticated_identity(
     api.complete_task(fix["task_id"], fix)
     api.source_failure = False
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
 
     summary = coordinator.run(apply=True)["pull_requests"][0]
 
@@ -22670,6 +22730,7 @@ def test_post_task_review_cannot_replace_invalid_persisted_completion_proof(
     api.tasks.clear()
     api.review_state = "COMMENTED"
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
 
     summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
@@ -22718,6 +22779,7 @@ def test_waiting_copilot_review_handoff_survives_restart_without_budget(
     # Absent task inventory does not release the lock without a completed review.
     api.tasks.clear()
     api.review_submitted_at = "2026-10-01T12:06:00Z"
+    api.copilot_review_updated_at = api.review_submitted_at
     writes, graphql_writes = list(api.writes), list(api.graphql_writes)
     restarted = Coordinator(api, StateStore(path), clock=lambda: 1790856660)
     before = path.read_bytes()
@@ -26530,12 +26592,12 @@ def test_units_are_templates_only_and_apply_is_explicit():
 @pytest.mark.parametrize("status", ["pending", "sending", "uncertain"])
 @pytest.mark.parametrize("proof", ["owner", "stranger", "missing-user", "missing-id", "string-id", "edited"])
 def test_outbox_reconciliation_requires_owner_and_exact_published_body(tmp_path, status, proof):
-    api = FakeApi(sensitive=True)
+    api = FakeApi(sensitive=True, strict_protection=False)
     store = StateStore(tmp_path / "state.json")
     coordinator = Coordinator(api, store)
     plan = coordinator._build_plan(apply=False)
     key, entry = next((key, entry) for key, entry in plan["pull_requests"][0]["outcomes"]
-                      if key.endswith(":sensitive"))
+                      if key.endswith(":up-to-date-policy"))
     assert store.add_outbox(key, entry)
     store.update_outbox(key, status)
     comment = {"id": 200, "user": {"id": OWNER}, "body": entry["body"],
@@ -26581,7 +26643,7 @@ def test_outbox_write_response_requires_same_owner_publication_proof(tmp_path, p
                     response["body"] = "changed " + body["body"]
             return response
 
-    api = UnprovenComment(sensitive=True)
+    api = UnprovenComment(sensitive=True, strict_protection=False)
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path)).run(apply=True)
     assert {entry["status"] for entry in StateStore(path).snapshot()["outbox"].values()} == {"uncertain"}
@@ -26850,7 +26912,7 @@ class RecordingApi(FakeApi):
 def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path, monkeypatch):
     import deploy.cloud_coordinator as coordinator_module
     monkeypatch.setattr(coordinator_module, "TOMBSTONE_LIMIT", 8)
-    api = RecordingApi()
+    api = RecordingApi(strict_protection=False)
     api.sensitive = True
     path = tmp_path / "state.json"
 
@@ -26868,7 +26930,11 @@ def test_terminal_records_compact_across_heads_without_duplicate_writes(tmp_path
         assert {entry["head"] for entry in state["outbox"].values()} == {head}
         assert {action["head"] for action in state["actions"].values()} <= {head}
     assert sizes[-1] < coordinator_module.MAX_STATE_BYTES
-    assert len(StateStore(path).snapshot()["lifecycle_events"]) == len(heads)
+    # A persistent policy incident retains its first observation across heads.
+    events = StateStore(path).snapshot()["lifecycle_events"]
+    assert len(events) == 1
+    assert events[0]["reason"] == "policy_broken"
+    assert events[0]["head_sha"] == heads[0]
     retired = json.loads(path.read_text())["retired"]["16"]
     assert len(retired["outbox"]) <= 8 and len(retired["actions"]) <= 8
     assert retired["status_generation"] == 0  # Review statuses are no longer generated.

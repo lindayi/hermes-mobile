@@ -158,6 +158,8 @@ def copilot_review(body, *, state="COMMENTED", review_id=REVIEW_ID, commit_id=HE
     return {"id": review_id, "state": state, "body": body,
             "body_html": body.removeprefix("<!-- ccr-overview-v2 -->"),
             "commit_id": commit_id,
+            "updatedAt": submitted_at, "lastEditedAt": None,
+            "includesCreatedEdit": False,
             "submitted_at": submitted_at, "user": {"id": user_id},
             "author_association": "CONTRIBUTOR"}
 
@@ -229,14 +231,15 @@ def test_public_verification_overview_is_narrow_validation_status():
 
 def test_public_verification_overview_does_not_grant_merge_authority(tmp_path):
     review = public_overview_review()
-    api = ReviewApi([review], sensitive=True)
+    api = ReviewApi([review], sensitive=True, active_agent=True)
     result = _managed_cycle(api, tmp_path / "state.json")
     [plan] = result["pull_requests"]
     assert plan["review_valid"]
     assert plan["required_checks_green"]
     assert plan["sensitive"]
     assert not plan["auto_merge_eligible"]
-    assert "sensitive" in plan["reasons"] and "review" not in plan["reasons"]
+    assert "agent" in plan["reasons"] and "review" not in plan["reasons"]
+    assert "sensitive" not in plan["reasons"]
     assert not api.graphql_writes
 
 
@@ -261,7 +264,7 @@ def test_public_verification_overview_does_not_override_required_ci(tmp_path, ci
     assert plan["review_valid"]
     assert not plan["required_checks_green"]
     assert not plan["auto_merge_eligible"]
-    assert "sensitive" in plan["reasons"]
+    assert "checks" in plan["reasons"] and "sensitive" not in plan["reasons"]
 
 
 @pytest.mark.parametrize("summary", [
@@ -502,21 +505,22 @@ def test_unapproved_gate_status_variants_remain_ambiguous_through_coordinator(
     assert not plan["review_valid"]
     assert plan["required_checks_green"]
     assert plan["sensitive"] and not plan["auto_merge_eligible"]
-    assert "review" in plan["reasons"] and "sensitive" in plan["reasons"]
+    assert "review" in plan["reasons"] and "sensitive" not in plan["reasons"]
     assert parsed["ambiguous"] and not parsed["inventory_complete"], parsed
     assert disposition["ambiguous"] and not disposition["inventory_complete"]
 
 
 def test_public_owner_status_overview_does_not_grant_merge_authority(tmp_path):
     review = public_owner_status_review()
-    api = ReviewApi([review], sensitive=True)
+    api = ReviewApi([review], sensitive=True, active_agent=True)
     result = _managed_cycle(api, tmp_path / "state.json")
     [plan] = result["pull_requests"]
     assert plan["review_valid"]
     assert plan["required_checks_green"]
     assert plan["sensitive"]
     assert not plan["auto_merge_eligible"]
-    assert "sensitive" in plan["reasons"] and "review" not in plan["reasons"]
+    assert "agent" in plan["reasons"] and "review" not in plan["reasons"]
+    assert "sensitive" not in plan["reasons"]
     assert not api.graphql_writes
 
 
@@ -591,7 +595,7 @@ def test_gate_status_accepts_entity_decoded_exact_live_summary(tmp_path, summary
     assert parsed["findings"] == []
     assert not parsed["ambiguous"] and parsed["inventory_complete"]
     assert plan["review_valid"] and plan["required_checks_green"]
-    assert plan["sensitive"] and not plan["auto_merge_eligible"]
+    assert plan["sensitive"] and plan["auto_merge_eligible"]
 
 
 @pytest.mark.parametrize("ci_state", ["pending", "failed"])
@@ -615,7 +619,7 @@ def test_public_owner_status_overview_does_not_override_required_ci(tmp_path, ci
     assert plan["review_valid"]
     assert not plan["required_checks_green"]
     assert not plan["auto_merge_eligible"]
-    assert "sensitive" in plan["reasons"]
+    assert "checks" in plan["reasons"] and "sensitive" not in plan["reasons"]
 
 
 @pytest.mark.parametrize("summary", [

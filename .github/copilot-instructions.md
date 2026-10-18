@@ -33,8 +33,11 @@ resolved threads, and all three successful required CI checks. Coding bot ID
 `198982749` does not qualify. Missing, stale, pending, dismissed or rejecting reviews
 block. Issue #92 removes independent-review merge gating: do not dispatch new
 independent review/report-correction tasks or publish `agent-review`. Preserve
-historical records and active task occupancy. Sensitive changes retain separate
-exact-SHA owner authorization and targeted review.
+historical records and active task occupancy. Sensitive-path classification is
+informative only; it adds no separate owner authorization or targeted review. Owner
+enrollment defines permitted work, while current Copilot review, resolved
+conversations, and required checks remain mandatory. Guarded exact-main deployment
+remains separate.
 
 The automatic Copilot review ruleset requests reviews. Coordinator and manual
 operators validate mandatory exact-head review evidence separately from GitHub's

@@ -22,7 +22,7 @@ source import and subsequent changes use protected pull requests.
    Missing, stale, pending, dismissed or rejecting reviews block. No independent
    report or `agent-review` publication is required. Do not generate independent
    review/report-correction tasks; preserve historical records and active occupancy.
-   Sensitive changes retain separate exact-SHA owner authorization and targeted review.
+   Sensitive-path classification adds no separate owner authorization or targeted review.
 4. At least one real PR review is published; genuine findings receive follow-up
    commits and checked thread resolution. Do not invent findings for a demo.
 5. Task worktrees isolate edits. Conflict reconciliation preserves both compatible
@@ -52,6 +52,12 @@ be unchanged. The review's finding counts, sections, inline findings, body-only
 findings, and thread states must agree. A zero-findings headline alone is
 insufficient.
 
+Issue #115 retires separate sensitive-change owner authorization. Sensitive-path
+classification does not add a command, grant, or targeted-review requirement to
+coordinator or merge eligibility. Owner enrollment, source and receipt provenance,
+task occupancy, exact-head Copilot review, resolved threads, and required checks
+remain mandatory.
+
 For example, the exact overview
 “The authorization-sensitive coordinator and review-evidence changes require
 final human security review despite extensive regression coverage.”
@@ -68,16 +74,12 @@ Qualification also requires a durable supervised qualification record tied to
 the exact head and base, plus complete authenticated task/session evidence
 showing no active or unknown task occupancy and certain source receipt and
 reservation provenance. Verify fresh-main ancestry, all three current exact-head
-required checks, and the same-run complete `source-ci` aggregate. For a
-sensitive change, independently read back the actual exact-head sensitive owner
-command and verify its binding to the selected review ID and SHA-256 of the exact
-raw UTF-8 review body, including author, repository, review identity,
-submission/edit chronology, and command time; the command must be created no
-earlier than the unchanged review submission. The command mechanics are specified in
-[`cloud-coordinator-spec.md`](cloud-coordinator-spec.md).
+required checks, and the same-run complete `source-ci` aggregate. Do not collect or
+revalidate a separate sensitive owner command. Preserve the SHA-256 of the exact
+raw UTF-8 review body in the qualification evidence.
 
 The record preserves the exact bot prose and the operator's reasoned
-disposition. Any head, base, review, or command change invalidates it;
+disposition. Any head, base, review, or provenance change invalidates it;
 missing, uncertain, or failing evidence blocks. The manual record does not
 change `review_valid`, the owner-authorization ledger, or collected evidence.
 The parser and collector retain their actual fail-closed result; supervised
@@ -94,7 +96,7 @@ owner authority, exact delegate identity, scope, and publication permission.
 Bot authorship or an assertion of delegation is insufficient. Publication and a
 distinct fresh verification pass may use the same authorized operator: this is
 not a second person, human security review, self-approval, or independent-review
-gate. Sensitive owner commands still require the actual owner.
+gate. Owner enrollment and existing command-security safeguards remain unchanged.
 No runtime validator or coordinator qualification command is implemented.
 Documentation tests check this contract, not a live artifact or authorization.
 
@@ -126,7 +128,7 @@ schema is an audit format, not proof of acceptance.
 | `occupancy_proof` | EvidenceRef | Complete task/session and publication occupancy proof. |
 | `checks` | Array of exactly three successful Check objects | One successful check per required context. |
 | `source_run` | Successful SourceRun | Complete hosted Source run and attempt. |
-| `sensitive` | Sensitive or null | Separate immutable owner command; null only for proven nonsensitive scope. |
+| `sensitive` | Sensitive or null | Historical evidence only; current qualification does not require an owner command. |
 | `role_request` | Text | Exact bot quotation, without rewriting or paraphrase. |
 | `reasoning` | Text | Why that quotation is solely a non-required role request. |
 | `machine_outcome` | MachineOutcome | Actual parser, collector, and authorization observations. |
@@ -161,14 +163,9 @@ Gate observations are discriminated objects with exact keys:
   `missing`, or `unknown`), `id` (ID or null), `attempt` (integer 1–100 or null),
   `head_sha` (SHA or null), `run_status` (Text or null), `conclusion` (Text or null),
   `completed_at` (Time or null), `proof` (EvidenceRef), and `reason` (Text).
-- Sensitive authorization: `gate` (`sensitive`), `outcome` (`authorized`,
-  `not-required`, `missing`, `rejected`, or `unknown`), `command` (Sensitive,
-  EvidenceRef, or null), `proof` (EvidenceRef), and `reason` (Text). `authorized`
-  requires the complete `Sensitive` object directly in `command`; `not-required`
-  requires `command=null` and proof of a nonsensitive diff. `missing` requires
-  `command=null` and a complete command inventory proving absence. `rejected`
-  requires an EvidenceRef to the actual rejected command and its observed rejection.
-  `unknown` retains whatever command evidence exists and never implies acceptance.
+- Legacy sensitive authorization: `gate` (`sensitive`) and its historical outcomes
+  remain readable in prior records. Do not collect or emit this gate for current
+  qualification; sensitive-path classification does not require a separate command.
 - Other gate: `gate` (`review`, `source`, `occupancy`, `machine`, or
   `authorization`), `outcome` (`missing`, `pending`, `failure`, `rejected`, `stale`,
   `unknown`, or `uncertain`), `observation` (EvidenceRef or null), `proof`
@@ -258,20 +255,19 @@ Named object types, with all keys mandatory:
   equal the root `head_sha`. Bind `source-ci`
   and `integration-tests` check IDs to the same run ID and run attempt; a rerun,
   partial pass, or another attempt's success is not this proof.
-- Sensitive: `comment_id` (ID), `author_id` (ID equal to owner), `body_sha256`
+- Legacy Sensitive: `comment_id` (ID), `author_id` (ID equal to owner), `body_sha256`
   (Digest), `created_at` (Time), `updated_at` (Time equal to `created_at`),
   `review_id` (ID equal to `review.id`), `review_raw_sha256` (Digest equal to
   `review.raw_sha256`), `head_sha` (SHA equal to root head), `proof` (EvidenceRef to a sensitive manifest).
-  Read the actual `/hermes authorize-sensitive <head-sha> review
-  <positive-review-id> <body-sha256>` command separately. Retain its exact body,
-  GitHub identity, repository/PR binding, and complete edit history. Require command
-  creation at or after review submission and at or before the observation.
+  This type is retained only to interpret historical records. Current
+  qualification does not read or require an `/hermes authorize-sensitive` command.
 - MachineOutcome: `review_valid` (boolean, actual observed value),
   `parser` (EvidenceRef), `collector` (EvidenceRef), `authorization` (EvidenceRef),
   `authorization_result` (enum `accepted`, `rejected`, `missing`, `unknown`,
-  `not-required`), `blocked_reason` (Text). Record actual machine acceptance or
-  rejection, including the blocked parser/collector disposition and the observed
-  source revision and time. `not-required` needs nonsensitive diff proof.
+  `not-required`), `blocked_reason` (Text). Authorization observations are
+  historical only; current qualification does not collect a sensitive grant.
+  Record actual machine acceptance or rejection, including the parser/collector
+  disposition and observed source revision and time.
   Each reference names a machine manifest for that actual observation.
   An unavailable observation is `unknown`, never inferred acceptance.
 - Evidence is a discriminated union, selected by `type`. Each alternative has
@@ -337,7 +333,7 @@ Named object types, with all keys mandatory:
 | `occupancy` | `tasks`, `sessions`, `workflows`, `comments`: public-response; `state`: coordinator/supervisor-reservation private-attestation; `publication-reservation`: publication-reservation private-attestation. |
 | `check` | `check-runs`, `binding`: public-response. |
 | `source-run` | `run`, `jobs`, `binding`: public-response. |
-| `sensitive` | `command`, `edit-history`: public-response; `review`: review-metadata manifest. |
+| `sensitive` | Historical only: `command`, `edit-history`: public-response; `review`: review-metadata manifest. |
 | `machine` | `observation`: machine-observation private-attestation; `source`: public-response. |
 
 Root `review_inventory`, `source_proof`, and `occupancy_proof` reference the
@@ -534,11 +530,13 @@ proof. The unchanged authority response discloses the synthetic operator delegat
 }
 ```
 
+The following examples preserve historical sensitive-gate shapes for schema
+readability. They do not require a sensitive command for current qualification.
 The examples contain no usable owner command, review, private proof, or live
 observation. Their positive IDs and results exist only where the synthetic evidence
 shows them. A blocked record cannot be changed to `status=supervised-only`: all
-three successful checks, a successful complete Source run, and the valid sensitive
-command or nonsensitive proof remain mandatory under the strict qualification schema.
+three successful checks and a successful complete Source run remain mandatory under
+the strict qualification schema. A separate sensitive command is not required.
 A blocked record with only successful gates, or a record with a head/base missing,
 null, or different from its evidence bindings, is invalid; never publish one.
 
@@ -761,7 +759,7 @@ do not publish a second qualification to work around uncertainty.
 The independent manual check repeats all bound reads, verifies fresh-main ancestry
 and complete changed-file inventory, unchanged review bodies/identity/chronology,
 all finding counts and resolved threads, source/provenance/occupancy, each required
-check and the complete same-attempt Source run, and the separate sensitive command.
+check and the complete same-attempt Source run.
 Compare raw and rendered prose semantically without changing the parser. Preserve
 the exact quotation and explain why no substantive or ambiguous concern remains;
 a headline or this schema is not sufficient. Retain validation time, validating
@@ -774,23 +772,19 @@ independent-review task or an extra required reviewer role.
 merge acceptance, authorization, or autonomous-trial success. Any other failing,
 missing, or uncertain gate requires `blocked`. Preserve the actual machine outcome;
 never set `review_valid` or edit a ledger. A runtime rejection still blocks that
-runtime path. In particular, if the existing sensitive command is rejected because
-the selected review remains ambiguous, a manual record cannot authorize it:
-record that exact contract conflict as `blocked`. Do not invent a command, positive
-collector outcome, new status, or approval to bridge the conflict.
+runtime path. Do not invent review evidence, a command, a status, or an approval.
 
-Read-only inspection of `selected_copilot_sensitive_review` and
-`sensitive_review_authorized` shows that selection does not call the prose parser.
-It checks the unique latest bot review, head/state, full-media bodies, raw digest
-and submission identity; authorization separately binds the unchanged actual owner
-command and its creation time. Do not infer either acceptance or rejection from
-parser denial. Without actual command/state/collector observations, authorization
-is `unknown`. The existing prose parser can still block review/merge independently;
-this manual contract changes neither function nor runtime gate.
+The retained `selected_copilot_sensitive_review` and
+`sensitive_review_authorized` helpers validate historical authorization records
+only. Current coordinator and eligibility paths do not call them. The existing
+prose parser and exact-head Copilot review checks remain independent requirements;
+missing or invalid review evidence still blocks.
+Historical sensitive review selection does not call the prose parser; retaining
+that helper does not grant current review or merge authority.
 
 Immediately before any merge, perform and publish fresh complete revalidation,
 including readback of every prior event and absence of competing successors.
-Any head/base/review/command/check/run-attempt/occupancy change or edited/deleted
+Any head/base/review/check/run-attempt/occupancy or provenance change or edited/deleted
 record invalidates the old snapshot immediately, whether or not an invalidation
 has yet been published. Unavailable evidence also blocks reuse of the old
 qualification immediately; absence of a publishable invalidation never permits
@@ -807,9 +801,9 @@ invalidated snapshot. Missing history, uncertain publication, or competing
 successors blocks until independently reconciled.
 
 The eventual normal protected merge is separate: re-read current head and main at
-the merge fence, use an expected-head SHA fence, require every ordinary protection
-and sensitive authorization, use no bypass, and independently read back the merged
-PR/main result. If these conditions cannot be satisfied without runtime override,
+the merge fence, use an expected-head SHA fence, require every ordinary protection,
+use no bypass, and independently read back the merged PR/main result. If these
+conditions cannot be satisfied without runtime override,
 stop and report the conflict. This contract does not execute merge or deployment.
 
 ## Migration baseline
