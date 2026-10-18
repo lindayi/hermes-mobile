@@ -1338,7 +1338,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const targets=[...approvalItems].filter(([key,item])=>{
         const actionState=approvalActionStates.get(key);
         const status=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status;
-        return item.id && ['sending','unknown'].includes(status)
+        return item.id && ['sending','unknown','expired'].includes(status)
           && (item.session_id===session.id || item.run_id===currentApprovalRun);
       }).slice(0,10);
       await Promise.all(targets.map(async([key,item])=>{

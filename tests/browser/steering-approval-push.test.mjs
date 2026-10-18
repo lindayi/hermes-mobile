@@ -85,6 +85,63 @@ test('an open approval expires on time without affecting a parallel approval',as
  }finally{app.destroy();win.close();}
 });
 
+test('a locally expired approval revalidates after external resolution without restoring controls',async t=>{
+ let now=1800000000000,next=0;const timers=new Map(),calls=[];
+ const expires_at=(now+10000)/1000,item={...approvalItem(),status:'pending',expires_at};
+ t.mock.method(Date,'now',()=>now);
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.setTimeout=(callback,delay)=>{const id=++next;timers.set(id,{callback,delay});return id;};
+ win.clearTimeout=id=>timers.delete(id);
+ let listReads=0,detailReads=0,externalStatus='pending';
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:++listReads===1?[item]:[]};
+  if(p==='/approvals/a'){
+   detailReads++;
+   if(detailReads===2)throw Object.assign(new Error('Temporary failure'),{status:503});
+   if(detailReads===3)return {...item,status:'pending'};
+   return {...item,status:externalStatus,executable:false,choices:[]};
+  }
+  return {items:[]};
+ }},win);
+ const refresh=async(expectedReads)=>{
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>listReads===expectedReads && detailReads===expectedReads);
+  await tick();
+ };
+ try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary'));
+  const card=doc.querySelector('[data-approval-id="a"]');
+  externalStatus='resolved';
+  now=expires_at*1000;
+  const expiry=[...timers].find(([,timer])=>timer.delay===10000);
+  assert.ok(expiry,'the mounted approval has a local expiry timer');
+  timers.delete(expiry[0]);expiry[1].callback();
+  assert.equal(card.querySelector('h3').textContent,'Expired');
+  assert.equal(card.querySelector('button'),null,'locally expired approvals stay non-actionable');
+
+  await refresh(2);
+  assert.equal(card.querySelector('h3').textContent,'Expired','a failed detail read keeps the safe local state');
+  assert.equal(card.querySelector('button'),null);
+
+  await refresh(3);
+  assert.equal(card.querySelector('h3').textContent,'Expired','stale pending detail cannot resurrect an expired approval');
+  assert.equal(card.querySelector('button'),null);
+
+  await refresh(4);
+  assert.equal(doc.querySelector('[data-approval-id="a"]'),card,'authoritative detail updates the existing card');
+  assert.equal(card.querySelector('h3').textContent,'Resolved');
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(doc.querySelector('.approval-notice').hidden,true);
+  assert.equal(calls.some(path=>path.endsWith('/decision') || path.startsWith('/auth/verify')),false,
+    'status reconciliation never decides or verifies an approval');
+ }finally{app.destroy();assert.equal(timers.size,0);win.close();}
+});
+
 for(const distance of [10000,2147483647+10000])test(`early approval expiry callback rearms to its deadline (${distance})`,async t=>{
  let now=1800000000000,next=0;const timers=new Map(),calls=[];
  t.mock.method(Date,'now',()=>now);

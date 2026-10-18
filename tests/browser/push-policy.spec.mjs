@@ -1054,11 +1054,39 @@ for(const [initial,final] of [['sending','resolved'],['unknown','cancelled']])te
  await page.evaluate(()=>app.destroy());
 }));
 
-test('a held transitional detail cannot update a newer session after route teardown',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
- control.notificationTarget=approvalTarget;control.approvals=[];
- control.approvalDetail=approvalRecord({status:'sending',executable:false,choices:[]});
+test('a locally expired approval rechecks its final status in the generated browser',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ await page.clock.install();
+ const item=approvalRecord({expires_at:Date.now()/1000+2});
+ control.notificationTarget=approvalTarget;control.approvals=[item];control.approvalDetail=item;
  await mount(page,'?notification=notice-target');
- await page.getByRole('heading',{name:'Decision pending',exact:true}).waitFor();
+ const card=page.locator('.approval-card'),cardHandle=await card.elementHandle();
+ await card.getByRole('button',{name:'Approve once'}).waitFor();
+
+ control.approvals=[];
+ control.approvalDetail=approvalRecord({status:'resolved',executable:false,choices:[]});
+ await page.clock.fastForward(2500);
+ await card.getByRole('heading',{name:'Expired',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0,'local expiry keeps decision controls disabled');
+
+ const detailPath='/approvals/approval-1',before=calls.filter(call=>call.p===detailPath && call.method==='GET').length;
+ const response=page.waitForResponse(res=>res.url().endsWith(detailPath) && res.request().method()==='GET');
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));
+ await response;
+ await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.ok(calls.filter(call=>call.p===detailPath && call.method==='GET').length>before);
+ assert.equal(await cardHandle.evaluate(node=>node===document.querySelector('.approval-card')),true,
+ 'authoritative revalidation updates the mounted card instead of adding a duplicate');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')
+ || call.p.startsWith('/runs/') && call.method==='POST').length,0,'reconciliation is read-only');
+ await page.evaluate(()=>app.destroy());
+}));
+
+for(const status of ['sending','expired'])test(`a held ${status} detail cannot update a newer session after route teardown`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ control.notificationTarget=approvalTarget;control.approvals=[];
+ control.approvalDetail=approvalRecord({status,executable:false,choices:[]});
+ await mount(page,'?notification=notice-target');
+ await page.getByRole('heading',{name:status==='sending'?'Decision pending':'Expired',exact:true}).waitFor();
  let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
  const detailPath='/approvals/approval-1',before=calls.filter(call=>call.p===detailPath && call.method==='GET').length;
  const listResponse=responseBatch(page,'/app-api/approvals',1);
