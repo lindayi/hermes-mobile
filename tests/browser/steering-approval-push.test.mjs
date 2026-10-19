@@ -857,8 +857,9 @@ test('terminal retirement preserves a dispatched approval across same-owner noti
   await waitFor(()=>card()?.querySelector('h3').textContent==='Decision status unknown');
   assert.equal(card().querySelector('button'),null);
   assert.equal(calls.filter(path=>path.endsWith('/decision')).length,1);
-  ack.resolve({status:'resolved'});await tick();
-  assert.equal(card().querySelector('h3').textContent,'Decision status unknown','old-route ACK cannot update the reopened card');
+  ack.resolve({status:'resolved'});
+  await waitFor(()=>card()?.querySelector('h3').textContent==='Resolved',
+   'the original ACK updates only the exact same-owner approval after route reentry');
  }finally{ack.resolve({status:'resolved'});app.destroy();win.close();}
 });
 
@@ -1601,6 +1602,215 @@ test('cold chat loads session-scoped approvals and reports a bounded partial lis
  }finally{app.destroy();win.close();}
 });
 
+test('a held decision stays dispatched across chat route reentry',async()=>{
+ const ack=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const pending={...approvalItem(),status:'pending'};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Exact chat title'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:[pending]};
+  if(p==='/approvals/a')return pending;
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return ack.promise;
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  card().querySelector('button.primary').click();
+  await waitFor(()=>calls.includes('/approvals/a/decision'));
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('.session-row'));
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>card()?.querySelector('h3'));
+  assert.equal(card().querySelector('h3').textContent,'Decision pending',
+   'the route reentry retains the dispatched decision identity without a terminal event');
+  const controls=[...card().querySelectorAll('button')];
+  assert.equal(controls.length,2);
+  assert.ok(controls.every(button=>button.disabled),'a pending-list replay cannot enable a competing decision');
+  controls[0].click();await tick();
+  assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,1);
+  ack.resolve({status:'resolved'});
+  await waitFor(()=>card()?.querySelector('h3').textContent==='Resolved',
+   'the original acknowledgement updates the current same-owner view');
+  assert.equal(calls.filter(path=>path==='/approvals/a/decision').length,1);
+ }finally{ack.resolve({status:'resolved'});app.destroy();win.close();}
+});
+
+for(const outcome of [403,404,409,503])test(`a dispatched ${outcome} decision outcome stays identity-bound across route reentry`,async()=>{
+ const decision=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const pending={...approvalItem(),status:'pending'},
+  sibling={...approvalItem(),id:'b',request_id:'native-b',status:'pending'};
+ let decisionPosts=0,listReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Exact chat title'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals'){listReads++;return {items:[pending,sibling]};}
+  if(p==='/approvals/a')return pending;
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision'){
+   if(++decisionPosts===1)return decision.promise;
+   return {status:'resolved'};
+  }
+  return {items:[]};
+ }},win);
+ const card=id=>doc.querySelector(`[data-approval-id="${id}"]`);
+ try{
+  await waitFor(()=>card('a')?.querySelector('button.primary'));
+  card('a').querySelector('button.primary').click();
+  await waitFor(()=>decisionPosts===1);
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('.session-row'));
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>card('a')?.querySelector('h3'));
+  assert.ok([...card('a').querySelectorAll('button')].every(button=>button.disabled));
+  assert.equal(card('b').querySelectorAll('button:not(:disabled)').length,2,
+   'an unrelated sibling approval remains actionable');
+  assert.equal(calls.filter(path=>path==='/auth/verify/options').length,1);
+  if(outcome===503){
+   decision.reject(Object.assign(new Error('Decision outcome unavailable'),{status:outcome}));
+   await waitFor(()=>card('a')?.querySelector('h3').textContent==='Decision status unknown');
+   assert.equal(card('a').querySelector('button'),null);
+   assert.equal(decisionPosts,1,'an uncertain outcome is never blindly retried');
+  }else{
+   const priorReads=listReads;
+   decision.reject(Object.assign(new Error('Decision rejected'),{status:outcome}));
+   await waitFor(()=>listReads>priorReads && card('a')?.querySelectorAll('button:not(:disabled)').length===2,
+    'definitive rejection needs a new authenticated pending list before retry');
+   assert.equal(decisionPosts,1,'reconciliation alone never resends a decision');
+   card('a').querySelector('button.primary').click();
+   await waitFor(()=>decisionPosts===2);
+   assert.equal(calls.filter(path=>path==='/auth/verify/options').length,2,
+    'a retry requires a new passkey ceremony');
+   await waitFor(()=>card('a')?.querySelector('h3').textContent==='Resolved');
+   assert.equal(decisionPosts,2);
+  }
+ }finally{
+  decision.resolve({status:'resolved'});app.destroy();win.close();
+ }
+});
+
+test('a late acknowledgement cannot change the same approval ID in another chat',async()=>{
+ const ack=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const original={...approvalItem(),status:'pending'},
+  other={...approvalItem(),run_id:'r2',request_id:'native-other',session_id:'s2',run_session_id:'s2',status:'pending'};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s2',title:'Second chat'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'First chat'};
+  if(p==='/sessions/s2')return {id:'s2',title:'Second chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p.startsWith('/sessions/s2/messages'))return {items:[],total:0,run:{id:'r2',session_id:'s2',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:o.query?.session_id==='s2'?[other]:[original]};
+  if(p==='/approvals/a')return original;
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return ack.promise;
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  card().querySelector('button.primary').click();
+  await waitFor(()=>calls.some(call=>call.p==='/approvals/a/decision'));
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('.session-row'));
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>card()?.querySelector('h3').textContent==='Approval required');
+  ack.resolve({status:'resolved'});
+  await tick();await tick();
+  assert.equal(card().querySelector('h3').textContent,'Approval required');
+  assert.equal(card().querySelectorAll('button:enabled').length,2,
+   'an acknowledgement for another canonical chat cannot alter this approval');
+  assert.equal(calls.filter(call=>call.p==='/approvals/a/decision').length,1);
+ }finally{ack.resolve({status:'resolved'});app.destroy();win.close();}
+});
+
+test('unknown run fences held approval reads and only fresh pending authority restores controls',async()=>{
+ const list=deferred(),initialDetail=deferred(),freshDetail=deferred(),calls=[],
+  dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const pending={...approvalItem(),status:'pending',session_id:'s',run_session_id:'old-alias'};
+ let status='waiting_for_approval',listMode='full',detailReads=0;
+ win.EventSource=class{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ };
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'old-alias',
+   run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Exact chat title'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'old-alias',status}};
+  if(p==='/runs/r')return {id:'r',session_id:'old-alias',status};
+  if(p==='/approvals'){
+   if(listMode==='empty-once'){listMode='full';return {items:[]};}
+   if(listMode==='hold-once'){listMode='full';return list.promise;}
+   return {items:[pending]};
+  }
+  if(p==='/approvals/a'){
+   if(++detailReads===1)return initialDetail.promise;
+   if(detailReads===2)return freshDetail.promise;
+   return pending;
+  }
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  await waitFor(()=>card()?.querySelector('button.primary') && win.activeStream && detailReads===1);
+  listMode='empty-once';
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>calls.filter(path=>path==='/approvals').length>=2,
+   'the omitted pending card starts exact-detail revalidation');
+  await tick();
+  listMode='hold-once';
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>listMode==='full' && calls.filter(path=>path==='/approvals').length>=3,
+   'the second pending list is held across the run transition');
+  win.activeStream.emit('status',{status:'unknown'});
+  await tick();
+  assert.equal(card().querySelectorAll('button').length,0,
+   'unknown run state immediately suspends unsubmitted decision controls');
+  assert.equal(card().querySelector('h3').textContent,'Approval details unavailable');
+  list.resolve({items:[pending]});
+  initialDetail.resolve(pending);
+  await tick();await tick();
+  assert.equal(card().querySelectorAll('button').length,0,
+   'pre-unknown list and detail reads cannot restore decision controls');
+  status='waiting_for_approval';
+  listMode='empty-once';
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>detailReads===2,'fresh omission starts a new exact-detail request');
+  assert.equal(card().querySelectorAll('button').length,0,
+   'a held fresh detail does not restore controls before its authority arrives');
+  freshDetail.resolve(pending);
+  await waitFor(()=>card()?.querySelectorAll('button').length===2,
+   'fresh authenticated exact pending detail restores controls after run recovery');
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+ }finally{
+  list.resolve({items:[pending]});initialDetail.resolve(pending);freshDetail.resolve(pending);
+  app.destroy();win.close();
+ }
+});
+
 test('a held approval detail times out, releases the batch, and allows fair retries',async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
  const nativeSetTimeout=win.setTimeout.bind(win),nativeClearTimeout=win.clearTimeout.bind(win);
@@ -1815,11 +2025,16 @@ for(const status of ['completed','cancelled','unknown'])test(`${status==='unknow
   stream.emit('status',{status});
   if(status==='unknown'){
    assert.equal(card('placeholder').querySelector('h3').textContent,'Approval details unavailable');
-   assert.equal(card('a').querySelector('h3').textContent,'Approval required');
+   assert.equal(card('a').querySelector('h3').textContent,'Approval details unavailable',
+    'unknown run suspends an unsubmitted sibling until fresh pending authority returns');
+   assert.equal(card('a').querySelector('button'),null);
    recoveredDetail={...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']};
    approvals=[pending,other];
    win.dispatchEvent(new win.Event('focus'));
    await waitFor(()=>card('placeholder').querySelector('button.primary'));
+   assert.equal(card('a').querySelector('h3').textContent,'Approval required',
+    'fresh exact pending list authority restores the sibling controls');
+   assert.equal(card('a').querySelectorAll('button').length,2);
    assert.equal(card('placeholder').querySelector('h3').textContent,'Approval required');
    assert.ok(calls.some(call=>call.p==='/approvals/placeholder'),'recovery uses exact pending detail without a new stream');
    approvals=[recoveredDetail,pending,other];
@@ -2120,7 +2335,7 @@ for(const choice of ['once','deny'])test(`${choice} waits for passkey verificati
   if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
-  if(p==='/approvals')return {items:[approvalItem()]};
+  if(p==='/approvals')return {items:[{...approvalItem(),status:'pending'}]};
   if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
   if(p==='/approvals/a/decision')return {status:'resolved'};
   return {items:[]};
@@ -2305,7 +2520,7 @@ test('known pre-admission 403 keeps a retryable approval instead of an unknown o
   if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
-  if(p==='/approvals')return {items:[approvalItem()]};
+  if(p==='/approvals')return {items:[{...approvalItem(),status:'pending'}]};
   if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
   if(p==='/auth/verify/finish')return {ok:true};
   if(p==='/approvals/a/decision')throw Object.assign(new Error('Fresh passkey verification required'),{status:403});
@@ -2317,7 +2532,8 @@ test('known pre-admission 403 keeps a retryable approval instead of an unknown o
   await waitFor(()=>calls.some(call=>call.p==='/auth/verify/options'));
   credential.resolve(fakeCredential());
   await waitFor(()=>calls.some(call=>call.p==='/approvals/a/decision'));
-  await waitFor(()=>card.querySelector('.inline-error').textContent.includes('Passkey verification expired'));
+  await waitFor(()=>card.querySelector('.inline-error').textContent.includes('Passkey verification expired'),
+   `known 403 must remain retryable: ${card.outerHTML}; ${JSON.stringify(calls.map(call=>call.p))}`);
   assert.equal(card.querySelector('h3').textContent,'Approval required');
   assert.equal(card.querySelectorAll('button').length,2);
   assert.doesNotMatch(card.textContent,/Decision status unknown/);

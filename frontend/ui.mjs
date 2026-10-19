@@ -45,6 +45,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
   const handledApprovals=new Set(),handledApprovalDetails=new Map(),locallyExpiredApprovals=new Set(),mountedLocallyExpiredApprovals=new Set();
   const maxHandledApprovals=100;
+  const approvalDecisionStates=new Map(),maxApprovalDecisionStates=1000;
+  let approvalDecisionAuthorityRevision=0;
   const finalApprovalStatuses=new Set(['resolved','resolved_external','cancelled','expired']);
   const approvalStatusRank={pending:0,sending:1,unknown:2};
   const preferredApprovalStatus=(fresh,cached,cachedIsLocalExpiry=false)=>{
@@ -54,6 +56,42 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     return (approvalStatusRank[cached] ?? 0)>(approvalStatusRank[fresh] ?? 0)?cached:fresh;
   };
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
+  const approvalDecisionKey=(owner,sessionId,item)=>JSON.stringify([owner,sessionId,item.run_session_id,
+    item.run_id,item.request_id,item.id]);
+  const approvalDecisionIdentity=(owner,sessionId,item)=>({
+    owner,canonicalSessionId:sessionId,id:item.id,session_id:item.session_id,
+    run_session_id:item.run_session_id,run_id:item.run_id,request_id:item.request_id
+  });
+  const approvalDispatchedResult=(record,status,error)=>approvalState?.decision(record,status,error);
+  const retainApprovalDecision=(key,record)=>{
+    if(approvalDecisionStates.get(key)===record){
+      approvalDecisionStates.delete(key);approvalDecisionStates.set(key,record);return true;
+    }
+    while(approvalDecisionStates.size>=maxApprovalDecisionStates){
+      const evictable=[...approvalDecisionStates].find(([oldKey,old])=>
+        oldKey!==key && !old.dispatched && !old.needsFreshAuthority);
+      if(!evictable)return false;
+      approvalDecisionStates.delete(evictable[0]);
+    }
+    approvalDecisionStates.set(key,record);return true;
+  };
+  const hasApprovalDecisionCapacity=key=>approvalDecisionStates.size<maxApprovalDecisionStates
+    || [...approvalDecisionStates].some(([oldKey,old])=>
+      oldKey!==key && !old.dispatched && !old.needsFreshAuthority);
+  const settleApprovalDecision=(owner,sessionId,item,status)=>{
+    const record=approvalDecisionStates.get(approvalDecisionKey(owner,sessionId,item));
+    if(!record)return;
+    record.dispatched=false;record.needsFreshAuthority=false;record.status=status;
+    record.state.pending=false;record.state.decisionStarted=false;record.state.dispatched=false;
+    record.state.uncertain=false;record.state.needsFreshAuthority=false;record.state.error='';
+  };
+  const markApprovalDecisionUncertain=(owner,sessionId,item)=>{
+    const record=approvalDecisionStates.get(approvalDecisionKey(owner,sessionId,item));
+    if(!record)return;
+    record.dispatched=true;record.needsFreshAuthority=false;record.status='unknown';
+    record.state.pending=false;record.state.decisionStarted=false;record.state.dispatched=true;
+    record.state.uncertain=true;record.state.needsFreshAuthority=false;
+  };
   const approvalDetailsUnavailable=item=>item?.status==='details_unavailable' || item?.details_unavailable===true;
   const locallyExpiredApproval=key=>locallyExpiredApprovals.has(key)||mountedLocallyExpiredApprovals.has(key);
   const rememberHandledApproval=(key,item,status,locallyExpired=false)=>{
@@ -67,7 +105,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       handledApprovals.delete(oldest);handledApprovalDetails.delete(oldest);locallyExpiredApprovals.delete(oldest);
     }
   };
-  function leaveConversation(){stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;mountedLocallyExpiredApprovals.clear();headerState?.destroy();headerState=null;root.querySelector('[data-rename-dialog]')?.remove();}
+  function leaveConversation(){
+    stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;
+    currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;
+    for(const [key,record] of approvalDecisionStates)if(record.owner===state.user?.id
+        && !record.dispatched && !record.needsFreshAuthority){
+      record.state.pending=false;record.state.decisionStarted=false;
+      approvalDecisionStates.delete(key);
+    }
+    mountedLocallyExpiredApprovals.clear();headerState?.destroy();headerState=null;
+    root.querySelector('[data-rename-dialog]')?.remove();
+  }
   function disconnect(){const cancel=cancelTracking;cancelTracking=null;cancel?.();stream?.close();stream=null;}
   const drafts = new Map();
   const attempts = new Map();
@@ -1181,6 +1229,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(actionState?.decisionStarted || actionState?.uncertain){clearApprovalExpiry(key);return;}
       if(!approvalExpired(item)){scheduleApprovalExpiry(key,item,card);return;}
       if(actionState){actionState.pending=false;actionState.decisionStarted=false;actionState.error='';}
+      const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+      if(decision && !decision.dispatched && !decision.needsFreshAuthority)
+        approvalDecisionStates.delete(decision.key);
       const finalItem={...item,status:'expired',executable:false,choices:[]};
       approvalPending.delete(key);approvalItems.set(key,finalItem);
       rememberHandledApproval(key,finalItem,'expired',true);approvalFinals.set(key,'expired');
@@ -1233,13 +1284,22 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         approvalCards.set(key,card);
       }
       let actionState=approvalActionStates.get(key);
+      const decisionKey=approvalDecisionKey(owner,session.id,item),
+        retainedDecision=approvalDecisionStates.get(decisionKey);
+      if(actionState?.retentionBlocked && hasApprovalDecisionCapacity(decisionKey)){
+        actionState.retentionBlocked=false;actionState.error='';
+      }
+      if(!actionState && retainedDecision?.owner===owner && retainedDecision.canonicalSessionId===session.id
+          && sameApprovalIdentity(retainedDecision.identity,item))actionState=retainedDecision.state;
       if(!actionState){actionState={pending:false,decisionStarted:false,uncertain:false,error:''};approvalActionStates.set(key,actionState);}
+      else approvalActionStates.set(key,actionState);
       let view=approvalCardViews.get(key);
       if(!view || view.item!==item){
-        if(actionState.pending && actionState.decisionStarted && !sameApprovalIdentity(view?.item,item))
+        if(actionState.pending && actionState.decisionStarted && view && !sameApprovalIdentity(view.item,item))
           actionState={pending:false,decisionStarted:false,uncertain:true,
             error:'Approval identity changed while a decision was in progress. Check its current status before deciding again.'};
-        else if((!actionState.pending || !actionState.decisionStarted) && !actionState.uncertain)
+        else if((!actionState.pending || !actionState.decisionStarted) && !actionState.uncertain
+            && !actionState.needsFreshAuthority && retainedDecision?.status!=='rejected')
           actionState={pending:false,decisionStarted:false,uncertain:false,error:''};
         approvalActionStates.set(key,actionState);
         const heading=h('h3',{id:`approval-title-${item.id}`});
@@ -1262,7 +1322,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
             && approvalCards.get(key)===card && card.isConnected && approvalPending.get(key)===item
             && approvalItems.get(key)===item && approvalActionStates.get(key)===actionState;
-          const sameAcknowledgedApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+          const sameCurrentApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
             && approvalCards.get(key)===card && card.isConnected
             && sameApprovalIdentity(item,approvalItems.get(key))
             && approvalActionStates.get(key)===actionState;
@@ -1270,10 +1330,27 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             && approvalCards.get(key)===card && card.isConnected
             && approvalActionStates.get(key)===actionState
             && !decisionStarted && !actionState.decisionStarted;
+          const sameDispatchedApproval=record=>approvalDecisionStates.get(record.key)===record
+            && record.owner===owner && record.canonicalSessionId===session.id
+            && sameApprovalIdentity(record.identity,item) && record.state===actionState && record.dispatched;
           if(!sameApproval() || actionState.pending || actionState.uncertain)return;
           if(approvalExpired(item)){expireApproval(key,item,card);return;}
+          if(actionState.needsFreshAuthority)return;
+          let decisionRecord=approvalDecisionStates.get(decisionKey);
+          if(decisionRecord?.dispatched || decisionRecord?.needsFreshAuthority)return;
+          if(!decisionRecord || decisionRecord.state!==actionState){
+            const identity=approvalDecisionIdentity(owner,session.id,item);
+            decisionRecord={...identity,identity,key:decisionKey,state:actionState,
+              dispatched:false,needsFreshAuthority:false};
+            if(!retainApprovalDecision(decisionKey,decisionRecord)){
+              actionState.retentionBlocked=true;
+              actionState.error='Too many unresolved approval decisions are active. Resolve one before deciding again.';
+              renderApprovals();return;
+            }
+          }
           const hadFocus=card.contains(doc.activeElement);
-          actionState.pending=true;actionState.error='';renderApprovals();
+          actionState.pending=true;actionState.error='';actionState.retentionBlocked=false;
+          decisionRecord.status='verifying';renderApprovals();
           if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
           let decisionStarted=false;
           try{
@@ -1285,35 +1362,51 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               return;
             }
             if(approvalExpired(item)){expireApproval(key,item,card);return;}
-            decisionStarted=true;actionState.decisionStarted=true;
+            decisionStarted=true;actionState.decisionStarted=true;actionState.dispatched=true;
+            decisionRecord.dispatched=true;
             await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
               {method:'POST',body:{decision:choice}});
-            if(!sameAcknowledgedApproval())return;
-            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
-            approvalRevision++;approvalPending.delete(key);rememberHandledApproval(key,item,'resolved');approvalFinals.set(key,'resolved');
-            clearApprovalExpiry(key);
-            renderApprovals();
+            if(!sameDispatchedApproval(decisionRecord))return;
+            actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+            actionState.uncertain=false;actionState.needsFreshAuthority=false;actionState.error='';
+            decisionRecord.dispatched=false;decisionRecord.needsFreshAuthority=false;
+            decisionRecord.status='resolved';
+            const resolved={...item,status:'resolved',executable:false,choices:[]};
+            rememberHandledApproval(key,resolved,'resolved');
+            approvalDispatchedResult(decisionRecord,'resolved');
           }catch(error){
-            if(!sameAcknowledgedApproval())return;
+            if(decisionStarted ? !sameDispatchedApproval(decisionRecord) : !sameUnsubmittedApproval())return;
+            if(!decisionStarted){
+              actionState.pending=false;actionState.error=errorMessage(error);
+              if(error.status===401){expiredSession();return;}
+              renderApprovals();return;
+            }
             if(error.status===403){
-              actionState.pending=false;actionState.decisionStarted=false;
+              actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+              actionState.needsFreshAuthority=true;
               actionState.error='Passkey verification expired. Verify again before deciding.';
             }else if(decisionStarted && [404,409].includes(error.status)){
-              await reconcileApprovals();
-              if(!sameAcknowledgedApproval())return;
-              actionState.pending=false;actionState.decisionStarted=false;
+              actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+              actionState.needsFreshAuthority=true;
               actionState.error='This approval changed or is no longer pending. Review its current state before deciding.';
             }else{
               actionState.pending=false;actionState.decisionStarted=false;actionState.error=errorMessage(error);
             }
-            if(decisionStarted && ![403,404,409].includes(error.status)){
+            if(decisionStarted && [403,404,409].includes(error.status)){
+              decisionRecord.dispatched=false;decisionRecord.needsFreshAuthority=true;
+              decisionRecord.status='rejected';
+              decisionRecord.retryAuthorityRevision=++approvalDecisionAuthorityRevision;
+              approvalDispatchedResult(decisionRecord,'rejected',actionState.error);
+            }else if(decisionStarted){
               actionState.uncertain=true;
+              actionState.dispatched=true;decisionRecord.dispatched=true;
               const unresolved={...(approvalItems.get(key) || item),status:'unknown',executable:false,choices:[]};
-              approvalRevision++;approvalItems.set(key,unresolved);approvalPending.delete(key);
-              rememberHandledApproval(key,unresolved,'unknown');approvalFinals.set(key,'unknown');
+              decisionRecord.status='unknown';
+              rememberHandledApproval(key,unresolved,'unknown');
+              approvalDispatchedResult(decisionRecord,'unknown');
             }
             if(error.status===401){expiredSession();return;}
-            renderApprovals();
+            if(!decisionStarted && sameCurrentApproval())renderApprovals();
           }
         };
         let approve=null,deny=null;
@@ -1336,11 +1429,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       view.itemError.hidden=typeof item.error!=='string' || !item.error;
       view.expires.hidden=!Number.isFinite(item.expires_at) || effectiveStatus!=='pending';
       view.detailsUnavailable.hidden=item.details_unavailable!==true && effectiveStatus!=='details_unavailable';
-      const canDecide=view.canDecide && !approvalExpired(item)
+      const canDecide=view.canDecide && !approvalExpired(item) && !actionState.needsFreshAuthority
+        && !actionState.retentionBlocked
         && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
       view.decisions.hidden=!canDecide;
       for(const control of [view.approve,view.deny])if(control)control.disabled=actionState.pending || actionState.uncertain;
-      if(!canDecide && !actionState.pending && view.decisions.childNodes.length)view.decisions.replaceChildren();
+      if(!canDecide && !actionState.pending && !actionState.needsFreshAuthority
+          && !actionState.retentionBlocked
+          && view.decisions.childNodes.length)view.decisions.replaceChildren();
       const focused=card.contains(doc.activeElement)?doc.activeElement:null;
       placeApprovalCard(card,item);
       if(status==='pending')scheduleApprovalExpiry(key,item,card);
@@ -1397,6 +1493,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
           approvalItems.set(key,next);approvalPending.delete(key);
           rememberHandledApproval(key,next,status);approvalFinals.set(key,status);clearApprovalExpiry(key);
+          if(finalApprovalStatuses.has(detail.status) || detail.status==='unavailable')
+            settleApprovalDecision(owner,session.id,item,status);
+          else if(status==='unknown')markApprovalDecisionUncertain(owner,session.id,item);
           if(finalApprovalStatuses.has(detail.status) && actionState){
             actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
           }
@@ -1406,6 +1505,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     const refreshMissingApprovalDetails=async(listedKeys,revision,listRevision)=>{
       if(missingApprovalDetailsRefreshing)return;
+      const decisionAuthorityRevision=approvalDecisionAuthorityRevision;
       const eligible=[...approvalItems].filter(([key,item])=>{
         const actionState=approvalActionStates.get(key);
         return item.id && !listedKeys.has(key) && !handledApprovals.has(key)
@@ -1442,7 +1542,20 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             next=live?detail:{...detail,status,executable:false,choices:[],details_unavailable:false,
               error:approvalDetailsUnavailable(detail) || approvalDetailsUnavailable(item)?'':detail.error};
           if(live && actionState?.pending)return;
-          if(sameApprovalData(item,next))return;
+          let authorityChanged=false;
+          if(status==='pending' && actionState?.needsFreshAuthority){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(decision?.needsFreshAuthority && decision.retryAuthorityRevision<=decisionAuthorityRevision
+                && decision.owner===owner && decision.canonicalSessionId===session.id
+                && sameApprovalIdentity(decision.identity,detail)){
+              decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;
+              authorityChanged=true;
+            }
+          }
+          if(sameApprovalData(item,next)){
+            if(authorityChanged)renderApprovals();
+            return;
+          }
           if(actionState?.pending){actionState.pending=false;actionState.error='';}
           approvalItems.set(key,next);
           if(status==='pending'){
@@ -1456,6 +1569,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }finally{missingApprovalDetailsRefreshing=false;}
     };
     const reconcileApprovals=async()=>{
+      const decisionAuthorityRevision=approvalDecisionAuthorityRevision;
       const revision=++approvalRevision;
       void refreshTransitionalApprovalDetails();
       try{
@@ -1480,6 +1594,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             approvalItems.set(key,item);approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
             continue;
           }
+          if(item.status==='pending'){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(decision?.needsFreshAuthority && decision.owner===owner
+                && decision.canonicalSessionId===session.id
+                && sameApprovalIdentity(decision.identity,item)
+                && decision.retryAuthorityRevision<=decisionAuthorityRevision){
+              decision.needsFreshAuthority=false;
+            }
+          }
           if(!approvalExpired(item)){activeItems.push(item);continue;}
           const key=approvalKey(item),actionState=approvalActionStates.get(key);
           if(actionState?.decisionStarted || actionState?.uncertain){
@@ -1494,13 +1617,21 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const next=new Map(activeItems.map(item=>{
           const key=approvalKey(item),previous=approvalPending.get(key) || approvalItems.get(key);
           const unchanged=sameApprovalData(previous,item);
-          const actionState=approvalActionStates.get(key);
+          const actionState=approvalActionStates.get(key),
+            decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+            preservesRejected=actionState?.needsFreshAuthority && decision?.state===actionState
+              && sameApprovalIdentity(decision.identity,item);
           const sameIdentity=sameApprovalIdentity(previous,item);
           if(previous && !unchanged && !(sameIdentity && actionState?.pending && actionState.decisionStarted)
-              && !actionState?.uncertain)
+              && !actionState?.uncertain && !preservesRejected)
             approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
           return [key,unchanged?previous:item];
         }));
+        for(const item of activeItems){
+         const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+         if(decision && !decision.needsFreshAuthority
+             && sameApprovalIdentity(decision.identity,item))decision.state.needsFreshAuthority=false;
+        }
         const listedKeys=new Set(data.items.map(approvalKey));
         for(const [key,item] of approvalPending)if(!next.has(key) && !listedKeys.has(key)
             && !approvalFinals.has(key) && !handledApprovals.has(key))next.set(key,item);
@@ -1514,6 +1645,28 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     approvalState={
       reconcile:reconcileApprovals,
       run(id,runSessionId){currentApprovalRun=id;currentApprovalRunSession=runSessionId || session.id;renderApprovals();},
+      decision(record,status,error){
+        if(!current() || !record || record.owner!==owner || record.canonicalSessionId!==session.id
+            || approvalDecisionStates.get(record.key)!==record)return false;
+        const key=approvalKey(record.identity),existing=approvalItems.get(key);
+        if(!existing || !sameApprovalIdentity(existing,record.identity))return false;
+        const actionState=record.state;
+        approvalActionStates.set(key,actionState);
+        if(status==='resolved'){
+          const finalItem={...existing,status:'resolved',executable:false,choices:[]};
+          approvalRevision++;approvalPending.delete(key);approvalItems.set(key,finalItem);
+          approvalFinals.set(key,'resolved');clearApprovalExpiry(key);
+        }else if(status==='unknown'){
+          const unresolved={...existing,status:'unknown',executable:false,choices:[]};
+          approvalRevision++;approvalItems.set(key,unresolved);approvalPending.delete(key);
+          approvalFinals.set(key,'unknown');
+        }else{
+          actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+          actionState.uncertain=false;actionState.needsFreshAuthority=true;actionState.error=error || '';
+          approvalRevision++;renderApprovals();void reconcileApprovals();return true;
+        }
+        renderApprovals();return true;
+      },
       event(item,runId,runSessionId){
         const sourceSessionId=runSessionId || currentApprovalRunSession;
         if(typeof runId!=='string' || !runId || typeof sourceSessionId!=='string' || !sourceSessionId
@@ -1540,7 +1693,22 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         renderApprovals();return true;
       },
       finish(runId,status){
-        if(status==='unknown')return;
+        if(status==='unknown'){
+          approvalRevision++;
+          for(const [key,item] of approvalItems)if(item.run_id===runId
+              && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+              actionState=decision?.state || approvalActionStates.get(key);
+            if(decision?.dispatched || actionState?.dispatched || actionState?.uncertain)continue;
+            if(actionState){actionState.pending=false;actionState.decisionStarted=false;}
+            if(decision && !decision.needsFreshAuthority)approvalDecisionStates.delete(decision.key);
+            const unavailable={...item,status:'details_unavailable',expires_at:null,executable:false,
+              choices:[],details_unavailable:true,error:'Approval details are temporarily unavailable.'};
+            approvalPending.delete(key);approvalItems.set(key,unavailable);
+            approvalFinals.set(key,'details_unavailable');
+          }
+          renderApprovals();return;
+        }
         approvalRevision++;
         for(const [key,item] of approvalItems)if(item.run_id===runId
             && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
@@ -1550,8 +1718,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             ...(approvalDetailsUnavailable(item)?{details_unavailable:false,error:''}:{})};
           rememberHandledApproval(key,finalItem,finalStatus);
           approvalPending.delete(key);approvalItems.set(key,finalItem);approvalFinals.set(key,finalStatus);
-          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain)
-            approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain){
+            actionState.pending=false;
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(decision && !decision.dispatched && !decision.needsFreshAuthority)
+              approvalDecisionStates.delete(decision.key);
+          }
         }
         genericApproval=false;renderApprovals();
       }
@@ -1643,6 +1815,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
                 :preferredApprovalStatus(item.status,cachedItem?.status,locallyExpiredApproval(key));
             const finalItem={...(finalStatus===item.status?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
             const actionState=approvalActionStates.get(key);
+            if(finalApprovalStatuses.has(item.status) || finalStatus==='unavailable')
+              settleApprovalDecision(owner,session.id,item,finalStatus);
+            else if(finalStatus==='unknown')markApprovalDecisionUncertain(owner,session.id,item);
             if(finalApprovalStatuses.has(item.status) && actionState){
               actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
             }
@@ -1719,6 +1894,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               && !actionState?.pending && !actionState?.uncertain){
             approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
           }
+          if(freshFinal || item.status==='unavailable')
+            settleApprovalDecision(owner,session.id,item,nextStatus);
+          else if(nextStatus==='unknown')markApprovalDecisionUncertain(owner,session.id,item);
           approvalItems.set(key,item);
           if(item.status==='pending'){
             approvalPending.set(key,item);approvalFinals.delete(key);

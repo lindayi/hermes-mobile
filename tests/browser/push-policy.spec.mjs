@@ -1011,7 +1011,9 @@ for(const status of ['completed','cancelled','unknown'])test(`generated ${status
  if(status==='unknown'){
   await page.locator('[role="status"][aria-hidden="true"]').filter({hasText:/^unknown$/}).waitFor();
   assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable');
-  assert.equal(await card(pending.id).getByRole('heading').innerText(),'Approval required');
+  assert.equal(await card(pending.id).getByRole('heading').innerText(),'Approval details unavailable');
+  assert.equal(await card(pending.id).getByRole('button').count(),0,
+   'unknown run suspends the unsubmitted approval until fresh authority returns');
   const upgraded={...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']};
   control.approvals=[pending,other];
   control.approvalDetails[placeholder.id]=upgraded;
@@ -1021,6 +1023,9 @@ for(const status of ['completed','cancelled','unknown'])test(`generated ${status
   await page.evaluate(()=>dispatchEvent(new Event('focus')));
   await exact;
   await card('placeholder').getByRole('button',{name:'Approve once',exact:true}).waitFor();
+  await card(pending.id).getByRole('heading',{name:'Approval required',exact:true}).waitFor();
+  assert.equal(await card(pending.id).getByRole('button').count(),2,
+   'the fresh pending list restores the sibling approval controls');
   control.approvals=[upgraded,pending,other];
   await page.getByRole('button',{name:'Chats',exact:true}).click();
   await page.getByRole('button',{name:'First conversation',exact:true}).click();

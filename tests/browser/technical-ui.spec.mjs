@@ -2,9 +2,12 @@ import {artifactURL} from './artifacts.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {readFile,mkdir} from 'node:fs/promises';
+import {readFile,mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {generatedAssets} from './generated-assets.mjs';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR?process.env.HERMES_FRONTEND_DIR.replace(/\/$/,'')+'/':fileURLToPath(new URL('../../frontend/',import.meta.url));
 
@@ -118,4 +121,122 @@ test('technical chat tools, expanded draft, title edit grouping and resolved app
   for(const size of [{width:320,height:568},{width:390,height:450},{width:844,height:390},{width:1280,height:900}]){await page.setViewportSize(size);await waitForViewportController(page,size);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'no horizontal overflow');const send=await page.locator('.composer .send').boundingBox();assert.ok(send.y+send.height<=size.height,'input controls remain inside viewport');}
   await page.setViewportSize({width:390,height:844});await waitForViewportController(page,{width:390,height:844});await mkdir(artifactURL(),{recursive:true});await page.screenshot({path:fileURLToPath(artifactURL('technical-chat-mobile.png'))});await page.getByRole('button',{name:'Expand editor',exact:true}).click();await page.screenshot({path:fileURLToPath(artifactURL('expanded-editor-mobile.png'))});assert.equal(posts,0);assert.deepEqual(errors,[]);
  }finally{await browser.close();for(const c of clients)c.end();server.closeAllConnections();await new Promise(r=>server.close(r));}
+});
+
+test('generated browser preserves dispatched decisions and fences unknown-run approval reads',{timeout:60000},async()=>{
+ const temporary=await mkdtemp(join(tmpdir(),'hermes-approval-lifecycle-')),assets=generatedAssets(temporary),
+  session={id:'research',title:'Lifecycle fixture'},run={id:'research-run',session_id:'source-alias',status:'waiting_for_approval'},
+  first={id:'a',run_id:run.id,request_id:'request-a',session_id:session.id,run_session_id:'source-alias',
+   status:'pending',title:'First action',command:'echo first',target:'synthetic',expires_at:2000000000,executable:true,choices:['once','deny']},
+  sibling={...first,id:'b',request_id:'request-b',title:'Sibling action',command:'echo sibling'},
+  calls=[],eventStreams=new Set(),decisionAck={};
+ let decisionPosts=0,detailReads=0,runState='waiting_for_approval',listMode='full',
+  heldList=null,holdDetail=false,releaseDetail=null;
+ let server,browser;
+ const json=(res,data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
+ try{
+  server=createServer(async(req,res)=>{
+   const url=new URL(req.url,'http://fixture'),path=url.pathname;
+   if(path.startsWith('/hermes/app-api/')){
+    const p=path.slice('/hermes/app-api'.length);calls.push({path:p,method:req.method});
+    if(p==='/runs/research-run/events'){
+     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
+     res.write(': connected\n\n');eventStreams.add(res);res.on('close',()=>eventStreams.delete(res));return;
+    }
+    if(p==='/auth/me')return json(res,{user:{id:'fixture-owner',role:'owner',status:'ready'},csrf_token:'fixture'});
+    if(p==='/sessions')return json(res,{items:[session],total:1});
+    if(p==='/sessions/research')return json(res,session);
+    if(p==='/sessions/research/messages')return json(res,{items:[],total:0,offset:0,run});
+    if(p==='/sessions/research/telemetry')return json(res,{});
+    if(p==='/runs/research-run')return json(res,{...run,status:runState});
+    if(p==='/runs/research-run/controls')return json(res,{steering:false,attempts:[]});
+    if(p==='/approvals'){
+     if(listMode==='hold-once'){
+      listMode='full';heldList={resolve:()=>json(res,{items:[first,sibling]})};return;
+     }
+     const items=listMode==='omit-sibling'?[first]:[first,sibling];
+     if(listMode==='omit-sibling')listMode='full';
+     return json(res,{items});
+    }
+    if(p==='/approvals/b' && req.method==='GET'){
+     detailReads++;
+     if(holdDetail)await new Promise(resolve=>{releaseDetail=()=>{json(res,sibling);resolve();};});
+     else return json(res,sibling);
+     return;
+    }
+    if(p==='/auth/verify/options')return json(res,{challenge_id:'fixture',publicKey:{challenge:'AQ'}});
+    if(p==='/auth/verify/finish')return json(res,{verified:true});
+    if(p==='/approvals/a/decision' && req.method==='POST'){
+     decisionPosts++;await new Promise(resolve=>{decisionAck.resolve=resolve;});return json(res,{status:'resolved'});
+    }
+    return json(res,{items:[]});
+   }
+   const relative=path.replace(/^\/hermes\//,'')||'index.html';
+   if(relative.includes('..'))return res.writeHead(400).end();
+   try{
+    const body=await readFile(join(assets,relative));
+    res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript',svg:'image/svg+xml',webmanifest:'application/manifest+json'})[relative.split('.').pop()]||'application/octet-stream'});
+    res.end(body);
+   }catch{res.writeHead(404).end();}
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'}),page=await context.newPage();
+  page.setDefaultTimeout(7000);
+  await page.addInitScript(()=>{
+   window.PublicKeyCredential=class {};
+   Object.defineProperty(navigator,'credentials',{configurable:true,value:{get:async()=>({
+    id:'fixture',rawId:new Uint8Array([1]).buffer,type:'public-key',getClientExtensionResults:()=>({}),
+    response:{clientDataJSON:new Uint8Array([1]).buffer,authenticatorData:new Uint8Array([2]).buffer,
+     signature:new Uint8Array([3]).buffer,userHandle:null}
+   })}});
+  });
+  await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
+  await page.locator('.session-row').click();
+  await page.locator('[data-approval-id="a"] button.primary').click();
+  await page.waitForFunction(()=>document.querySelector('[data-approval-id="a"] h3')?.textContent==='Decision pending');
+  for(let i=0;i<100 && decisionPosts!==1;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(decisionPosts,1,'the explicit decision POST is held');
+  await page.getByRole('navigation',{name:'Main navigation'}).getByRole('button',{name:'Chats',exact:true}).click();
+  await page.locator('.session-row').waitFor();
+  await page.locator('.session-row').click();
+  await page.locator('[data-approval-id="a"] h3').filter({hasText:'Decision pending'}).waitFor();
+  assert.equal(await page.locator('[data-approval-id="a"] button:enabled').count(),0,
+   'generated browser does not re-enable the held decision on route reentry');
+  assert.equal(await page.locator('[data-approval-id="b"] button:enabled').count(),2,
+   'the sibling approval remains actionable');
+
+  holdDetail=true;listMode='omit-sibling';
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(()=>document.querySelector('[data-approval-id="b"]')!==null);
+  for(let i=0;i<100 && detailReads===0;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(detailReads,1,'omission starts exact-detail revalidation for the sibling');
+  listMode='hold-once';
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+  for(let i=0;i<100 && !heldList;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(heldList,'an approval list read is held before the unknown transition');
+  for(const stream of eventStreams)stream.write(`event: status\ndata: ${JSON.stringify({status:'unknown'})}\n\n`);
+  await page.locator('[data-approval-id="b"] h3').filter({hasText:'Approval details unavailable'}).waitFor();
+  assert.equal(await page.locator('[data-approval-id="b"] button').count(),0,
+   'unknown run immediately suspends only the unsubmitted sibling');
+  assert.equal(await page.locator('[data-approval-id="a"] h3').textContent(),'Decision pending',
+   'unknown run does not reinterpret the dispatched decision');
+  heldList.resolve();releaseDetail?.();
+  await page.waitForTimeout(30);
+  assert.equal(await page.locator('[data-approval-id="b"] button').count(),0,
+   'pre-unknown list and exact detail cannot restore stale controls');
+  runState='waiting_for_approval';listMode='full';
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+  await page.locator('[data-approval-id="b"] button.primary').waitFor();
+  assert.equal(await page.locator('[data-approval-id="b"] button:enabled').count(),2,
+   'fresh pending authority restores controls after run recovery');
+  decisionAck.resolve();
+  await page.locator('[data-approval-id="a"] h3').filter({hasText:'Resolved'}).waitFor();
+  assert.equal(decisionPosts,1,'route and run recovery never resend the held decision');
+ }finally{
+  decisionAck.resolve?.();for(const stream of eventStreams)stream.end();
+  if(browser)await browser.close();
+  if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+  await rm(temporary,{recursive:true,force:true});
+ }
 });
