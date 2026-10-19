@@ -1972,6 +1972,11 @@ Positively completed `inventory_blocked` fixer handoffs are terminal too and are
 retired by the same head-change/inactive contract; active, current-head, and
 uncertain work and pending outbox posts remain retained. Their retirement comparison
 uses the authenticated `receipt_head` when available, not the dispatch head.
+Source receipt-anchor publication has its own durable reservation counter, capped
+at the source-repair limit. The reservation is charged atomically before posting,
+survives restart and re-enrollment, and is not charged again when recovering an
+existing anchor. Therefore main changes before task claim cannot create an
+unbounded sequence of owner comments.
 Compaction preserves every action correlated by map key, embedded reservation key,
 or task ID to a retained abandonment root, and conflicting copies of retained
 receipt proofs. Missing or foreign issue fields never sever that correlation.

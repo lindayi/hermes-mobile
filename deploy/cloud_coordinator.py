@@ -418,6 +418,9 @@ def _renewed_bound_enrollment(prior, incoming):
             "neutral_attempts_unknown",
             "neutral_attempts" not in prior,
         ),
+        "source_anchor_reservations": prior.get(
+            "source_anchor_reservations", prior.get("attempts", 0),
+        ),
         "repair_progress": deepcopy(prior.get(
             "repair_progress", _new_repair_progress(legacy_unknown=True),
         )),
@@ -11730,6 +11733,8 @@ class StateStore:
                     or type(enrollment["neutral_attempts_unknown"]) is not bool
                     or type(enrollment.get("neutral_anchor_reservations", 0)) is not int
                     or not 0 <= enrollment.get("neutral_anchor_reservations", 0) <= 2**31 - 1
+                    or type(enrollment.get("source_anchor_reservations", 0)) is not int
+                    or not 0 <= enrollment.get("source_anchor_reservations", 0) <= 2**31 - 1
                     or ("repair_progress" in enrollment
                         and not _repair_progress_valid(enrollment["repair_progress"]))):
                 raise CoordinatorError("Repair budget or progress history is invalid")
@@ -11739,6 +11744,16 @@ class StateStore:
                     if not enrollment["neutral_attempts_unknown"] else 0,
                     sum(
                         entry.get("kind") == "neutral-receipt-anchor"
+                        and str(entry.get("issue")) == issue_key
+                        for entry in data["outbox"].values()
+                        if isinstance(entry, dict)
+                    ),
+                )
+            if "source_anchor_reservations" not in enrollment:
+                enrollment["source_anchor_reservations"] = max(
+                    enrollment["attempts"],
+                    sum(
+                        entry.get("kind") == "continuation-source-receipt-anchor"
                         and str(entry.get("issue")) == issue_key
                         for entry in data["outbox"].values()
                         if isinstance(entry, dict)
@@ -12098,6 +12113,10 @@ class StateStore:
                         "neutral_anchor_reservations": previous.get(
                             "neutral_anchor_reservations", 0,
                         ),
+                        "source_anchor_reservations": previous.get(
+                            "source_anchor_reservations",
+                            previous.get("attempts", 0),
+                        ),
                         "repair_progress": repair_progress,
                         "sensitive_sha": None, "active": True,
                     }
@@ -12238,6 +12257,7 @@ class StateStore:
                 return False
             data["enrollments"][key] = {
                 **enrollment, "attempts": 0, "neutral_attempts": 0,
+                "source_anchor_reservations": 0,
                 "repair_progress": _new_repair_progress(),
                 "sensitive_sha": None,
                 "sensitive_authorization": None, "targeted_review": None,
@@ -12882,6 +12902,9 @@ class StateStore:
                 enrollment["neutral_anchor_reservations"] += 1
             if entry.get("kind") == "continuation-source-receipt-anchor":
                 enrollment = data["enrollments"].get(str(entry.get("issue")), {})
+                if (not enrollment.get("active")
+                        or enrollment["source_anchor_reservations"] >= REPAIR_LIMIT):
+                    return False
                 if "owner_continuation_binding" in entry:
                     records = _valid_owner_continuation_claims(
                         enrollment, data["actions"],
@@ -12932,6 +12955,7 @@ class StateStore:
                                 )
                             )):
                         return False
+                enrollment["source_anchor_reservations"] += 1
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
         return self._mutate(add)

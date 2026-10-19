@@ -240,8 +240,6 @@ def test_sha_bound_enrollment_requires_immutable_timestamp_evidence(timestamps):
 
 
 def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
-    from deploy.task_receipts import receipt_instruction
-
     result_head = "c" * 40
     api = FakeApi(unresolved=True, sensitive=True, head_sha=HEAD)
     api.comments[0]["body"] = f"/hermes enroll {HEAD}"
@@ -257,38 +255,11 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
         for field in ("sensitive_sha", "sensitive_authorization", "targeted_review")
         if field in legacy_enrollment
     }
-    task = api.tasks[fix["task_id"]]
-    session_id = "session-1"
-    task.update(
-        state="completed",
-        updated_at="2026-10-01T12:04:00Z",
-        sessions=[{
-            "id": session_id, "task_id": fix["task_id"], "state": "completed",
-            "user": {"id": OWNER}, "owner": {"id": OWNER},
-            "repository": {"id": 1399942965}, "head_ref": "topic",
-            "base_ref": "main", "prompt": receipt_instruction(fix["dispatch_nonce"], pull_number=16, start_head=HEAD, base_sha=BASE),
-            "created_at": "2026-10-01T12:01:00Z",
-            "completed_at": "2026-10-01T12:04:00Z",
-        }],
-    )
     api.head_sha = result_head
     api.pull["head"]["sha"] = result_head
-    body = (
-        "Hermes-Task-Receipt: v1\n"
-        f"nonce={fix['dispatch_nonce']}\n"
-        f"task={fix['task_id']}\n"
-        f"session={session_id}\n"
-        "pr=16\n"
-        f"start_head={HEAD}\n"
-        f"head={result_head}\n"
-        f"base={BASE}\n"
-        "result=ready"
-    )
-    api.comments.append({
-        "id": 900, "user": {"id": 198982749}, "body": body,
-        "created_at": "2026-10-01T12:04:00Z",
-        "updated_at": "2026-10-01T12:04:00Z",
-    })
+    api.complete_task(fix["task_id"], fix, head_sha=result_head)
+    session_id = api.tasks[fix["task_id"]]["sessions"][0]["id"]
+    api.comments[-1]["id"] = 900
     api.unresolved = False
     refresh_owner_review(api, result_head)
     api.review_sha = result_head
@@ -337,10 +308,23 @@ def _accepted_compacted_receipt_case(tmp_path, issue=16):
         for name in ("get", "get_all", "write"):
             original = getattr(api, name)
 
-            def route_issue_one(route, *args, _original=original, **kwargs):
+            def route_issue_one(route, *args, _original=original, _name=name, **kwargs):
+                original_route = route
                 route = route.replace(f"/pulls/{issue}", "/pulls/16")
                 route = route.replace(f"/issues/{issue}/comments", "/issues/16/comments")
-                return _original(route, *args, **kwargs)
+                response = _original(route, *args, **kwargs)
+                if (_name == "write" and issue == 1
+                        and original_route.endswith(f"/issues/{issue}/comments")
+                        and isinstance(response, dict)
+                        and type(response.get("id")) is int):
+                    expected_url = (
+                        f"https://api.github.com/repos/lindayi/hermes-mobile/issues/{issue}"
+                    )
+                    response["issue_url"] = expected_url
+                    for comment in api.comments:
+                        if comment.get("id") == response["id"]:
+                            comment["issue_url"] = expected_url
+                return response
 
             setattr(api, name, route_issue_one)
         original_graphql = api.graphql
@@ -425,7 +409,7 @@ def test_apply_rejects_malformed_receipt_issue_identity_in_all_forms(
     for comment in api.comments:
         if comment.get("id") == proof["receipt_comment_id"]:
             comment["body"] = proof_body
-    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
     def install_representation(state):
         enrollment = state["enrollments"][str(issue)]
@@ -530,6 +514,7 @@ def test_apply_rejects_conflicting_retained_receipts_in_both_orders(
         key=duplicate_key,
         task_id=duplicate_task,
         receipt_task_id=duplicate_task,
+        receipt_version="v1",
         dispatch_nonce=nonce,
         receipt_nonce=nonce,
         receipt_session_id=session,
@@ -539,6 +524,11 @@ def test_apply_rejects_conflicting_retained_receipts_in_both_orders(
         receipt_completed_at="2026-10-01T12:05:30Z",
         receipt_session_completed_at="2026-10-01T12:05:30Z",
     )
+    for field in (
+            "receipt_anchor_role", "receipt_anchor_key",
+            "receipt_anchor_comment_id", "receipt_anchor_body",
+            "receipt_anchor_created_at"):
+        duplicate.pop(field, None)
     duplicate["receipt_body"] = (
         "Hermes-Task-Receipt: v1\n"
         f"nonce={nonce}\n"
@@ -636,16 +626,23 @@ def _alternate_receipt(api, proof, issue, *, linked=False):
         candidate["receipt_session_id"] = "session-alternate"
         candidate["receipt_comment_id"] = max(c["id"] for c in api.comments) + 1
     candidate["issue"] = issue
-    fields = {
-        "pr": issue, "task": candidate["task_id"],
-        "nonce": candidate["receipt_nonce"],
-        "session": candidate["receipt_session_id"],
-    }
-    candidate["receipt_body"] = "\n".join(
-        f"{line.split('=', 1)[0]}={fields[line.split('=', 1)[0]]}"
-        if line.split("=", 1)[0] in fields else line
-        for line in candidate["receipt_body"].split("\n")
-    )
+    candidate["receipt_version"] = "v1"
+    for field in (
+            "receipt_anchor_role", "receipt_anchor_key",
+            "receipt_anchor_comment_id", "receipt_anchor_body",
+            "receipt_anchor_created_at"):
+        candidate.pop(field, None)
+    candidate["receipt_body"] = "\n".join((
+        "Hermes-Task-Receipt: v1",
+        f"nonce={candidate['receipt_nonce']}",
+        f"task={candidate['task_id']}",
+        f"session={candidate['receipt_session_id']}",
+        f"pr={issue}",
+        f"start_head={candidate['receipt_start_head']}",
+        f"head={candidate['receipt_head']}",
+        f"base={candidate['receipt_base']}",
+        f"result={candidate['receipt_result']}",
+    ))
     comment = next(
         c for c in api.comments if c["id"] == proof["receipt_comment_id"]
     )
@@ -674,13 +671,16 @@ def test_receipt_alternate_identity_inventory_blocks_only_affected_authority(
         "bool-fresh": True, "unrelated-integer": 99,
     }.get(form, issue)
     candidate = (
-        deepcopy(proof) if form in {"exact", "legacy-keyless", "consistent-copy"}
+        _alternate_receipt(api, proof, issue, linked=True)
+        if form == "legacy-keyless"
+        else deepcopy(proof) if form in {"exact", "consistent-copy"}
         else _alternate_receipt(api, proof, value, linked=form == "float-linked")
     )
 
     def install(state):
         if form == "legacy-keyless":
-            state["enrollments"][str(issue)]["receipt_proofs"][0].pop("key")
+            candidate.pop("key")
+            state["enrollments"][str(issue)]["receipt_proofs"] = [candidate]
         else:
             state["actions"][candidate["key"]] = candidate
 
@@ -2272,29 +2272,141 @@ def test_state_survives_restart_and_does_not_replay_or_retry_ambiguous_writes(tm
     first = StateStore(path)
     first.record_event("999")
     first.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
-    first.claim_action("fix:16:" + HEAD, {"kind": "fix", "status": "sending", "issue": 16})
-    first.mark_uncertain("fix:16:" + HEAD)
+    key = "fix:16:" + HEAD
+    first._mutate(lambda data: data["actions"].__setitem__(key, {
+        "key": key, "kind": "fix", "status": "sending", "issue": 16,
+    }))
+    first.mark_uncertain(key)
     second = StateStore(path)
     assert second.event_seen("999")
-    assert second.action("fix:16:" + HEAD)["status"] == "uncertain"
-    assert not second.claim_action(
-        "fix:16:" + HEAD, {"kind": "fix", "status": "sending", "issue": 16},
-    )
-    second.reconcile_action("fix:16:" + HEAD, found=True)
-    assert second.action("fix:16:" + HEAD)["status"] == "sent"
+    assert second.action(key)["status"] == "uncertain"
+    assert not second.claim_action(key, {
+        "key": key, "kind": "fix", "status": "sending", "issue": 16,
+    })
+    second.reconcile_action(key, found=True)
+    assert second.action(key)["status"] == "sent"
     assert json.loads(path.read_text())["version"] == 1
+
+
+def _bind_test_source_anchor(store, action):
+    action = action | {
+        "receipt_anchor_role": "continuation-source",
+        "dispatch_nonce": (
+            action.get("dispatch_nonce")
+            or "source-nonce-" + hashlib.sha256(
+                action["key"].encode("utf-8"),
+            ).hexdigest()[:16]
+        ),
+    }
+    anchor = cloud_coordinator._source_receipt_anchor_request(
+        action, action["dispatch_nonce"],
+    )
+    assert anchor is not None
+    assert store.add_outbox(anchor["key"], anchor | {
+        "status": "pending", "created_at": "2026-10-01T12:00:00Z",
+    })
+    comment_id = 1000 + sum(
+        entry.get("kind") == "continuation-source-receipt-anchor"
+        for entry in store.snapshot()["outbox"].values()
+    )
+    store.update_outbox(
+        anchor["key"], "sent", comment_id=comment_id,
+        anchor_created_at="2026-10-01T12:00:01Z",
+    )
+    return action | {
+        "receipt_anchor_key": anchor["key"],
+        "receipt_anchor_comment_id": comment_id,
+        "receipt_anchor_body": anchor["body"],
+        "receipt_anchor_created_at": "2026-10-01T12:00:01Z",
+    }
+
+
+def _claimable_source_action(store, key, attempt, **changes):
+    action = {
+        "key": key, "kind": "fix", "task_type": "source", "issue": 16,
+        "attempt": attempt, "head": HEAD, "main_sha": BASE,
+        "pull_id": 160000016, "pull_node_id": "PR_node_16",
+        "head_ref": "topic", "body": f"source request {attempt}",
+    } | changes
+    return _bind_test_source_anchor(store, action)
 
 
 def test_twenty_source_repair_attempts_are_the_hard_limit(tmp_path):
     store = StateStore(tmp_path / "state.json")
     store.enroll(enrolled_record())
     for attempt in range(REPAIR_LIMIT):
-        assert store.claim_action(f"fix:{attempt}", {
-            "kind": "fix", "issue": 16, "status": "sending",
-        })
-        store.update_action(f"fix:{attempt}", "completed")
-    assert not store.claim_action("fix:next", {"kind": "fix", "issue": 16})
+        key = f"fix:16:{attempt}"
+        action = _claimable_source_action(store, key, attempt + 1)
+        assert store.claim_action(key, action)
+        store.update_action(key, "completed")
+    assert not store.claim_action("fix:16:next", {
+        "kind": "fix", "issue": 16,
+    })
     assert store.snapshot()["enrollments"]["16"]["attempts"] == REPAIR_LIMIT
+
+
+def test_source_anchor_publications_are_bounded_before_claim_across_main_changes(
+        tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.enroll(enrolled_record())
+    first_anchor = None
+    for reservation in range(REPAIR_LIMIT):
+        main_sha = f"{reservation + 1:040x}"
+        action = {
+            "key": f"fix:16:preclaim-{reservation}",
+            "kind": "fix", "task_type": "source", "issue": 16,
+            "attempt": 1, "head": HEAD, "main_sha": main_sha,
+            "pull_id": 160000016, "pull_node_id": "PR_node_16",
+            "head_ref": "topic", "body": f"source request {reservation}",
+        }
+        anchor = cloud_coordinator._source_receipt_anchor_request(
+            action, f"preclaim-nonce-{reservation}",
+        )
+        assert anchor is not None
+        entry = anchor | {
+            "status": "pending", "created_at": "2026-10-01T12:00:00Z",
+        }
+        assert store.add_outbox(anchor["key"], entry)
+        if first_anchor is None:
+            first_anchor = (anchor["key"], entry)
+        store.update_outbox(
+            anchor["key"], "sent", comment_id=2000 + reservation,
+            anchor_created_at="2026-10-01T12:00:01Z",
+        )
+
+    assert store.snapshot()["enrollments"]["16"]["attempts"] == 0
+    assert store.snapshot()["enrollments"]["16"]["source_anchor_reservations"] == (
+        REPAIR_LIMIT
+    )
+    store._mutate(lambda data: data["enrollments"]["16"].pop(
+        "source_anchor_reservations",
+    ))
+    store.commit_scan(None, [], retirements=[16])
+    store.commit_scan(None, [124], commands=[("enroll", {
+        "issue": 16, "comment": 124, "head": "c" * 40, "base": BASE,
+    })])
+    restarted = StateStore(store.path)
+    assert restarted.snapshot()["enrollments"]["16"]["source_anchor_reservations"] == (
+        REPAIR_LIMIT
+    )
+    after_limit = cloud_coordinator._source_receipt_anchor_request(
+        {
+            "key": "fix:16:after-limit", "kind": "fix",
+            "task_type": "source", "issue": 16, "attempt": 1,
+            "head": HEAD, "main_sha": f"{REPAIR_LIMIT + 1:040x}",
+            "pull_id": 160000016, "pull_node_id": "PR_node_16",
+            "head_ref": "topic", "body": "source request after limit",
+        },
+        "preclaim-after-limit",
+    )
+    assert after_limit is not None
+    assert not restarted.add_outbox(
+        after_limit["key"],
+        after_limit | {
+            "status": "pending", "created_at": "2026-10-01T12:00:00Z",
+        },
+    )
+    assert not restarted.add_outbox(first_anchor[0], first_anchor[1])
 
 
 def test_neutral_reconciliation_uses_only_its_own_bounded_counter(tmp_path):
@@ -3669,22 +3781,6 @@ def _ready_sha_bound_handoff(tmp_path):
     api.complete_task(first["task_id"], first, head_sha=RESULT_HEAD)
     api.head_sha = RESULT_HEAD
     api.pull["head"]["sha"] = RESULT_HEAD
-    receipt_comment = next(
-        comment for comment in reversed(api.comments)
-        if isinstance(comment.get("body"), str)
-        and first["dispatch_nonce"] in comment["body"]
-        and comment.get("user", {}).get("id") == 198982749
-    )
-    receipt_comment["body"] = (
-        "Hermes-Task-Receipt: v2\n"
-        f"nonce={first['dispatch_nonce']}\n"
-        "pr=16\n"
-        f"session=session-{first['task_id']}\n"
-        f"start_head={HEAD}\n"
-        f"base={BASE}\n"
-        f"head={RESULT_HEAD}\n"
-        "result=ready"
-    )
     api.review_state = "PENDING"
     coordinator.run(apply=True)
     assert store.action(first["key"])["handoff_state"] == "waiting_review"
@@ -4514,12 +4610,24 @@ def _store_precovery_owner_abandonment_successor(
         "progress_fingerprints_complete": False,
         "repair_target_map": {},
     }
-    original_time = cloud_coordinator.time.time
-    cloud_coordinator.time.time = lambda: created_at
-    try:
-        assert store.claim_action(action["key"], action)
-    finally:
-        cloud_coordinator.time.time = original_time
+    enrollment = store.snapshot()["enrollments"]["16"]
+    action.update(
+        status="sending", attempt=enrollment["attempts"] + 1,
+        dispatch_nonce="legacy-" + hashlib.sha256(
+            action_key.encode("utf-8"),
+        ).hexdigest()[:24],
+        created_at=created_at,
+        repair_policy_version=cloud_coordinator.REPAIR_PROGRESS_VERSION,
+        repair_fingerprint_version=2,
+        repair_fingerprints=[],
+        repair_fingerprints_complete=False,
+    )
+
+    def seed_historical_claim(state):
+        state["enrollments"]["16"]["attempts"] = enrollment["attempts"] + 1
+        state["actions"][action["key"]] = action
+
+    store._mutate(seed_historical_claim)
     claimed = store.action(action["key"])
     task = api.write(
         "agents/repos/lindayi/hermes-mobile/tasks",
@@ -5822,14 +5930,24 @@ def test_owner_continuation_receipt_accepts_after_result_head_enrollment(
 def test_owner_continuation_writer_admission_only_ignores_confirmed_review_request(
         tmp_path, kind, status, malformed):
     api, store, _, _, _ = _owner_continuation_advanced_case(tmp_path)
-    key = f"copilot-review-request:16:{NEXT_RESULT_HEAD}"
+    key = (
+        f"fix:16:{NEXT_RESULT_HEAD}:source"
+        if kind == "fix" else f"copilot-review-request:16:{NEXT_RESULT_HEAD}"
+    )
     request = {
         "kind": kind, "issue": 16, "head": NEXT_RESULT_HEAD,
         "main_sha": CURRENT_MAIN, "key": key,
         "pull_id": api.pull["id"], "pull_node_id": api.pull["node_id"],
     }
     if kind == "fix":
-        request.update(task_id="other-source-task", task_type="source")
+        request = _claimable_source_action(
+            store, key,
+            store.snapshot()["enrollments"]["16"]["attempts"] + 1,
+            head=NEXT_RESULT_HEAD, main_sha=CURRENT_MAIN,
+            pull_id=api.pull["id"], pull_node_id=api.pull["node_id"],
+            head_ref=api.pull["head"]["ref"], body="Other active source task.",
+            task_id="other-source-task",
+        )
     assert store.claim_action(key, request)
     if malformed:
         store._mutate(
@@ -6091,10 +6209,16 @@ def test_owner_continuation_source_anchor_failure_is_not_replayed(
     assert api.task_posts == posts
     assert after["actions"][abandonment["action_key"]] == historical
     assert after["enrollments"]["16"]["attempts"] == before["enrollments"]["16"]["attempts"]
+    assert after["enrollments"]["16"]["source_anchor_reservations"] == (
+        before["enrollments"]["16"]["source_anchor_reservations"] + 1
+    )
     assert len([
         entry for entry in after["outbox"].values()
         if entry.get("kind") == "continuation-source-receipt-anchor"
-    ]) == 1
+    ]) == len([
+        entry for entry in before["outbox"].values()
+        if entry.get("kind") == "continuation-source-receipt-anchor"
+    ]) + 1
 
 
 @pytest.mark.parametrize("hazard", [
@@ -15638,18 +15762,17 @@ def test_owner_abandonment_claim_action_does_not_retroactively_stamp_existing_ke
     recovery = StateStore(store.path).snapshot()["enrollments"]["16"][
         "owner_abandonments"
     ][0]
-    key = "retroactive-owner-abandonment-key"
-    action = {
-        "kind": "fix",
-        "issue": 16,
-        "head": NEXT_RESULT_HEAD,
-        "head_ref": api.pull["head"]["ref"],
-        "main_sha": CURRENT_MAIN,
-        "body": "Synthetic retry candidate without durable recovery claim.",
-        "progress_fingerprints": [],
-        "progress_fingerprints_complete": False,
-        "repair_target_map": {},
-    }
+    key = "fix:16:retroactive-owner-abandonment-key"
+    action = _claimable_source_action(
+        store, key,
+        store.snapshot()["enrollments"]["16"]["attempts"] + 1,
+        head=NEXT_RESULT_HEAD, head_ref=api.pull["head"]["ref"],
+        main_sha=CURRENT_MAIN, pull_id=api.pull["id"],
+        pull_node_id=api.pull["node_id"],
+        body="Synthetic retry candidate without durable recovery claim.",
+        progress_fingerprints=[], progress_fingerprints_complete=False,
+        repair_target_map={},
+    )
     assert store.claim_action(key, action)
     claimed = StateStore(store.path).action(key)
 
@@ -26313,8 +26436,9 @@ def _legacy_ambiguous_corrective_review_creation_is_never_reposted(tmp_path):
     ]) == 1
 
 
-def test_source_review_followup_reuses_bound_receipt_anchor(tmp_path):
-    api = FakeApi(source_failure=True)
+def test_source_repair_from_copilot_finding_gets_bound_receipt_anchor(tmp_path):
+    api = ProgressApi(source_failure=True)
+    api.progress_review = None
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -26341,29 +26465,22 @@ def test_source_review_followup_reuses_bound_receipt_anchor(tmp_path):
     )
     coordinator.run(apply=True)
     assert store.action(source_fix["key"])["handoff_state"] == "done"
-    report = {
-        "verdict": "changes_requested",
-        "summary": "One bounded follow-up is required.",
-        "findings": [{
-            "path": "src/deleted.py", "comment": "Address the bounded follow-up.",
-        }],
-        "files": {"src/deleted.py": None},
-        "report": "Address the reported finding.",
-    }
-    store._mutate(lambda state: state["actions"].update({
-        "review:16:current": {
-            "kind": "review", "issue": 16, "head": HEAD,
-            "status": "completed", "publication_state": "done",
-            "review_report": report, "created_at": 1790856661,
-        },
-    }))
+    finding = _progress_review(
+        HEAD, 63003, "Address this authenticated Copilot finding.",
+        "2026-10-01T12:08:00Z",
+    )
+    api.set_copilot_review(
+        review_id=63003, head_sha=HEAD, body=finding["body"],
+        body_html=finding["body_html"], submitted_at=finding["submitted_at"],
+    )
+    api.progress_review = finding
 
     followup_result = Coordinator(
         api, StateStore(path), clock=lambda: 1790856660,
     ).run(apply=True)
     followups = [
         action for action in StateStore(path).actions().values()
-        if action.get("task_type") == "review-followup"
+        if action.get("kind") == "fix" and action["key"] != source_fix["key"]
     ]
     assert followups, json.dumps(
         {"result": followup_result, "state": store.snapshot()},
@@ -26371,6 +26488,8 @@ def test_source_review_followup_reuses_bound_receipt_anchor(tmp_path):
     )
     follow_up = followups[0]
     assert follow_up["status"] == "sent"
+    assert follow_up.get("task_type") != "review-followup"
+    assert follow_up["receipt_anchor_role"] == "continuation-source"
     follow_up_anchor = next(
         comment for comment in api.comments
         if comment.get("body") == follow_up["receipt_anchor_body"]
@@ -26582,6 +26701,7 @@ def test_crash_after_reservation_cannot_replay_task_post(tmp_path):
     plan = coordinator._build_plan(apply=False)
     action = plan["pull_requests"][0]["repair"]
     store.commit_scan(plan["cursor"], plan["processed"], commands=plan["commands"])
+    action = _bind_test_source_anchor(store, action)
     assert store.claim_action(action["key"], action)
     coordinator.run(apply=True)
     assert api.fix_attempts == 0
@@ -27137,6 +27257,7 @@ def test_atomic_replace_failure_preserves_prior_state(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     store = StateStore(path)
     store.enroll(enrolled_record())
+    action = _claimable_source_action(store, "fix:16:x", 1)
     prior = path.read_bytes()
 
     def failed_replace(source, target):
@@ -27144,7 +27265,7 @@ def test_atomic_replace_failure_preserves_prior_state(tmp_path, monkeypatch):
 
     monkeypatch.setattr(coordinator_module.os, "replace", failed_replace)
     with pytest.raises(OSError):
-        store.claim_action("fix:16:x", {"kind": "fix", "issue": 16})
+        store.claim_action(action["key"], action)
     monkeypatch.undo()
     assert path.read_bytes() == prior
     assert StateStore(path).snapshot()["enrollments"]["16"]["attempts"] == 0
@@ -27261,7 +27382,10 @@ def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_pa
     store.enroll(enrolled_record())
 
     def seed(data):
-        data["enrollments"]["16"].update(active=False, attempts=3)
+        data["enrollments"]["16"].update(
+            active=False, attempts=3,
+            source_anchor_reservations=REPAIR_LIMIT,
+        )
         for kind in ("fix", "status", "auto-merge"):
             for status in ("pending", "sending", "uncertain") + (("sent",) if kind == "fix" else ()):
                 data["actions"][f"{kind}:{status}"] = {
@@ -27279,6 +27403,7 @@ def test_reenrollment_preserves_every_unresolved_claim_and_attempt_budget(tmp_pa
     assert after["enrollments"]["16"]["active"] is True
     assert after["enrollments"]["16"]["comment"] == 124
     assert after["enrollments"]["16"]["attempts"] == 3
+    assert after["enrollments"]["16"]["source_anchor_reservations"] == REPAIR_LIMIT
     assert after["actions"] == before["actions"]
     assert after["outbox"] == before["outbox"]
 
