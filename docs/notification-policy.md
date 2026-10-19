@@ -89,6 +89,12 @@ older decision. Revalidate its status through authenticated exact detail,
 independent of pending-list enumeration; only fresh exact pending authority may
 restore controls after a definitive rejection. A delayed decision 401 may expire
 only the same account, authentication lifetime and route that dispatched it.
+Fresh exact unavailability may settle a retained definitive 403/404/409 rejection
+only when no decision is dispatched or uncertain and the read began at or after
+that rejection's authority revision. Keep its exact identity and original turn
+chronology on later refresh or re-entry, without restoring pending controls.
+Unavailability is not a final native execution outcome and cannot settle an
+in-flight or uncertain decision.
 
 An omitted notification-target approval whose initial exact-detail read times
 out or is invalidated by an unknown-run transition keeps a truthful Retry status

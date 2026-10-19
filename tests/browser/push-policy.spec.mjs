@@ -607,6 +607,57 @@ test('generated chat restores an omitted dispatched decision after a newer run s
  await page.evaluate(()=>app.destroy());
 }));
 
+for(const runSession of ['session-one','old-alias'])for(const rejection of [403,404,409])
+test(`generated rejected decision settles on fresh unavailable detail (${runSession}, ${rejection})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const pending=approvalRecord({run_session_id:runSession});
+ control.notificationTarget={...approvalTarget,run_session_id:runSession};
+ control.approvals=[pending];control.sessionApprovals=[pending];control.approvalDetail=pending;
+ control.activeRun={id:'approval-run',session_id:runSession,status:'waiting_for_approval',input:'Original request'};
+ control.realHistory=approvalHistory();control.decisionStatus=rejection;
+ await mount(page,'?notification=notice-target');await holdPasskey(page);
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once',exact:true}).click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ control.approvals=[];control.sessionApprovals=[];
+ let releaseDetail;control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
+ const rejected=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1/decision'
+  && response.request().method()==='POST' && response.status()===rejection);
+ await page.evaluate(()=>finishPasskey());await rejected;
+ await card.getByRole('alert').filter({hasText:rejection===403?'Passkey verification expired':'no longer pending'}).waitFor();
+ control.activeRun={id:'newer-run',session_id:'session-one',status:'running',input:'Newer request'};
+ control.realHistory={latest:{items:[
+  {id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'},
+  {id:2,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}
+ ],offset:0,total:2},pages:{},runs:{}};
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ control.approvalDetail={...pending,status:'unavailable',executable:false,choices:[],error:'Run is no longer active'};
+ control.approvalDetailHold=null;releaseDetail();
+ const reenter=async()=>{
+  const detail=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1'
+   && response.request().method()==='GET' && response.status()===200);
+  await page.getByRole('button',{name:'First conversation',exact:true}).click();await detail;
+  await page.locator('[data-history-run="newer-run"]').first().waitFor();
+ };
+ await reenter();
+ assert.equal(await card.getByRole('heading').innerText(),'Approval unavailable',
+  'a definitively rejected POST must not stay Decision pending after fresh exact detail');
+ for(let repeat=0;repeat<2;repeat++){
+  const listed=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals'
+   && new URL(response.url()).searchParams.has('session_id'));
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await listed;
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.getByRole('button',{name:'First conversation',exact:true}).click();
+  await card.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+  assert.equal(await card.locator('button:enabled').count(),0);
+  assert.equal(await card.evaluate(node=>node.dataset.historyRun),'approval-run');
+  assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
+  assert.equal(await card.count(),1);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision') && call.method==='POST').length,1);
+  assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,1);
+  assert.equal(calls.filter(call=>call.p==='/auth/verify/finish').length,1);
+ }
+}));
+
 for(const [cause,runSession] of [['deadline','session-one'],['unknown-run','old-alias']])
 test(`generated omitted target retries after ${cause} abort (${runSession})`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
  const pending=approvalRecord({run_session_id:runSession});

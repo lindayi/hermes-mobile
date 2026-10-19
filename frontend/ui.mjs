@@ -109,7 +109,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;
     currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;
     for(const [key,record] of approvalDecisionStates)if(record.owner===state.user?.id
-        && !record.dispatched && !record.needsFreshAuthority){
+        && !record.dispatched && !record.needsFreshAuthority && !record.rejectedUnavailable){
       record.state.pending=false;record.state.decisionStarted=false;
       approvalDecisionStates.delete(key);
     }
@@ -1212,11 +1212,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     for(const record of approvalDecisionStates.values()){
       const identity=record.identity;
       if(record.owner!==owner || record.canonicalSessionId!==session.id
-          || !(record.dispatched || record.needsFreshAuthority)
+          || !(record.dispatched || record.needsFreshAuthority || record.rejectedUnavailable)
           || !identity || !['id','run_id','request_id','run_session_id'].every(field=>
             typeof identity[field]==='string' && identity[field])
           || (identity.session_id!==session.id && identity.session_id!==null))continue;
-      const status=record.status==='unknown'?'unknown':record.needsFreshAuthority?'sending':'pending',
+      const status=record.rejectedUnavailable?'unavailable'
+        :record.status==='unknown'?'unknown':record.needsFreshAuthority?'sending':'pending',
         item={...identity,status,executable:status==='pending',choices:status==='pending'?['once','deny']:[]},key=approvalKey(item);
       approvalItems.set(key,item);
       if(status==='pending'){approvalPending.set(key,item);approvalFinals.delete(key);}
@@ -1539,21 +1540,28 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               || typeof detail.status!=='string')return;
           const actionState=approvalActionStates.get(key),
             currentStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status,
-            decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
-          if(detail.status==='pending' && actionState?.needsFreshAuthority
+            decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+            freshRejectedAuthority=actionState?.needsFreshAuthority
               && decision?.needsFreshAuthority && decision.retryAuthorityRevision<=decisionAuthorityRevision
+              && decision.status==='rejected' && decision.state===actionState
+              && !decision.dispatched && !actionState.dispatched && !actionState.decisionStarted
+              && !actionState.pending && !actionState.uncertain
               && decision.owner===owner && decision.canonicalSessionId===session.id
-              && sameApprovalIdentity(decision.identity,detail)){
+              && sameApprovalIdentity(decision.identity,detail);
+          if(detail.status==='pending' && freshRejectedAuthority){
             decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;
             approvalItems.set(key,detail);approvalPending.set(key,detail);approvalFinals.delete(key);
             renderApprovals();return;
           }
-          let status=actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
+          if(detail.status==='unavailable' && decision && !freshRejectedAuthority)return;
+          let status=detail.status==='unavailable' && freshRejectedAuthority?'unavailable'
+            :actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
             ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
           if(status===currentStatus && !finalApprovalStatuses.has(detail.status))return;
           const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
           approvalItems.set(key,next);approvalPending.delete(key);
           rememberHandledApproval(key,next,status);approvalFinals.set(key,status);clearApprovalExpiry(key);
+          if(detail.status==='unavailable' && freshRejectedAuthority)decision.rejectedUnavailable=true;
           if(finalApprovalStatuses.has(detail.status) || detail.status==='unavailable')
             settleApprovalDecision(owner,session.id,item,status);
           else if(status==='unknown')markApprovalDecisionUncertain(owner,session.id,item);

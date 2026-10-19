@@ -1970,6 +1970,77 @@ test(`retained ${outcome} decision survives a newer chat run (${runSession})`,as
  }finally{decision.resolve({status:'resolved'});app.destroy();win.close();}
 });
 
+for(const runSession of ['s','old-alias'])for(const outcome of [403,404,409,'held',503])
+test(`exact unavailable after omitted decision re-entry (${runSession}, ${outcome})`,async()=>{
+ const decision=deferred(),afterRejection=deferred(),calls=[],
+  dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),
+  win=dom.window,doc=win.document;
+ let passkeys=0,posts=0,detailReads=0,listReads=0,reentered=false,rejected=false;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>{passkeys++;return fakeCredential();}};
+ const pending={...approvalItem(),run_id:'old-run',run_session_id:runSession,status:'pending'},
+  unavailable={...pending,status:'unavailable',executable:false,choices:[],error:'Run is no longer active'};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:runSession,
+   run_id:'old-run',approval_id:'a',request_id:'native-a'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Exact chat title'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[
+   {id:1,role:'user',content:'Original request',run_id:'old-run',session_id:'s'},
+   ...(reentered?[{id:2,role:'assistant',content:'Newer response',run_id:'new-run',session_id:'s'}]:[])
+  ],total:reentered?2:1,offset:0,run:reentered?{id:'new-run',session_id:'s',status:'running'}
+   :{id:'old-run',session_id:runSession,status:'waiting_for_approval'}};
+  if(p==='/approvals'){listReads++;return {items:posts?[]:[pending],complete:true};}
+  if(p==='/approvals/a'){
+   detailReads++;
+   if(reentered)return unavailable;
+   if(rejected)return afterRejection.promise;
+   return pending;
+  }
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision'){posts++;return decision.promise;}
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ const reenter=async()=>{
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('.session-row'));
+  reentered=true;doc.querySelector('.session-row').click();
+  await waitFor(()=>card()?.querySelector('h3') && doc.querySelector('[data-history-run="new-run"]'));
+ };
+ try{
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  card().querySelector('button.primary').click();await waitFor(()=>posts===1);
+  if(outcome!=='held'){
+   rejected=true;
+   decision.reject(Object.assign(new Error('Synthetic decision rejection'),{status:outcome}));
+   await waitFor(()=>outcome===503?card()?.querySelector('h3').textContent==='Decision status unknown'
+    :card()?.textContent.includes('before deciding') && listReads>=2);
+  }
+  const before=detailReads;await reenter();await waitFor(()=>detailReads>before);
+  await tick();
+  const expected=[403,404,409].includes(outcome)?'Approval unavailable'
+   :outcome==='held'?'Decision pending':'Decision status unknown';
+  assert.equal(card().querySelector('h3').textContent,expected,
+   'fresh exact unavailability must not leave a rejected, non-dispatched decision pending');
+  for(let repeat=0;repeat<2;repeat++){
+   const reads=listReads;win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>listReads>reads);await tick();await reenter();
+   assert.equal(card().querySelector('h3').textContent,expected);
+   assert.equal(card().querySelectorAll('button:enabled').length,0);
+   assert.equal(card().dataset.historyRun,'old-run');
+   assert.equal(card().previousElementSibling?.dataset.historyRun,'old-run');
+   assert.equal(doc.querySelectorAll('[data-approval-id="a"]').length,1);
+   assert.equal(posts,1);assert.equal(passkeys,1);
+   if(outcome==='held' || outcome===503)assert.ok([...card().querySelectorAll('p')]
+    .filter(node=>node.textContent.includes('No decision was sent')).every(node=>node.hidden),
+   'an in-flight or uncertain decision must never visibly claim that no decision was sent');
+  }
+ }finally{decision.resolve({status:'resolved'});afterRejection.resolve(unavailable);app.destroy();win.close();}
+});
+
 for(const runSession of ['s','old-alias'])test(`unknown run invalidates its held approval detail generation (${runSession})`,async()=>{
  const initialDetail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  const pending={...approvalItem(),run_session_id:runSession,status:'pending'};
