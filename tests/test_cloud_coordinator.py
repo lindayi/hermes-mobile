@@ -298,7 +298,7 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert api.fix_attempts == 1
 
 
-def _accepted_compacted_receipt_case(tmp_path, issue=16):
+def _accepted_compacted_receipt_case(tmp_path, issue=16, *, legacy_v1=False):
     api = FakeApi(unresolved=True)
     if issue != 16:
         api.pull["number"] = issue
@@ -341,6 +341,8 @@ def _accepted_compacted_receipt_case(tmp_path, issue=16):
     store = StateStore(path)
     Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
     action = next(item for item in store.actions().values() if item["kind"] == "fix")
+    if legacy_v1:
+        action = _seed_historical_unanchored_source_action(api, store, action)
     result_head = RESULT_HEAD
     api.complete_task(action["task_id"], action, head_sha=result_head)
     receipt_comment = api.comments[-1]
@@ -745,7 +747,9 @@ def test_apply_rejects_receipt_proof_with_unknown_durable_key(tmp_path):
 @pytest.mark.parametrize("current_head", [RESULT_HEAD, NEXT_RESULT_HEAD])
 def test_apply_rejects_conflicting_live_projection_of_retained_receipt(
         tmp_path, current_head):
-    api, store, proof, _ = _accepted_compacted_receipt_case(tmp_path)
+    api, store, proof, _ = _accepted_compacted_receipt_case(
+        tmp_path, legacy_v1=True,
+    )
     live = deepcopy(proof)
     live_task = "conflicting-live-task"
     live_nonce = "conflicting-live-nonce"
@@ -2319,6 +2323,31 @@ def _bind_test_source_anchor(store, action):
         "receipt_anchor_body": anchor["body"],
         "receipt_anchor_created_at": "2026-10-01T12:00:01Z",
     }
+
+
+def _seed_historical_unanchored_source_action(api, store, action):
+    action = deepcopy(action)
+    anchor_key = action.get("receipt_anchor_key")
+    anchor_comment_id = action.get("receipt_anchor_comment_id")
+    for field in tuple(action):
+        if field.startswith("receipt_anchor_"):
+            action.pop(field)
+
+    def restore_legacy_action(state):
+        persisted = state["actions"][action["key"]]
+        for field in tuple(persisted):
+            if field.startswith("receipt_anchor_"):
+                persisted.pop(field)
+        if anchor_key is not None:
+            state["outbox"].pop(anchor_key, None)
+
+    store._mutate(restore_legacy_action)
+    if anchor_comment_id is not None:
+        api.comments[:] = [
+            comment for comment in api.comments
+            if comment.get("id") != anchor_comment_id
+        ]
+    return action
 
 
 def _claimable_source_action(store, key, attempt, **changes):
@@ -11230,6 +11259,9 @@ def test_owner_abandonment_direct_v1_live_main_sha_fills_read_only_view(
         if (action.get("kind") == "fix"
             and action["key"] != abandoned["key"]
             and action.get("owner_abandonment_binding"))
+    )
+    successor = _seed_historical_unanchored_source_action(
+        api, StateStore(store.path), successor,
     )
     assert successor.get("task_type") != "neutral"
     result_head = successor["head"]
