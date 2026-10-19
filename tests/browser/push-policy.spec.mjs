@@ -561,6 +561,106 @@ test('approval notification loads the matching older turn before focusing its ca
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 
+test('generated chat restores an omitted dispatched decision after a newer run starts',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const pending=approvalRecord(),sibling=approvalRecord({id:'newer-approval',run_id:'newer-run',
+  request_id:'newer-request',run_session_id:'session-one'});
+ control.notificationTarget=approvalTarget;control.approvals=[pending,sibling];
+ control.sessionApprovals=[pending,sibling];control.approvalDetail=pending;
+ control.activeRun={id:'approval-run',session_id:'session-one',status:'waiting_for_approval',input:'Original request'};
+ control.realHistory=approvalHistory();
+ let releaseDecision;control.decisionHold=new Promise(resolve=>releaseDecision=resolve);
+ await mount(page,'?notification=notice-target');await holdPasskey(page);
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once',exact:true}).click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ const posted=page.waitForRequest(request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1/decision'
+  && request.method()==='POST');
+ await page.evaluate(()=>finishPasskey());await posted;
+
+ control.activeRun={id:'newer-run',session_id:'session-one',status:'running',input:'Newer request'};
+ control.sessionApprovals=[sibling];
+ control.realHistory={latest:{items:[
+  {id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'},
+  {id:2,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}
+ ],offset:0,total:2},pages:{},runs:{}};
+ const reentryList=page.waitForResponse(response=>{
+  const url=new URL(response.url());return url.pathname==='/hermes/app-api/approvals'
+   && url.searchParams.has('session_id') && response.request().method()==='GET';
+ });
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ await reentryList;
+ await page.getByRole('heading',{name:'Exact notification chat',exact:true}).waitFor();
+ await page.locator('[data-approval-id="newer-approval"] button.primary').waitFor();
+ assert.equal(await card.count(),1,'the omitted dispatched decision remains visible after re-entry');
+ assert.equal(await card.getByRole('heading').innerText(),'Decision pending');
+ assert.equal(await card.locator('button:enabled').count(),0,'a held decision stays non-actionable');
+ assert.equal(await card.evaluate(node=>node.dataset.historyRun),'approval-run');
+ assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run',
+  'the retained decision stays in its original request chronology');
+ assert.equal(await page.locator('[data-approval-id="approval-1"]').count(),1);
+ assert.equal(await page.locator('[data-approval-id="newer-approval"] button:enabled').count(),2);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+ releaseDecision();
+ await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+ await page.evaluate(()=>app.destroy());
+}));
+
+for(const [cause,runSession] of [['deadline','session-one'],['unknown-run','old-alias']])
+test(`generated omitted target retries after ${cause} abort (${runSession})`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+ const pending=approvalRecord({run_session_id:runSession});
+ control.notificationTarget={...approvalTarget,run_session_id:runSession};
+ control.approvals=[];control.sessionApprovals=[];
+ control.activeRun={id:'approval-run',session_id:runSession,status:'waiting_for_approval',input:'Original request'};
+ control.approvalDetail=pending;
+ let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
+ const detailRequest=request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1'
+  && request.method()==='GET';
+ if(cause==='deadline')await page.clock.install();
+ const firstRequest=page.waitForRequest(detailRequest);
+ const aborted=page.waitForEvent('requestfailed',{predicate:detailRequest});
+ const runEvents=cause==='unknown-run'?page.waitForResponse(response=>
+  new URL(response.url()).pathname==='/hermes/app-api/runs/approval-run/events'):null;
+ await mount(page,'?notification=notice-target');await firstRequest;
+ if(cause==='deadline')await page.clock.fastForward(10000);
+ else{await runEvents;emitRunEvent('status',{status:'unknown'});}
+ await aborted;
+ control.approvalDetailHold=null;release();
+ const placeholder=page.getByRole('region',{name:'Approval status',exact:true});
+ await page.getByRole('heading',{name:'Approval status check interrupted',exact:true}).waitFor();
+ await placeholder.getByRole('button',{name:'Retry status',exact:true}).waitFor();
+ assert.equal(await page.locator('[data-approval-id]').count(),0,
+  'an omitted approval does not need a mounted list card to recover');
+ control.approvalDetailStatus=503;
+ for(let attempt=0;attempt<2;attempt++){
+  const failed=page.waitForResponse(response=>detailRequest(response.request()) && response.status()===503);
+  await placeholder.getByRole('button',{name:'Retry status',exact:true}).click();
+  await failed;
+  await page.getByRole('heading',{name:'Approval status unavailable',exact:true}).waitFor();
+  await placeholder.getByRole('button',{name:'Retry status',exact:true}).waitFor();
+ }
+ control.approvalDetailStatus=200;
+ if(cause==='unknown-run')control.approvalDetail=approvalRecord({run_session_id:runSession,
+  status:'details_unavailable',details_unavailable:true,expires_at:null,executable:false,choices:[]});
+ const recovered=page.waitForResponse(response=>detailRequest(response.request()) && response.status()===200);
+ await placeholder.getByRole('button',{name:'Retry status',exact:true}).click();
+ await recovered;
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.waitFor();
+ assert.equal(await page.locator('[data-approval-id="approval-1"]').count(),1);
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1').length,4,
+  'initial check plus two transient retries and one successful exact retry');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')
+  || call.p==='/runs').length,0,'status recovery is read-only');
+ if(cause==='deadline')await card.getByRole('heading',{name:'Approval required',exact:true}).waitFor();
+ else{
+  assert.equal(await card.getByRole('heading').innerText(),'Approval details unavailable');
+  assert.equal(await card.getByRole('button').count(),0);
+ }
+ await page.evaluate(()=>app.destroy());
+}));
+
 for(const departure of [false,true])test(`generated resolved approval survives history failure and retry (departure=${departure})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
  control.notificationTarget=approvalTarget;control.approvals=[approvalRecord()];
  control.approvalDetail=approvalRecord({status:'resolved',executable:false,choices:[]});

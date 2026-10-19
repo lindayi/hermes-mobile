@@ -80,12 +80,22 @@ non-chat approvals, never infer that exception from failed proof.
 
 Client exact-detail reads are deduplicated only within their run-authority
 generation. An unknown-run transition aborts and fences only that run's older
-reads; late results cannot restore controls. Same-owner chat re-entry may restore
-a retained dispatched decision only as a bounded non-actionable card matched by
-the exact owner, canonical session, original run session, run, request and
-approval identity. Revalidate its status through authenticated exact detail,
-independent of pending-list enumeration. A delayed decision 401 may expire only
-the same account, authentication lifetime and route that dispatched it.
+reads; late or aborted results cannot restore controls. Same-owner chat re-entry
+may restore a retained dispatched or uncertain decision as a bounded,
+non-actionable card matched by the exact owner, canonical session, original run
+session, run, request and approval identity. This restoration is independent of
+the latest run snapshot: a newer run does not retire, rebind or authorize the
+older decision. Revalidate its status through authenticated exact detail,
+independent of pending-list enumeration; only fresh exact pending authority may
+restore controls after a definitive rejection. A delayed decision 401 may expire
+only the same account, authentication lifetime and route that dispatched it.
+
+An omitted notification-target approval whose initial exact-detail read times
+out or is invalidated by an unknown-run transition keeps a truthful Retry status
+action while its exact route and owner remain current. Retry performs only the
+authenticated exact-detail read. Aborted, timed-out and superseded responses
+cannot update the target; route or account teardown stays inert. Transient
+failures remain retryable and never become an authoritative unavailable state.
 
 The list uses request-scoped journal proof batches and one native classification
 per source session, then revalidates current authorization. Both list and detail
