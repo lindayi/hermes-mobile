@@ -136,13 +136,13 @@ acceptance, hosted CI evidence, merge authorization, or permission to deploy. Bo
 behavioral contracts remain specified in
 [the coordinator specification](cloud-coordinator-spec.md).
 
-### Issue #115 current coordinator source pin
+### Historical Issue #115 coordinator source pin
 
-The current autonomy-policy source pins reflect the issue #115 coordinator and
-review-evidence bytes. Supplied review edit metadata must still prove an unchanged
-submission; retiring sensitive grants does not waive current-review validity.
-It is a source-integrity value only, not exact-head review, CI, merge, or deployment
-evidence.
+The issue #115 candidate removed the separate sensitive-change owner-authorization
+gate. Its source hashes remain historical provenance; issue #120's current pins
+below supersede the coordinator pin. Supplied review edit metadata must still prove
+an unchanged submission, and retiring sensitive grants does not waive
+current-review validity.
 
 | Current source path | SHA-256 |
 | --- | --- |
@@ -855,6 +855,18 @@ deployment evidence.
 | `backend/app.py` | `93d0bd54d6bc7a7d31b4da75db61cf6bd61478983f37c653544c25d3b8d6d2e6` |
 | `backend/notifications.py` | `42de0bcae886c139aa61ea23ef4dd0a24cc17a8d338ab3edbfeadd6b47a70935` |
 | `backend/orchestration.py` | `0bafb14cff7b27d6b05466ee975c032c70a2bfd223fbec2bd8cad277d03757ba` |
+
+### Issue #120 current ordinary-repair source pins
+
+Issue #120 extends the existing receipt-anchor flow to ordinary repair tasks.
+These current source hashes and independent test literals identify exact candidate
+bytes only. They do not establish exact-head review, CI, merge, or deployment
+evidence.
+
+| Issue #120 candidate path | SHA-256 |
+| --- | --- |
+| `deploy/cloud_coordinator.py` | `887e0668e262d7c33df587b6d631046e04bb67afd210c7e22657ff62012999df` |
+| `deploy/task_receipts.py` | `5b8ab1e609f3febf3f8f20dd35da3b3521b1d9513ecdc3555eb466e4bf660a5a` |
 
 ## Policy phases and activation
 
