@@ -2,7 +2,7 @@ import {artifactURL} from './artifacts.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {readFile,mkdir,mkdtemp,rm} from 'node:fs/promises';
+import {readFile,readdir,mkdir,mkdtemp,rm} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {tmpdir} from 'node:os';
@@ -235,6 +235,107 @@ test('generated browser preserves dispatched decisions and fences unknown-run ap
   assert.equal(decisionPosts,1,'route and run recovery never resend the held decision');
  }finally{
   decisionAck.resolve?.();for(const stream of eventStreams)stream.end();
+  if(browser)await browser.close();
+  if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+  await rm(temporary,{recursive:true,force:true});
+ }
+});
+
+for(const runSession of ['research','source-alias'])test(`generated browser aborts stale ${runSession} approval detail on unknown-run transition`,{timeout:60000},async()=>{
+ const temporary=await mkdtemp(join(tmpdir(),'hermes-approval-generation-')),assets=generatedAssets(temporary),
+  session={id:'research',title:'Generation fixture'},
+  run={id:'generation-run',session_id:runSession,status:'waiting_for_approval'},
+  pending={id:'a',run_id:run.id,request_id:'request-a',session_id:session.id,run_session_id:runSession,
+   status:'pending',title:'Synthetic action',command:'echo synthetic',target:'fixture',expires_at:2000000000,
+   executable:true,choices:['once','deny']},
+  eventStreams=new Set(),calls=[];
+ let detailReads=0,listReads=0,omitNextList=false,firstDetailAborted=false,releaseInitial=null,server,browser;
+ try{
+  const names=await readdir(assets),ui=names.find(name=>/^ui\.[a-f0-9]+\.mjs$/.test(name)),
+   sw=names.find(name=>/^sw\.[a-f0-9]+\.js$/.test(name));
+  assert.ok(ui&&sw,'the browser test serves the generated release graph');
+  server=createServer(async(req,res)=>{
+   const url=new URL(req.url,'http://fixture'),path=url.pathname;
+   if(path.startsWith('/hermes/app-api/')){
+    const p=path.slice('/hermes/app-api'.length);calls.push({p,method:req.method});
+    const json=(data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
+    if(p==='/runs/generation-run/events'){
+     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});
+     res.write(': connected\n\n');eventStreams.add(res);res.on('close',()=>eventStreams.delete(res));return;
+    }
+    if(p==='/auth/me')return json({user:{id:'fixture-owner',role:'owner',status:'ready'},csrf_token:'fixture'});
+    if(p==='/inbox/notice-target/target')return json({kind:'approval',session_id:session.id,
+     run_session_id:runSession,run_id:run.id,approval_id:pending.id,request_id:pending.request_id});
+    if(p==='/sessions')return json({items:[session],total:1});
+    if(p==='/sessions/research')return json(session);
+    if(p==='/sessions/research/messages')return json({items:[],total:0,offset:0,run});
+    if(p==='/sessions/research/telemetry')return json({});
+    if(p==='/approvals'){
+     listReads++;
+     const items=omitNextList?[]:[pending];omitNextList=false;
+     return json({items});
+    }
+    if(p==='/approvals/a' && req.method==='GET'){
+     if(++detailReads===1){
+      await new Promise(resolve=>{
+       releaseInitial=()=>{if(!req.aborted&&!res.destroyed)json(pending);resolve();};
+       req.once('aborted',()=>{firstDetailAborted=true;resolve();});
+      });
+      if(req.aborted || res.destroyed)return;
+     }else if(detailReads===2){
+      return json({detail:'Synthetic transient detail failure'},503);
+     }
+     return json(pending);
+    }
+    if(p==='/runs/generation-run')return json(run);
+    if(p==='/runs/generation-run/controls')return json({steering:false,attempts:[]});
+    return json({items:[]});
+   }
+   const relative=path.replace(/^\/hermes\//,'')||'index.html';
+   if(relative.includes('..'))return res.writeHead(400).end();
+   try{
+    const body=await readFile(join(assets,relative));
+    res.writeHead(200,{'Content-Type':({html:'text/html',css:'text/css',js:'text/javascript',mjs:'text/javascript',svg:'image/svg+xml',webmanifest:'application/manifest+json'})[relative.split('.').pop()]||'application/octet-stream'});
+    res.end(body);
+   }catch{res.writeHead(404).end();}
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+  const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'}),page=await context.newPage();
+  page.setDefaultTimeout(7000);
+  await page.addInitScript(()=>{window.PublicKeyCredential=class {};Object.defineProperty(navigator,'credentials',{configurable:true,value:{get:async()=>({
+   id:'fixture',rawId:new Uint8Array([1]).buffer,type:'public-key',getClientExtensionResults:()=>({}),
+   response:{clientDataJSON:new Uint8Array([1]).buffer,authenticatorData:new Uint8Array([2]).buffer,
+    signature:new Uint8Array([3]).buffer,userHandle:null}
+  })}});});
+  await page.goto(`http://127.0.0.1:${server.address().port}/hermes/?notification=notice-target`);
+  const card=page.locator('[data-approval-id="a"]');
+  await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+  await page.waitForFunction(()=>document.querySelector('[data-approval-id="a"]'));
+  for(let i=0;i<100&&!eventStreams.size;i++)await page.waitForTimeout(10);
+  assert.ok(eventStreams.size,'the rendered run has an active event stream');
+  for(let i=0;i<100&&detailReads!==1;i++)await page.waitForTimeout(10);
+  assert.equal(detailReads,1,'the initial notification detail request is held');
+  for(const stream of eventStreams)stream.write(`event: status\ndata: ${JSON.stringify({status:'unknown'})}\n\n`);
+  await card.getByRole('heading',{name:'Approval details unavailable',exact:true}).waitFor();
+  omitNextList=true;
+  const priorListReads=listReads;
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+  for(let i=0;i<100&&listReads<=priorListReads;i++)await page.waitForTimeout(10);
+  for(let i=0;i<100&&detailReads<2;i++)await page.waitForTimeout(10);
+  assert.ok(listReads>=2,'the empty list is refreshed after the unknown transition');
+  for(let i=0;i<100&&!firstDetailAborted;i++)await page.waitForTimeout(10);
+  assert.equal(firstDetailAborted,true,'the pre-unknown HTTP request was actually aborted');
+  assert.ok(detailReads>=2,'post-transition detail reads do not reuse the old in-flight request');
+  assert.equal(await card.getByRole('button').count(),0,'unknown status remains non-actionable');
+  run.status='waiting_for_approval';
+  await page.getByRole('navigation',{name:'Main navigation'}).getByRole('button',{name:'Chats',exact:true}).click();
+  await page.locator('.session-row').click();
+  await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+  assert.equal(await page.locator('[data-approval-id="a"]').count(),1,'re-entry keeps one exact approval card');
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'status recovery never decides');
+ }finally{
+  releaseInitial?.();for(const stream of eventStreams)stream.end();
   if(browser)await browser.close();
   if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   await rm(temporary,{recursive:true,force:true});

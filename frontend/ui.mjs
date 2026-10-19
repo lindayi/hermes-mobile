@@ -37,7 +37,7 @@ export function formatMessageTime(value, {locale, timeZone} = {}) {
 export async function mountApp(doc, api, win = doc.defaultView) {
   const root = doc.getElementById('app');
   const state = {user:null,view:'chats',session:null,query:'',searchOpen:false,offset:0,kind:'chats'};
-  let content, nav, routeVersion = 0, destroyed=false;
+  let content, nav, routeVersion = 0, authGeneration=0, destroyed=false;
   let stream = null, cancelTracking=null, headerState=null;
   let stopDisclosureReachability=null;
   let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null,
@@ -223,10 +223,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       inform(errorMessage(error),true);
     }
   }
-  function expiredSession() {disconnect();leaveConversation();releasePresenceIdentity();routeVersion++;state.user=null;drafts.clear();attempts.clear();api.clear();showAuth();inform('Your session expired. Sign in with your passkey to continue.',true);}
+  function expiredSession() {authGeneration++;disconnect();leaveConversation();releasePresenceIdentity();routeVersion++;state.user=null;drafts.clear();attempts.clear();api.clear();showAuth();inform('Your session expired. Sign in with your passkey to continue.',true);}
   async function signOut(remote=true) {
     if(remote)await api.request('/auth/logout',{method:'POST',body:{}});
-    disconnect();leaveConversation();releasePresenceIdentity();drafts.clear();attempts.clear();
+    authGeneration++;disconnect();leaveConversation();releasePresenceIdentity();drafts.clear();attempts.clear();
     try {for(const name of Object.keys(win.sessionStorage))if(name.startsWith(`hermes:${state.user?.id}:`))win.sessionStorage.removeItem(name);}catch{}
     try {for(const name of Object.keys(win.localStorage))if(name.startsWith(`hermes:${state.user?.id}:`))win.localStorage.removeItem(name);}catch{}
     api.clear();state.user=null;showAuth();inform('Signed out. Local drafts on this device were cleared.');
@@ -1169,7 +1169,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
-    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map(),approvalDetailReads=new Map();
+    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map(),approvalDetailReads=new Map(),
+      approvalDetailEpochs=new Map();
+    let approvalDetailEpoch=0;
     let approvalRevision=0,approvalListRevision=0,approvalPending=new Map(),genericApproval=false,
       currentApprovalRun=accepted?.id || notificationTarget?.run_id,
       currentApprovalRunSession=accepted?.session_id || notificationTarget?.run_session_id || session.id,
@@ -1187,24 +1189,55 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       && left.run_session_id===right.run_session_id;
     const sameApprovalData=(left,right)=>!!left && approvalDataFields.every(field=>
       JSON.stringify(left[field])===JSON.stringify(right[field]));
+    const approvalDetailGeneration=runId=>approvalDetailEpochs.get(runId) || 0;
+    const invalidateApprovalDetails=runId=>{
+      approvalDetailEpochs.set(runId,++approvalDetailEpoch);
+      if(approvalDetailEpochs.size>1000)for(const oldRunId of approvalDetailEpochs.keys()){
+        if(oldRunId!==runId && ![...approvalDetailReads.values()].some(read=>read.runId===oldRunId))
+          approvalDetailEpochs.delete(oldRunId);
+        if(approvalDetailEpochs.size<=1000)break;
+      }
+      for(const [key,read] of approvalDetailReads){
+        if(read.runId!==runId)continue;
+        if(approvalDetailReads.get(key)===read)approvalDetailReads.delete(key);
+        read.cancel();
+      }
+    };
+    for(const record of approvalDecisionStates.values()){
+      const identity=record.identity;
+      if(record.owner!==owner || record.canonicalSessionId!==session.id
+          || !(record.dispatched || record.needsFreshAuthority)
+          || !identity || identity.run_id!==currentApprovalRun
+          || identity.run_session_id!==currentApprovalRunSession
+          || (identity.session_id!==session.id && identity.session_id!==null))continue;
+      const status=record.status==='unknown'?'unknown':record.needsFreshAuthority?'sending':'pending',
+        item={...identity,status,executable:status==='pending',choices:status==='pending'?['once','deny']:[]},key=approvalKey(item);
+      approvalItems.set(key,item);
+      if(status==='pending'){approvalPending.set(key,item);approvalFinals.delete(key);}
+      else approvalFinals.set(key,status);
+      approvalActionStates.set(key,record.state);
+    }
     const clearApprovalTargetTimer=()=>{
       if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
       approvalTargetTimer=null;
     };
-    const readApprovalDetail=approvalId=>{
-      const existing=approvalDetailReads.get(approvalId);
-      if(existing)return existing.pending;
+    const readApprovalDetail=(approvalId,runId)=>{
+      const generation=approvalDetailGeneration(runId),key=JSON.stringify([runId,approvalId,generation]);
+      const existing=approvalDetailReads.get(key);
+      if(existing)return existing;
       const controller=new win.AbortController();
       const deadline=win.setTimeout(()=>controller.abort(),10000);
       const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal})
         .finally(()=>win.clearTimeout(deadline));
-      const read={pending,cancel:()=>{win.clearTimeout(deadline);controller.abort();}};
-      approvalDetailReads.set(approvalId,read);
+      const read={pending,runId,generation,cancelled:false,
+        valid:()=>!read.cancelled && approvalDetailGeneration(runId)===generation,
+        cancel:()=>{read.cancelled=true;win.clearTimeout(deadline);controller.abort();}};
+      approvalDetailReads.set(key,read);
       pending.then(
-        ()=>{if(approvalDetailReads.get(approvalId)===read)approvalDetailReads.delete(approvalId);},
-        ()=>{if(approvalDetailReads.get(approvalId)===read)approvalDetailReads.delete(approvalId);}
+        ()=>{if(approvalDetailReads.get(key)===read)approvalDetailReads.delete(key);},
+        ()=>{if(approvalDetailReads.get(key)===read)approvalDetailReads.delete(key);}
       );
-      return pending;
+      return read;
     };
     const scheduleApprovalTargetTimer=()=>{
       clearApprovalTargetTimer();
@@ -1352,7 +1385,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           actionState.pending=true;actionState.error='';actionState.retentionBlocked=false;
           decisionRecord.status='verifying';renderApprovals();
           if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
-          let decisionStarted=false;
+          let decisionStarted=false,decisionAuthGeneration=null,decisionRouteVersion=null;
           try{
             await ceremony('verify');
             if(!sameApproval()){
@@ -1364,6 +1397,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             if(approvalExpired(item)){expireApproval(key,item,card);return;}
             decisionStarted=true;actionState.decisionStarted=true;actionState.dispatched=true;
             decisionRecord.dispatched=true;
+            decisionAuthGeneration=authGeneration;decisionRouteVersion=routeVersion;
             await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
               {method:'POST',body:{decision:choice}});
             if(!sameDispatchedApproval(decisionRecord))return;
@@ -1405,7 +1439,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               rememberHandledApproval(key,unresolved,'unknown');
               approvalDispatchedResult(decisionRecord,'unknown');
             }
-            if(error.status===401){expiredSession();return;}
+            if(error.status===401){
+              if(decisionAuthGeneration===authGeneration && state.user?.id===owner
+                  && routeVersion===decisionRouteVersion)expiredSession();
+              return;
+            }
             if(!decisionStarted && sameCurrentApproval())renderApprovals();
           }
         };
@@ -1471,7 +1509,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const refreshTransitionalApprovalDetails=async()=>{
       const eligible=[...approvalItems].filter(([key,item])=>{
         const actionState=approvalActionStates.get(key);
-        const status=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status;
+        const status=actionState?.uncertain?'unknown'
+          :actionState?.decisionStarted || actionState?.dispatched?'sending'
+            :approvalFinals.get(key) || item.status;
         return item.id && ['sending','unknown','expired'].includes(status)
           && (item.session_id===session.id || item.run_id===currentApprovalRun);
       });
@@ -1480,15 +1520,26 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(targets.length<Math.min(10,eligible.length))targets.push(...eligible.slice(0,Math.min(10,eligible.length)-targets.length));
       if(eligible.length)approvalDetailBatchOffset=(start+targets.length)%eligible.length;
       await Promise.all(targets.map(async([key,item])=>{
+        const read=readApprovalDetail(item.id,item.run_id),decisionAuthorityRevision=approvalDecisionAuthorityRevision;
         try{
-          const detail=await readApprovalDetail(item.id);
+          const detail=await read.pending;
+          if(!read.valid())return;
           if(!current() || owner!==state.user?.id || state.session?.id!==session.id
               || approvalItems.get(key)!==item || !detail || !sameApprovalIdentity(item,detail)
               || typeof detail.status!=='string')return;
           const actionState=approvalActionStates.get(key),
             currentStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status,
-            status=actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
-              ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
+            decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+          if(detail.status==='pending' && actionState?.needsFreshAuthority
+              && decision?.needsFreshAuthority && decision.retryAuthorityRevision<=decisionAuthorityRevision
+              && decision.owner===owner && decision.canonicalSessionId===session.id
+              && sameApprovalIdentity(decision.identity,detail)){
+            decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;
+            approvalItems.set(key,detail);approvalPending.set(key,detail);approvalFinals.delete(key);
+            renderApprovals();return;
+          }
+          let status=actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
+            ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
           if(status===currentStatus && !finalApprovalStatuses.has(detail.status))return;
           const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
           approvalItems.set(key,next);approvalPending.delete(key);
@@ -1500,7 +1551,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
           }
           renderApprovals();
-        }catch(error){if(current() && error.status===401)expiredSession();}
+        }catch(error){if(read.valid() && current() && error.status===401)expiredSession();}
       }));
     };
     const refreshMissingApprovalDetails=async(listedKeys,revision,listRevision)=>{
@@ -1527,15 +1578,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             && approvalItems.get(key)===item && !handledApprovals.has(key)
             && approvalActionStates.get(key)===actionState
             && !!actionState?.pending===wasPending && !actionState?.decisionStarted && !actionState?.uncertain;
+          const read=readApprovalDetail(item.id,item.run_id);
           let detail;
-          try{detail=await readApprovalDetail(item.id);}
+          try{detail=await read.pending;}
           catch(error){
-            if(!sameRead())return;
-            if(error.status===401){expiredSession();return;}
-            if(error.status!==404)return;
-            detail={...item,status:'unavailable'};
+           if(!read.valid() || !sameRead())return;
+           if(error.status===401){expiredSession();return;}
+           if(error.status!==404)return;
+           detail={...item,status:'unavailable'};
           }
-          if(!sameRead() || !detail || !sameApprovalIdentity(item,detail)
+          if(!read.valid() || !sameRead() || !detail || !sameApprovalIdentity(item,detail)
               || !['pending','details_unavailable','sending','unknown','unavailable',...finalApprovalStatuses].includes(detail.status))return;
           const status=detail.status==='pending' && approvalExpired(detail)?'expired':detail.status,
             live=status==='pending' || status==='details_unavailable',
@@ -1694,6 +1746,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       },
       finish(runId,status){
         if(status==='unknown'){
+          invalidateApprovalDetails(runId);
           approvalRevision++;
           for(const [key,item] of approvalItems)if(item.run_id===runId
               && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
@@ -1795,19 +1848,39 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           },'secondary'));
         focusApprovalTarget();
       };
+      let detailRead=null;
       try{
         let item=[...approvalItems.values()].find(matches),detailRevision=null,detailListRevision=null;
         if(!item){
           detailRevision=approvalRevision;
           detailListRevision=approvalListRevision;
-          item=await readApprovalDetail(target.approval_id);
+          detailRead=readApprovalDetail(target.approval_id,target.run_id);
+          item=await detailRead.pending;
           if(!current())return;
+          if(!detailRead.valid()){
+            item={id:target.approval_id,run_id:target.run_id,request_id:target.request_id,
+              session_id:session.id,run_session_id:target.run_session_id || session.id,
+              status:'details_unavailable',details_unavailable:true,executable:false,choices:[],
+              error:'Approval details are temporarily unavailable.'};
+            const key=approvalKey(item);
+            if(!approvalItems.has(key)){
+              approvalItems.set(key,item);approvalFinals.set(key,'details_unavailable');
+              approvalRevision++;renderApprovals();focusApprovalTarget();
+            }
+            return;
+          }
         }
         if(!current())return;
         if(matches(item)){
           const key=approvalKey(item);
           let existing=approvalItems.get(key);
           if(handledApprovals.has(key)){
+            const retained=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(retained?.dispatched || retained?.needsFreshAuthority){
+              approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+              renderApprovals();focusApprovalTarget();
+              await restoreApprovalTargetHistory(existing || item);return;
+            }
             const cached=handledApprovalDetails.get(key);
             const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
             const finalStatus=finalApprovalStatuses.has(item.status)?item.status
@@ -1843,8 +1916,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
                 const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
                   revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
                   revalidatedHandled=handledApprovals.has(key),revalidatedDetails=handledApprovalDetails.get(key);
-                const latestDetail=await readApprovalDetail(target.approval_id);
-                if(!current())return;
+                const latestRead=detailRead=readApprovalDetail(target.approval_id,target.run_id),
+                  latestDetail=await latestRead.pending;
+                if(!current() || !latestRead.valid())return;
                 const actionState=approvalActionStates.get(key);
                 if(revalidatedItem!==approvalItems.get(key) || revalidatedPending!==approvalPending.get(key)
                     || revalidatedHandled!==handledApprovals.has(key) || revalidatedDetails!==handledApprovalDetails.get(key)
@@ -1920,7 +1994,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           focusApprovalTarget();
         }
       }catch(error){
-        if(!current())return;
+        if(!current() || error.name==='AbortError' || (detailRead && !detailRead.valid()))return;
         if(error.status===401){expiredSession();return;}
         const unavailable=[404,409,410].includes(error.status);
         if(unavailable){
@@ -3131,7 +3205,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(destroyed || version!==routeVersion)return;
       await preparePresenceIdentity(data,()=>!destroyed && version===routeVersion);
       if(destroyed || version!==routeVersion)return;
-      if(state.user?.id!==data.user.id){state.kind='chats';state.query='';state.searchOpen=false;state.offset=0;state.session=null;drafts.clear();attempts.clear();}
+      if(state.user?.id!==data.user.id){authGeneration++;state.kind='chats';state.query='';state.searchOpen=false;state.offset=0;state.session=null;drafts.clear();attempts.clear();}
       state.user=data.user;shell();
       const params=new URL(win.location.href).searchParams;
       const notification=params.get('notification') || params.get('inbox');

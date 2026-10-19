@@ -77,6 +77,16 @@ returning action details or decision capabilities. Omit individually unverified
 list items and reject unverified details, including changed role/profile/status;
 an Inbox visibility flag is not an authorization denial. Keep positively proven
 non-chat approvals, never infer that exception from failed proof.
+
+Client exact-detail reads are deduplicated only within their run-authority
+generation. An unknown-run transition aborts and fences only that run's older
+reads; late results cannot restore controls. Same-owner chat re-entry may restore
+a retained dispatched decision only as a bounded non-actionable card matched by
+the exact owner, canonical session, original run session, run, request and
+approval identity. Revalidate its status through authenticated exact detail,
+independent of pending-list enumeration. A delayed decision 401 may expire only
+the same account, authentication lifetime and route that dispatched it.
+
 The list uses request-scoped journal proof batches and one native classification
 per source session, then revalidates current authorization. Both list and detail
 synchronous database work run in the request threadpool, never on the async event

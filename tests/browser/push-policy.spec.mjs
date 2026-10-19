@@ -950,7 +950,7 @@ for(const sourceSession of ['session-one','old-alias'])test(`generated successfu
   await page.route(isApprovalListPath,fulfillApprovalList(route=>{
    malformedRouteCalls++;
    return route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
-  }));
+  }),{times:1});
   await refresh();await page.unroute(isApprovalListPath);
   assert.equal(malformedRouteCalls,index+1,'the malformed or held list response was injected');
   assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable');
