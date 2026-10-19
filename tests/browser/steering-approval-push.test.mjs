@@ -33,6 +33,31 @@ for(const status of ['pending','expired'])test(`approval notification opens exac
  }finally{app.destroy();win.close();}
 });
 
+test('owned non-chat approval keeps its Inbox card and explicit decisions',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ const notice={id:'n',title:'Approval required',body:'Review the scheduled action.',
+  session_id:'cron-session',approval_id:'a',run_id:'r',request_id:'native-a',read:false,created_at:1};
+ const approval={...approvalItem(),session_id:'cron-session',run_session_id:'cron-session',inbox_visible:true};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'inbox'};
+  if(p==='/inbox')return {items:[notice],read_count:0};
+  if(p==='/approvals')return {items:[approval]};
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>doc.querySelector('.inbox-approval'));
+  const card=doc.querySelector('.inbox-approval');
+  assert.match(card.textContent,/echo fixture/);
+  assert.match(card.textContent,/fixture target/);
+  assert.ok([...card.querySelectorAll('button')].some(button=>button.textContent==='Approve once'));
+  assert.ok([...card.querySelectorAll('button')].some(button=>button.textContent==='Deny'));
+  assert.equal(calls.some(call=>call.p==='/sessions/cron-session'),false);
+  assert.equal(calls.some(call=>call.p.endsWith('/decision')),false,'opening Inbox does not decide');
+ }finally{app.destroy();win.close();}
+});
+
 test('a delayed pending approval detail is not actionable after its expiry',async()=>{
  const list=deferred(),detail=deferred(),calls=[];
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
@@ -1214,6 +1239,53 @@ for(const transport of ['events','polling'])test(`approval notification resumes 
   assert.equal(doc.querySelector('.live-message')?.dataset.historySession,'old-alias');
   assert.equal(calls.some(call=>call.p==='/inbox'),false);
   assert.equal(calls.filter(call=>call.p==='/approvals/a/decision').length,1);
+ }finally{app.destroy();win.close();}
+});
+
+test('approval SSE without session fields preserves a held aliased decision acknowledgement',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ const acknowledgement=deferred();let decisionPosts=0;
+ const {session_id,run_session_id,...streamApproval}=approvalItem();
+ const approval={...approvalItem(),session_id:'s',run_session_id:'old-alias'};
+ const run={id:'r',session_id:'old-alias',status:'waiting_for_approval',input:'Aliased request',created_at:1};
+ class Events{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){this.closed=true;}
+ }
+ win.EventSource=Events;win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>fakeCredential()};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'old-alias',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Canonical chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,run};
+  if(p==='/approvals')return {items:[approval]};
+  if(p==='/approvals/a')return {...approval,status:'pending'};
+  if(p==='/runs/r/clarifications')return {run_id:'r',status:'waiting_for_approval',items:[],available:true};
+  if(p==='/auth/verify/options')return {challenge_id:'fixture',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {verified:true};
+  if(p==='/approvals/a/decision'){decisionPosts++;return acknowledgement.promise;}
+  return {items:[]};
+ }},win);
+ try{
+  const card=doc.querySelector('[data-approval-id="a"]');
+  await waitFor(()=>card?.querySelector('button.primary'));
+  card.querySelector('button.primary').click();
+  await waitFor(()=>decisionPosts===1);
+  win.activeStream.emit('approval',{...streamApproval,id:'a',run_id:'r',request_id:'native-a'});
+  await waitFor(()=>calls.filter(call=>call.p==='/approvals').length>1);
+  assert.equal(calls.filter(call=>call.p==='/approvals')[1].p,'/approvals');
+  acknowledgement.resolve({status:'resolved'});
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved');
+  assert.equal(decisionPosts,1,'the held explicit decision is sent exactly once');
+  assert.equal(doc.querySelector('[data-approval-id="a"] .inline-error')?.textContent,'');
+  win.activeStream.emit('approval',{...streamApproval,id:'a',run_id:'r',request_id:'native-a'});
+  await new Promise(resolve=>setTimeout(resolve,30));
+  assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Resolved',
+   'a replay cannot replace the acknowledged final card');
  }finally{app.destroy();win.close();}
 });
 

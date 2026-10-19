@@ -206,6 +206,9 @@ def test_request_and_session_approval_rows_are_hidden_without_changing_push_stor
 def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approval(attention_env):
     service, client, now, user = attention_env
     service.approval_validator = lambda *identity: True
+    service.approval_target_resolver = lambda owner, run, request, approval, session: {
+        'kind':'chat','session_id':session,'run_session_id':session
+    }
     service.request_target_resolver = lambda owner, delivery_id, session_id, category: {
         'session_id': session_id, 'run_session_id': delivery_id.split(':')[1]
     }

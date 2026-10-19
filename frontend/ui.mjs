@@ -454,7 +454,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const pendingApproval=item=>approvals.status==='fulfilled' && (approvals.value.items || []).find(a=>a.id===item.approval_id && a.run_id===item.run_id && a.request_id===item.request_id);
     const approvalCard=item=>[...section.querySelectorAll('[data-approval-id]')].find(el=>el.dataset.approvalId===item.approval_id);
     if(approvals.status==='fulfilled')for(const item of approvals.value.items || []) {
-      if(item.session_id)continue;
+      if(item.inbox_visible===false || (item.session_id && item.inbox_visible!==true))continue;
       const actionText=typeof item.command==='string' ? item.command
         : typeof item.action==='string' ? item.action : 'Action details are unavailable.';
       section.append(h('article',{class:'card approval inbox-approval','data-approval-id':item.id,tabindex:'-1'},h('details',{},
@@ -1119,7 +1119,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
     const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map(),approvalDetailReads=new Map();
     let approvalRevision=0,approvalListRevision=0,approvalPending=new Map(),genericApproval=false,
-      currentApprovalRun=accepted?.id || notificationTarget?.run_id,approvalTargetPlaceholder=null,
+      currentApprovalRun=accepted?.id || notificationTarget?.run_id,
+      currentApprovalRunSession=accepted?.session_id || notificationTarget?.run_session_id || session.id,
+      approvalTargetPlaceholder=null,
       approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false;
     const approvalExpiryTimers=new Map();
     let approvalDetailBatchOffset=0;
@@ -1419,10 +1421,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     approvalState={
       reconcile:reconcileApprovals,
-      run(id){currentApprovalRun=id;renderApprovals();},
-      event(item,runId){
+      run(id,runSessionId){currentApprovalRun=id;currentApprovalRunSession=runSessionId || session.id;renderApprovals();},
+      event(item,runId,runSessionId){
+        const sourceSessionId=runSessionId || currentApprovalRunSession;
+        if((Object.hasOwn(item,'run_id') && item.run_id!==runId)
+            || (Object.hasOwn(item,'run_session_id') && item.run_session_id!==sourceSessionId)
+            || (Object.hasOwn(item,'session_id') && item.session_id!==sourceSessionId))return false;
         let value={...item,run_id:runId,
-          run_session_id:item.run_session_id || item.session_id || session.id,session_id:session.id},
+          run_session_id:item.run_session_id || item.session_id || sourceSessionId,session_id:session.id},
           key=approvalKey(value);
         if(version!==routeVersion || handledApprovals.has(key) || approvalFinals.has(key))return false;
         const previous=approvalItems.get(key);
@@ -2100,7 +2106,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const sessionId=run.session_id || state.session.id;
     const atTail=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString();
     const followTail=()=>initialRestore.follow?.() ?? atTail();
-    approvalState?.run(run.id);
+    approvalState?.run(run.id,sessionId);
     composerAction.attach?.(run);
     storage.set(key(`run:${sessionId}`),run.id,true);
     const status=h('span',{role:'status','aria-hidden':'true'},run.status || 'submitted');
@@ -2578,7 +2584,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     on('commentary',renderCommentary);
     on('delta',renderDelta);
     on('tool',renderTool);
-    on('approval',data=>{if(!approvalState?.event(data,run.id))return;apply({status:'waiting_for_approval'});connection?.run('waiting_for_approval');status.textContent='Waiting for approval';if(data.id || data.request_id)void approvalState.reconcile();});
+    on('approval',data=>{if(!approvalState?.event(data,run.id,sessionId))return;apply({status:'waiting_for_approval'});connection?.run('waiting_for_approval');status.textContent='Waiting for approval';if(data.id || data.request_id)void approvalState.reconcile();});
     on('clarification',data=>{
       if(data.run_id!==run.id || data.session_id!==sessionId
           || !Number.isFinite(data.updated_at))return;

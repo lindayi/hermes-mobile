@@ -43,6 +43,69 @@ def test_new_approval_creates_owned_deduplicated_notification(tmp_path):
         assert not calls
 
 
+def test_owned_cron_approval_keeps_inbox_destination_and_projection(tmp_path):
+    with environment(tmp_path) as (app,client,user,rid,_):
+        with sqlite3.connect(tmp_path/'home'/'state.db') as db:
+            db.execute("UPDATE sessions SET source='cron' WHERE id='wa-1'")
+            db.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?)",
+                       ('chat-session','Synthetic chat','whatsapp',5,6,None))
+        notification=app.state.notifications
+        from types import SimpleNamespace
+        sent=[]
+        notification.vapid_private_key='synthetic-test-key'
+        notification.vapid_public_key='synthetic-test-key'
+        notification.send_push=lambda **payload:(sent.append(payload) or SimpleNamespace(status_code=201))
+        with app.state.auth.store.transaction() as db:
+            device=db.execute('SELECT id FROM sessions WHERE user_id=?',(user['id'],)).fetchone()[0]
+        notification.subscribe(user['id'],device,subscription())
+        runtime=app.state.orchestrator
+        runtime.gateway.execution_ready=True
+        runtime.gateway.action_approvals_ready=True
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'cron-action','run_id':'native-run',
+            'command':'echo synthetic cron approval'})
+        chat_run,_=app.state.journal.submit(user['id'],'default','chat-session','Synthetic chat request','chat-key')
+        app.state.journal.set_upstream(user['id'],chat_run['id'],'native-chat-run')
+        runtime._approval(user,runtime.get(user,chat_run['id']),{
+            'event':'approval.request','request_id':'chat-action','run_id':'native-chat-run',
+            'command':'echo synthetic chat approval'})
+        approvals={item['request_id']:item for item in runtime.approvals(user)['items']}
+        with notification._db() as db:
+            notices={row['delivery_id']:row['id'] for row in db.execute(
+                'SELECT id,delivery_id FROM inbox WHERE user_id=?',(user['id'],))}
+        notice_id=notices['approval:'+json.dumps([rid,'cron-action'],separators=(',',':'))]
+        chat_notice_id=notices['approval:'+json.dumps([chat_run['id'],'chat-action'],separators=(',',':'))]
+
+        page=client.get(BASE+'/inbox')
+        assert page.status_code==200
+        assert [item['id'] for item in page.json()['items']]==[notice_id]
+        assert page.json()['read_count']==0
+        assert client.get(BASE+'/inbox?limit=1&offset=1').json()['items']==[]
+        target=client.get(BASE+f"/inbox/{notice_id}/target")
+        assert target.status_code==200
+        assert target.json()=={'kind':'inbox'}
+        chat_target=client.get(BASE+f"/inbox/{chat_notice_id}/target")
+        assert chat_target.status_code==200 and chat_target.json()['kind']=='approval'
+        listed={item['request_id']:item for item in client.get(BASE+'/approvals').json()['items']}
+        assert listed['cron-action']['id']==approvals['cron-action']['id']
+        assert listed['cron-action']['session_id']=='wa-1'
+        assert listed['cron-action']['inbox_visible'] is True
+        assert listed['chat-action']['inbox_visible'] is False
+        assert notification.flush()['sent']==2
+        assert len(sent)==2
+        with notification._db() as db:
+            receipts_before=[tuple(row) for row in db.execute('SELECT * FROM approval_notifications ORDER BY approval_id')]
+            assert {row[0] for row in db.execute('SELECT status FROM outbox')}=={'sent'}
+        assert notification.mark_read(user['id'],notice_id)
+        assert notification.read_count(user['id'])==1
+        assert client.post(BASE+'/inbox/clear-read').json()=={'ok':True,'dismissed':1}
+        assert notification.list_inbox(user['id'])==[]
+        with notification._db() as db:
+            assert [tuple(row) for row in db.execute('SELECT * FROM approval_notifications ORDER BY approval_id')]==receipts_before
+            assert db.execute('SELECT count(*) FROM inbox').fetchone()[0]==2
+            assert {row[0] for row in db.execute('SELECT status FROM outbox')}=={'sent'}
+
+
 def test_approval_details_respect_run_session_deletion_fence(tmp_path):
     from contextlib import closing
 
@@ -90,6 +153,7 @@ def test_approval_target_and_pending_card_resolve_compression_tip(tmp_path):
         with app.state.notifications._db() as db, db:
             db.execute('UPDATE inbox SET session_id=? WHERE id=?',('unproven-alias',notice['id']))
         assert client.get(BASE+f"/inbox/{notice['id']}/target").status_code==404
+        assert client.get(BASE+'/inbox').json()['items']==[]
         with pytest.raises(HTTPException) as error:
             app.state.notifications.notification_target('stranger',notice['id'])
         assert error.value.status_code==404

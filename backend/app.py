@@ -238,7 +238,7 @@ def create_app(settings=None, *, gateway_client=None):
             return None
         return user
 
-    def notification_session(user, session_id):
+    def notification_session_binding(user, session_id):
         from contextlib import closing
         from .session_visibility import classification_sql
         current=notification_user(user['id'])
@@ -281,11 +281,17 @@ def create_app(settings=None, *, gateway_client=None):
             with closing(catalog._connect(current['profile'])) as db:
                 columns={row[1] for row in db.execute('PRAGMA table_info(sessions)')}
                 expression,params=classification_sql(columns)
-                eligible=db.execute('SELECT 1 FROM sessions WHERE id=? AND ('+expression+")='chats'",
-                                    (tip,*params)).fetchone()
-            return tip if eligible else None
+                classification=db.execute('SELECT ('+expression+') FROM sessions WHERE id=?',
+                                           (*params,tip)).fetchone()
+            if not classification or classification[0]=='hidden':
+                return None
+            return {'session_id':tip,'classification':classification[0]}
         except (KeyError,ValueError,PermissionError,sqlite3.Error):
             return None
+
+    def notification_session(user, session_id):
+        target=notification_session_binding(user,session_id)
+        return target['session_id'] if target and target['classification']=='chats' else None
 
     def resolve_presence(user_id,session_id):
         user=notification_user(user_id)
@@ -302,10 +308,17 @@ def create_app(settings=None, *, gateway_client=None):
                 (run_id,user_id,user['profile'],approval_id,request_id)).fetchone()
         if not row or row['session_id']!=session_id:
             return None
-        canonical=notification_session(user,row['session_id'])
-        if not canonical:
+        if row['session_id'] is None:
+            return {'kind':'inbox'}
+        target=notification_session_binding(user,row['session_id'])
+        if not target:
             return None
-        return {'session_id':canonical,'run_session_id':row['session_id']}
+        if target['classification']=='chats':
+            return {'kind':'chat','session_id':target['session_id'],
+                    'run_session_id':row['session_id']}
+        if target['classification'] in ('cron','tests'):
+            return {'kind':'inbox'}
+        return None
 
     def valid_presence(user_id,session_id):
         return resolve_presence(user_id,session_id) is not None
@@ -316,6 +329,8 @@ def create_app(settings=None, *, gateway_client=None):
             return False
         if category in ('completion','attention'):
             return bool(session_id and notification_session(user,session_id) is not None)
+        if category=='approval' and session_id is not None:
+            return notification_session_binding(user,session_id) is not None
         if session_id is not None:
             return notification_session(user,session_id) is not None
         return category in ('operational','scheduled','test','approval')
@@ -429,11 +444,14 @@ def create_app(settings=None, *, gateway_client=None):
 
     def approval_chat_binding(user,item):
         source=item.get('session_id')
-        if not isinstance(source,str):
-            return item
-        canonical=notification_session(user,source)
-        return ({**item,'session_id':canonical,'run_session_id':source}
-                if canonical else item)
+        binding=approval_notification_binding(user['id'],item['run_id'],item['request_id'],
+                                              item['id'],source)
+        if not binding:
+            return {**item,'inbox_visible':False}
+        if binding['kind']=='chat':
+            return {**item,'session_id':binding['session_id'],
+                    'run_session_id':binding['run_session_id'],'inbox_visible':False}
+        return {**item,'inbox_visible':True}
 
     for runtime in runtimes.values():
         runtime.approval_notifier=notifications.ingest_approval

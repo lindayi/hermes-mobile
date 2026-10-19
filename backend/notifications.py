@@ -32,7 +32,8 @@ def _attention_visible_sql(db):
         '''
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='approval_notifications'").fetchone():
         predicate += '''AND NOT EXISTS (SELECT 1 FROM approval_notifications a
-                         WHERE a.inbox_id=inbox.id AND inbox.session_id IS NOT NULL)
+                         WHERE a.inbox_id=inbox.id
+                         AND inbox.id NOT IN (SELECT inbox_id FROM attention_approval_inbox))
         '''
     # The silent release observer can use a pre-policy DB without initializing
     # schema. Only absent metadata is optional; database/query errors propagate.
@@ -531,10 +532,34 @@ class NotificationService:
                 result['sent'] += 1
         return result
 
+    def _inbox_approval_ids(self, user_id):
+        resolver = self.approval_target_resolver
+        if not resolver:
+            return set()
+        with self._db() as db:
+            approvals = db.execute('''SELECT i.id,i.session_id,a.approval_id,a.run_id,a.request_id
+                FROM inbox i JOIN approval_notifications a ON a.inbox_id=i.id
+                WHERE i.user_id=?''', (user_id,)).fetchall()
+        visible = set()
+        for row in approvals:
+            binding = resolver(user_id, row['run_id'], row['request_id'],
+                               row['approval_id'], row['session_id'])
+            if isinstance(binding, dict) and binding.get('kind') == 'inbox':
+                visible.add(row['id'])
+        return visible
+
+    @staticmethod
+    def _set_attention_approvals(db, visible):
+        db.execute('CREATE TEMP TABLE attention_approval_inbox (inbox_id TEXT PRIMARY KEY) WITHOUT ROWID')
+        db.executemany('INSERT INTO attention_approval_inbox VALUES(?)',
+                       ((item_id,) for item_id in visible))
+
     def mark_all_read(self, user_id, *, _authorize=None):
         """Read owned attention rows across all pages; leave receipts/actions intact."""
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._set_attention_approvals(db, visible_approvals)
             # Match preference writes' lock order and fence revoked bearer
             # generations after waiting for the notification writer.
             with _authorize() if _authorize else nullcontext():
@@ -578,8 +603,10 @@ class NotificationService:
             (SELECT inbox_id FROM dismissed_inbox WHERE user_id=?)''', (user_id,))
 
     def clear_read(self, user_id):
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._set_attention_approvals(db, visible_approvals)
             dismissed = db.execute(f'''INSERT OR IGNORE INTO dismissed_inbox(inbox_id,user_id,dismissed_at)
                 SELECT id,user_id,? FROM inbox WHERE user_id=? AND read=1 AND {_attention_visible_sql(db)}''',
                 (self.clock(), user_id)).rowcount
@@ -587,13 +614,17 @@ class NotificationService:
             return dismissed
 
     def read_count(self, user_id):
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
+            self._set_attention_approvals(db, visible_approvals)
             return db.execute(f'''SELECT count(*) FROM inbox WHERE user_id=? AND read=1
                 AND {_attention_visible_sql(db)}''',
                 (user_id,)).fetchone()[0]
 
     def list_inbox(self, user_id, limit=100, offset=0):
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
+            self._set_attention_approvals(db, visible_approvals)
             items = [self._item(row) for row in db.execute(
                 f'''SELECT * FROM inbox WHERE user_id=? AND {_attention_visible_sql(db)}
                 ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?''',
@@ -614,12 +645,13 @@ class NotificationService:
                 WHERE i.id=? AND i.user_id=?''', (item_id, user_id)).fetchone()
         if row is None:
             raise HTTPException(404, 'Inbox item not found')
-        if row['approval_id'] and row['session_id']:
+        if row['approval_id']:
             resolver = self.approval_target_resolver
             binding = resolver(user_id, row['run_id'], row['request_id'],
-                               row['approval_id'], row['session_id']) if resolver else {
-                                   'session_id': row['session_id'], 'run_session_id': row['session_id']}
-            if (isinstance(binding, dict)
+                               row['approval_id'], row['session_id']) if resolver else None
+            if isinstance(binding, dict) and binding.get('kind') == 'inbox':
+                return {'kind': 'inbox'}
+            if (isinstance(binding, dict) and binding.get('kind') == 'chat'
                     and isinstance(binding.get('session_id'), str)
                     and isinstance(binding.get('run_session_id'), str)):
                 return {'kind': 'approval', 'session_id': binding['session_id'],

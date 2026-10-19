@@ -66,6 +66,11 @@ them. The existing step-up, CSRF, owner/run/request binding, expiry and
 single-use decision endpoint remain the only decision path. Approval actions are
 rendered inline with their command/target and explicit controls, not copied into
 Inbox. If no chat is bound, retain the prior Inbox approval destination.
+Session-bound approvals are classified only after validating the owned run,
+approval, request and native session. Positively classified chat sessions stay out
+of Inbox; positively classified cron/test sessions retain their Inbox card and
+explicit decisions. Missing or ambiguous bindings remain unavailable, not an
+Inbox fallback based only on category or session ID.
 
 Push preferences remain independent of Inbox visibility and retention. Visibility
 changes do not alter outbox status, receipts, acknowledgements, or retry history.
