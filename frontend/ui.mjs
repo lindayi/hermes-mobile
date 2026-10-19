@@ -1380,7 +1380,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       try{
         const data=await api.request('/approvals');
         if(!current() || revision!==approvalRevision || !Array.isArray(data?.items)
-            || !data.items.every(item=>item && ['id','run_id','request_id'].every(field=>
+            || !data.items.every(item=>item && ['id','run_id'].every(field=>
               typeof item[field]==='string' && item[field])))return;
         approvalListRevision++;
         const items=data.items.filter(item=>{
