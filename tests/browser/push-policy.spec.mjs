@@ -1527,7 +1527,7 @@ test(`generated held initial detail preserves expiry provenance (${count}, ${sta
  await page.clock.install();
  const items=Array.from({length:count},(_,index)=>approvalRecord({
   id:index===0?'approval-1':`expired-${index}`,request_id:index===0?'request-1':`expired-request-${index}`,
-  expires_at:Date.now()/1000+10
+  expires_at:Date.now()/1000+2
  }));
  let releaseList,releaseDetail;
  control.notificationTarget=approvalTarget;control.approvals=items;
@@ -1543,7 +1543,7 @@ test(`generated held initial detail preserves expiry provenance (${count}, ${sta
  releaseList();control.approvalHold=null;
  await page.waitForFunction(count=>document.querySelectorAll('.approval-card').length===count,count);
  const card=page.locator('[data-approval-id="approval-1"]');
- await page.clock.fastForward(11000);
+ await page.clock.fastForward(2500);
  await card.getByRole('heading',{name:'Expired',exact:true}).waitFor();
  assert.equal(await page.locator('.approval-card h3').evaluateAll(nodes=>nodes.every(node=>node.textContent==='Expired')),true);
  assert.equal(await card.getByRole('button').count(),0);

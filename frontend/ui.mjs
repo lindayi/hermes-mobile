@@ -1142,15 +1142,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     const readApprovalDetail=approvalId=>{
       const existing=approvalDetailReads.get(approvalId);
-      if(existing)return existing;
+      if(existing)return existing.pending;
       const controller=new win.AbortController();
       const deadline=win.setTimeout(()=>controller.abort(),10000);
       const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal})
         .finally(()=>win.clearTimeout(deadline));
-      approvalDetailReads.set(approvalId,pending);
+      const read={pending,cancel:()=>{win.clearTimeout(deadline);controller.abort();}};
+      approvalDetailReads.set(approvalId,read);
       pending.then(
-        ()=>{if(approvalDetailReads.get(approvalId)===pending)approvalDetailReads.delete(approvalId);},
-        ()=>{if(approvalDetailReads.get(approvalId)===pending)approvalDetailReads.delete(approvalId);}
+        ()=>{if(approvalDetailReads.get(approvalId)===read)approvalDetailReads.delete(approvalId);},
+        ()=>{if(approvalDetailReads.get(approvalId)===read)approvalDetailReads.delete(approvalId);}
       );
       return pending;
     };
@@ -1744,6 +1745,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     win.addEventListener('focus',reconcileApprovals);
     stopExtras=()=>{
       approvalRevision++;win.removeEventListener('focus',reconcileApprovals);clearApprovalTargetTimer();
+      for(const read of approvalDetailReads.values())read.cancel();
+      approvalDetailReads.clear();
       for(const {timer} of approvalExpiryTimers.values())win.clearTimeout(timer);
       approvalExpiryTimers.clear();
     };

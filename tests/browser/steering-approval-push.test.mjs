@@ -113,7 +113,7 @@ test('an open approval expires on time without affecting a parallel approval',as
 
 test('a locally expired approval revalidates after external resolution without restoring controls',async t=>{
  let now=1800000000000,next=0;const timers=new Map(),calls=[];
- const expires_at=(now+10000)/1000,item={...approvalItem(),status:'pending',expires_at};
+ const expires_at=(now+2000)/1000,item={...approvalItem(),status:'pending',expires_at};
  t.mock.method(Date,'now',()=>now);
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  win.setTimeout=(callback,delay)=>{const id=++next;timers.set(id,{callback,delay});return id;};
@@ -144,7 +144,7 @@ test('a locally expired approval revalidates after external resolution without r
   const card=doc.querySelector('[data-approval-id="a"]');
   externalStatus='resolved';
   now=expires_at*1000;
-  const expiry=[...timers].find(([,timer])=>timer.delay===10000);
+  const expiry=[...timers].find(([,timer])=>timer.delay===2000);
   assert.ok(expiry,'the mounted approval has a local expiry timer');
   timers.delete(expiry[0]);expiry[1].callback();
   assert.equal(card.querySelector('h3').textContent,'Expired');
@@ -224,7 +224,7 @@ for(const count of [100,101])for(const status of ['sending','unknown'])for(const
 test(`held initial detail preserves local expiry provenance (${count}, ${status}, stale pending ${stalePending})`,async t=>{
  let now=1800000000000,next=0;const timers=new Map(),calls=[],list=deferred(),detail=deferred();
  t.mock.method(Date,'now',()=>now);
- const expires_at=(now+10000)/1000,items=Array.from({length:count},(_,index)=>({
+ const expires_at=(now+2000)/1000,items=Array.from({length:count},(_,index)=>({
   ...approvalItem(),id:`a${index}`,request_id:`request-${index}`,status:'pending',expires_at
  }));
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
@@ -248,7 +248,7 @@ test(`held initial detail preserves local expiry provenance (${count}, ${status}
   await waitFor(()=>doc.querySelectorAll('.approval-card').length===count);
   const card=doc.querySelector('[data-approval-id="a0"]');
   now=expires_at*1000;
-  const expiries=[...timers].filter(([,timer])=>timer.delay===10000);
+  const expiries=[...timers].filter(([,timer])=>timer.delay===2000);
   assert.equal(expiries.length,count);
   for(const [id,timer] of expiries){timers.delete(id);timer.callback();}
   assert.equal(card.querySelector('h3').textContent,'Expired');
@@ -271,6 +271,47 @@ test(`held initial detail preserves local expiry provenance (${count}, ${status}
   assert.equal(calls.some(path=>path.endsWith('/decision')||path.startsWith('/auth/verify')
    ||path.startsWith('/runs/')),false,'initial detail reconciliation is read-only');
  }finally{app.destroy();assert.equal(timers.size,0);win.close();}
+});
+
+for(const departure of ['route','owner','destroy'])
+test(`held approval detail is cancelled with no timers on ${departure} teardown`,async()=>{
+ const calls=[],timers=new Map(),detail=deferred();
+ let next=0,owner='owner',signal;
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.setTimeout=(callback,delay)=>{const id=++next;timers.set(id,{callback,delay});return id;};
+ win.clearTimeout=id=>timers.delete(id);
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:[]};
+  if(p==='/approvals/a'){
+   signal=o.signal;
+   signal.addEventListener('abort',()=>detail.reject(Object.assign(new Error('aborted'),{name:'AbortError'})),{once:true});
+   return detail.promise;
+  }
+  return {items:[]};
+ }},win);
+ try{
+  await waitFor(()=>signal);
+  assert.equal(signal.aborted,false);
+  assert.ok([...timers.values()].some(timer=>timer.delay===10000),'the real detail deadline is armed');
+  if(departure==='route')doc.querySelector('[data-view="chats"]').click();
+  else if(departure==='owner'){
+   win.history.replaceState({},'','/hermes/');owner='another-owner';await app.start();
+  }else app.destroy();
+  assert.equal(signal.aborted,true,'leaving the identity must cancel its pending detail transport');
+  assert.equal(timers.size,0,'teardown clears deadlines synchronously');
+  if(departure==='route')await waitFor(()=>!doc.querySelector('.conversation') && !doc.body.textContent.includes('Loading conversations'));
+  const before=doc.body.textContent;
+  detail.resolve({...approvalItem(),status:'pending'});
+  await tick();
+  assert.equal(doc.body.textContent,before,'late detail cannot update the newer identity');
+  assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
+  assert.equal(calls.some(path=>path.endsWith('/decision')),false);
+ }finally{app.destroy();win.close();}
 });
 
 for(const distance of [10000,2147483647+10000])test(`early approval expiry callback rearms to its deadline (${distance})`,async t=>{
@@ -2400,10 +2441,14 @@ test('bounded omission during verification retains an exact live approval and he
 });
 
 test('approval removal during verification clears local pending state without deciding',async()=>{
- const credential=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const credential=deferred(),removed=deferred(),calls=[],deadlines=new Set(),
+  dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const setTimeout=win.setTimeout.bind(win),clearTimeout=win.clearTimeout.bind(win);
+ win.setTimeout=(callback,delay)=>{const id=setTimeout(callback,delay);if(delay===10000)deadlines.add(id);return id;};
+ win.clearTimeout=id=>{deadlines.delete(id);clearTimeout(id);};
  win.PublicKeyCredential=class {};
  win.navigator.credentials={get:()=>credential.promise};
- let approvalReads=0;
+ let approvalReads=0,removalRead=false;
  const app=await mountApp(doc,{clear(){},async request(p){
   calls.push(p);
   if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
@@ -2412,7 +2457,10 @@ test('approval removal during verification clears local pending state without de
   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
   if(p==='/approvals')return {items:++approvalReads===1?[approvalItem()]:[]};
   if(p==='/approvals/a'){
-   if(approvalReads>1)throw Object.assign(new Error('Approval removed'),{status:404});
+   if(approvalReads>1){
+    removalRead=true;await removed.promise;
+    throw Object.assign(new Error('Approval removed'),{status:404});
+   }
    return {...approvalItem(),status:'pending'};
   }
   if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
@@ -2421,9 +2469,16 @@ test('approval removal during verification clears local pending state without de
  }},win);
  try{
   const card=doc.querySelector('[data-approval-id="a"]');
+  await waitFor(()=>deadlines.size===0,'initial exact-detail reads must finish before verification');
   card.querySelector('button.primary').click();
   await waitFor(()=>calls.includes('/auth/verify/options'));
-  win.dispatchEvent(new win.Event('focus'));await tick();await tick();
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>removalRead,
+   'list omission must trigger a new exact-detail read');
+  assert.equal(card.querySelector('h3').textContent,'Decision pending','omission alone cannot retire verification');
+  removed.resolve();
+  await waitFor(()=>card.querySelector('h3').textContent==='Approval unavailable',
+   'exact-detail 404 must retire the card');
   assert.doesNotMatch(card.querySelector('h3').textContent,/Decision pending/);
   credential.resolve(fakeCredential());await tick();await tick();
   assert.doesNotMatch(card.querySelector('h3').textContent,/Decision pending/);
