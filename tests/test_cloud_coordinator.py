@@ -1389,7 +1389,7 @@ def test_foreign_keyless_receipt_proof_invalidates_shared_task_without_key_error
 
 
 def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_path):
-    from deploy.task_receipts import receipt_instruction
+    from deploy.task_receipts import validate_task_receipt
 
     result_head = "c" * 40
     api = FakeApi(unresolved=True)
@@ -1400,9 +1400,16 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
         api, StateStore(store.path), clock=lambda: 1790856540,
     )
 
-    coordinator().run(apply=True)
-    first_fix = next(action for action in store.actions().values()
-                     if action.get("kind") == "fix")
+    first_result = coordinator().run(apply=True)
+    fixes = [
+        action for action in store.actions().values()
+        if action.get("kind") == "fix"
+    ]
+    assert fixes, json.dumps(
+        {"result": first_result, "state": store.snapshot()},
+        sort_keys=True,
+    )
+    first_fix = fixes[0]
     anchor_comments = [
         comment for comment in api.comments
         if comment.get("body", "").startswith(
@@ -1427,7 +1434,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
 
     def finish_task(action, current_head, comment_id, *, transported=False):
         task = api.tasks[action["task_id"]]
-        created = "2026-10-01T12:04:00Z"
+        created = "2026-10-01T12:06:00Z"
         task.update(
             state="completed",
             updated_at=created,
@@ -1460,6 +1467,7 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
             )
             api.reply_to_comment(action["receipt_anchor_comment_id"], body)
             api.neutral_quote_envelope = ("\n", "", "", "")
+            return
         elif transported:
             body = (
                 "\n> Cloud completion report preserved before parent normalization:\n"
@@ -1499,6 +1507,10 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     api.review_sha = result_head
     api.source_failure = True
     api.source_failure_sha = result_head
+    validate_task_receipt(
+        api.tasks[first_fix["task_id"]], first_fix, api.pull, api.comments,
+        now=datetime.fromtimestamp(1790856540, timezone.utc),
+    )
     coordinator().run(apply=True)
 
     first_proof = store.action(first_fix["key"]) or next(
@@ -26301,11 +26313,8 @@ def _legacy_ambiguous_corrective_review_creation_is_never_reposted(tmp_path):
     ]) == 1
 
 
-def _legacy_review_report_findings_publish_and_trigger_bounded_followup(tmp_path):
+def test_source_review_followup_reuses_bound_receipt_anchor(tmp_path):
     api = FakeApi(source_failure=True)
-    api.owner_reviews = []
-    api.owner_review_body = "not a structured independent review"
-    api.pull_files = [{"filename": "src/deleted.py", "status": "removed"}]
     path = tmp_path / "state.json"
     store = StateStore(path)
     coordinator = Coordinator(api, store, clock=lambda: 1790856660)
@@ -26313,46 +26322,69 @@ def _legacy_review_report_findings_publish_and_trigger_bounded_followup(tmp_path
     source_fix = next(
         action for action in store.actions().values() if action["kind"] == "fix"
     )
+    source_anchor = next(
+        comment for comment in api.comments
+        if comment.get("body", "").startswith(
+            "hermes-coordinator-source-receipt:",
+        )
+    )
+    assert source_fix["receipt_anchor_comment_id"] == source_anchor["id"]
+    assert f"commentId={source_anchor['id']}" in source_fix["body"]
     api.complete_task(source_fix["task_id"], source_fix)
     api.source_failure = False
+    api.review_state = "PENDING"
     coordinator.run(apply=True)
-    Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
-    review = next(
-        action for action in StateStore(path).actions().values()
-        if action.get("kind") == "review"
+    assert store.action(source_fix["key"])["receipt_result"] == "ready"
+    api.set_copilot_review(
+        review_id=63002, head_sha=HEAD, body="Reviewed the ready result.",
+        submitted_at="2026-10-01T12:07:00Z",
     )
-    api.complete_review_task(
-        review["task_id"],
-        review,
-        source_action=StateStore(path).action(source_fix["key"]),
-        verdict="changes_requested",
-        findings=[{
-            "path": "src/deleted.py",
-            "comment": "Handle the bounded quoted reply report and publish the owner review.",
+    coordinator.run(apply=True)
+    assert store.action(source_fix["key"])["handoff_state"] == "done"
+    report = {
+        "verdict": "changes_requested",
+        "summary": "One bounded follow-up is required.",
+        "findings": [{
+            "path": "src/deleted.py", "comment": "Address the bounded follow-up.",
         }],
-        report="One bounded follow-up is required before approval.",
-    )
+        "files": {"src/deleted.py": None},
+        "report": "Address the reported finding.",
+    }
+    store._mutate(lambda state: state["actions"].update({
+        "review:16:current": {
+            "kind": "review", "issue": 16, "head": HEAD,
+            "status": "completed", "publication_state": "done",
+            "review_report": report, "created_at": 1790856661,
+        },
+    }))
 
-    summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
-        apply=True,
-    )["pull_requests"][0]
-    next_summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
-        apply=True,
-    )["pull_requests"][0]
-    final_summary = Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(
-        apply=True,
-    )["pull_requests"][0]
-
-    actions = StateStore(path).actions().values()
-    follow_up = next(
-        action for action in actions
-        if action.get("kind") == "fix" and action.get("task_id") != source_fix["task_id"]
+    followup_result = Coordinator(
+        api, StateStore(path), clock=lambda: 1790856660,
+    ).run(apply=True)
+    followups = [
+        action for action in StateStore(path).actions().values()
+        if action.get("task_type") == "review-followup"
+    ]
+    assert followups, json.dumps(
+        {"result": followup_result, "state": store.snapshot()},
+        sort_keys=True,
     )
+    follow_up = followups[0]
     assert follow_up["status"] == "sent"
-    assert summary["review_valid"] is False
-    assert next_summary["review_valid"] is False
-    assert final_summary["review_valid"] is False
-    assert StateStore(path).action(source_fix["key"])["handoff_state"] == "done"
+    follow_up_anchor = next(
+        comment for comment in api.comments
+        if comment.get("body") == follow_up["receipt_anchor_body"]
+    )
+    assert follow_up["receipt_anchor_comment_id"] == follow_up_anchor["id"]
+    assert f"commentId={follow_up_anchor['id']}" in follow_up["body"]
+    assert sum(
+        comment.get("body") == source_anchor["body"]
+        for comment in api.comments
+    ) == 1
+    assert sum(
+        comment.get("body") == follow_up_anchor["body"]
+        for comment in api.comments
+    ) == 1
     assert api.fix_attempts == 2
 
 

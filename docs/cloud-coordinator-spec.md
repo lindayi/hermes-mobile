@@ -478,6 +478,16 @@ writer, anchor, and saved-prompt fence runs before the task POST. The prompt
 binds the explicit comment ID and anchor body. Only after that verified anchor
 does the neutral attempt consume its existing budget.
 
+Every newly dispatched owner-enrolled source or review-followup repair also reserves
+one owner-authored receipt anchor before task creation. Its marker binds the exact
+repair reservation, PR, head, dispatch main SHA, attempt, and nonce. The existing
+outbox publish/readback and uncertain-response reconciliation prevent duplicate
+anchors; the exact comment ID and body are included in the task's receipt instructions.
+The worker publishes its single v2 receipt by replying to that comment with the
+existing supported reply transport. The anchor does not add authorization: enrollment,
+current-head, ownership, active-task, final-dispatch and immutable-receipt checks still
+apply. Existing unanchored v1/v2 receipts remain readable without rewriting history.
+
 Preclaim publication has a separate lifetime bound of three neutral receipt-anchor
 reservations per enrollment, charged atomically when a new outbox entry is added.
 The durable `neutral_anchor_reservations` count survives restart, main/head changes,

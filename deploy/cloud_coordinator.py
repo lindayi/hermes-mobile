@@ -985,8 +985,6 @@ def _source_receipt_anchor_request(action, nonce):
     )
     if (action.get("kind") != "fix"
             or action.get("task_type") not in {None, "source", "review-followup"}
-            or not isinstance(binding, dict)
-            or binding.get("version") != 1
             or not isinstance(action.get("key"), str)
             or type(action.get("issue")) is not int
             or type(action.get("attempt")) is not int
@@ -997,23 +995,46 @@ def _source_receipt_anchor_request(action, nonce):
             or not isinstance(action.get("head_ref"), str)
             or not isinstance(nonce, str) or not 1 <= len(nonce) <= 128):
         return None
-    request = {
-        "kind": "continuation-source-receipt-anchor",
-        "key": f"continuation-source-receipt-anchor:{_canonical_sha256(binding)}",
-        "task_key": action["key"], "issue": action["issue"],
-        "head": action["head"], "main_sha": action["main_sha"],
-        "head_ref": action["head_ref"], "attempt": action["attempt"],
-        "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
-        "owner_continuation_binding": binding, "nonce": nonce,
-        "request_sha256": _canonical_sha256(
-            action.get("task_request_body", action.get("body")),
-        ),
-    }
-    cohort = _owner_continuation_bindings(action, allow_intent=True)
-    if cohort is None:
-        return None
-    if len(cohort) > 1:
-        request["owner_continuation_companion_bindings"] = cohort[1:]
+    if binding is None:
+        if "owner_continuation_companions" in action:
+            return None
+        request_binding = {
+            "task_key": action["key"], "issue": action["issue"],
+            "head": action["head"], "main_sha": action["main_sha"],
+            "head_ref": action["head_ref"], "attempt": action["attempt"],
+            "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
+            "request_sha256": _canonical_sha256(
+               action.get("task_request_body", action.get("body")),
+            ),
+        }
+        request = {
+            "kind": "continuation-source-receipt-anchor",
+            "key": (
+               "continuation-source-receipt-anchor:"
+               f"{_canonical_sha256(request_binding)}"
+            ),
+            **request_binding, "nonce": nonce,
+        }
+    else:
+        if not isinstance(binding, dict) or binding.get("version") != 1:
+            return None
+        request = {
+            "kind": "continuation-source-receipt-anchor",
+            "key": f"continuation-source-receipt-anchor:{_canonical_sha256(binding)}",
+            "task_key": action["key"], "issue": action["issue"],
+            "head": action["head"], "main_sha": action["main_sha"],
+            "head_ref": action["head_ref"], "attempt": action["attempt"],
+            "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
+            "owner_continuation_binding": binding, "nonce": nonce,
+            "request_sha256": _canonical_sha256(
+               action.get("task_request_body", action.get("body")),
+            ),
+        }
+        cohort = _owner_continuation_bindings(action, allow_intent=True)
+        if cohort is None:
+            return None
+        if len(cohort) > 1:
+            request["owner_continuation_companion_bindings"] = cohort[1:]
     marker = "hermes-coordinator-source-receipt:" + _canonical_sha256(request)[:20]
     return request | {"marker": marker, "body": marker}
 
@@ -9976,7 +9997,10 @@ class Coordinator:
                 "owner_continuation_binding", action.get("owner_continuation_intent"),
             )
         ), None)
-        source_anchor = not neutral and owner_continuation_record is not None
+        source_anchor = (
+            not neutral and action.get("kind") == "fix"
+            and action.get("task_type") in {None, "source", "review-followup"}
+        )
         if source_anchor:
             action = action | {"receipt_anchor_role": "continuation-source"}
         current = self._fence_pull(
@@ -10218,7 +10242,7 @@ class Coordinator:
                     f"{claimed_action['task_request_body']}\n\n{expected_instruction}"):
                 self.store.update_action(key, "superseded")
                 return "superseded"
-        if neutral or recovered_claims:
+        if neutral or source_anchor or recovered_claims:
             try:
                 current = self._fence_pull(
                     claimed_action["issue"], claimed_action["head"],
@@ -12424,7 +12448,9 @@ class StateStore:
                         return False
                 neutral = claimed.get("task_type") == "neutral"
                 source_anchor = (
-                    not neutral and owner_continuation_record is not None
+                    not neutral and claimed.get("kind") == "fix"
+                    and claimed.get("task_type")
+                        in {None, "source", "review-followup"}
                 )
                 anchored = neutral or source_anchor
                 if (not anchored and any(
@@ -12856,17 +12882,56 @@ class StateStore:
                 enrollment["neutral_anchor_reservations"] += 1
             if entry.get("kind") == "continuation-source-receipt-anchor":
                 enrollment = data["enrollments"].get(str(entry.get("issue")), {})
-                records = _valid_owner_continuation_claims(enrollment, data["actions"])
-                if (not enrollment.get("active")
-                        or not any(
-                            _owner_continuation_binding(record)
-                                == entry.get("owner_continuation_binding")
-                            and not _owner_continuation_has_successor(
-                                record, data["actions"], enrollment,
+                if "owner_continuation_binding" in entry:
+                    records = _valid_owner_continuation_claims(
+                        enrollment, data["actions"],
+                    )
+                    if (not enrollment.get("active")
+                            or not any(
+                                _owner_continuation_binding(record)
+                                    == entry.get("owner_continuation_binding")
+                                and not _owner_continuation_has_successor(
+                                    record, data["actions"], enrollment,
+                                )
+                                for _, record in records
+                            )):
+                        return False
+                else:
+                    action = data["actions"].get(entry.get("task_key"))
+                    expected = (
+                        _source_receipt_anchor_request(action, entry.get("nonce"))
+                        if isinstance(action, dict) else None
+                    )
+                    if (
+                            not enrollment.get("active")
+                            or type(entry.get("issue")) is not int
+                            or entry["issue"] != enrollment.get("issue")
+                            or type(entry.get("attempt")) is not int
+                            or entry["attempt"] != enrollment.get("attempts", 0) + 1
+                            or not _is_sha(entry.get("head"))
+                            or not _is_sha(entry.get("main_sha"))
+                            or entry.get("task_type")
+                                not in {None, "source", "review-followup"}
+                            or not isinstance(entry.get("task_key"), str)
+                            or not entry["task_key"].startswith(
+                                f"fix:{entry['issue']}:",
                             )
-                            for _, record in records
-                        )):
-                    return False
+                            or (
+                                action is not None
+                                and (
+                                    action.get("kind") != "fix"
+                                    or action.get("status") != "pending"
+                                    or action.get("task_id") is not None
+                                    or action.get("attempt")
+                                        != enrollment.get("attempts", 0) + 1
+                                    or "owner_continuation_binding" in action
+                                    or "owner_continuation_companions" in action
+                                    or expected is None
+                                    or any(entry.get(field) != value
+                                           for field, value in expected.items())
+                                )
+                            )):
+                        return False
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
         return self._mutate(add)
