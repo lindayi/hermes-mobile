@@ -1336,7 +1336,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     let approvalHistoryLoading=null,approvalHistoryOutcome='',approvalHistoryPages=0,
       unplacedApprovals=null,approvalHistoryNotice=null,
-      approvalTargetHistoryReady=notificationTarget?.kind!=='approval';
+      approvalTargetHistoryReady=notificationTarget?.kind!=='approval',approvalTargetReaderBaseline=null;
     const approvalAnchor=item=>historyAnchors().get(approvalHistoryKey(item.run_id,session.id));
     const unplacedApprovalItems=()=>[...approvalCards.keys()].map(key=>approvalItems.get(key))
       .filter(item=>item && !approvalAnchor(item)?.isConnected);
@@ -1363,7 +1363,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           target=notificationTarget?.kind==='approval'
             ?unplacedApprovalItems().find(item=>item.id===notificationTarget.approval_id):null;
         approvalHistoryOutcome='loading';showApprovalHistory();
-        if(target)approvalHistoryReader={focus:doc.activeElement,top:messages.scrollTop,moved:false};
+        if(target){
+          const baseline=approvalTargetReaderBaseline;
+          approvalHistoryReader={focus:doc.activeElement,top:messages.scrollTop,
+            moved:!baseline || doc.activeElement!==baseline.focus || messages.scrollTop!==baseline.top};
+        }
         try{
           while(current() && unplacedApprovalItems().length && oldestOffset>0 && approvalHistoryPages<100){
             const previousOffset=oldestOffset;
@@ -1931,6 +1935,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(card){
         if(approvalTargetFocusedCard)return;
         approvalTargetFocusedCard=true;card.scrollIntoView?.({block:'center'});card.focus();
+        approvalTargetReaderBaseline={focus:card,top:messages.scrollTop};
       }else if(approvalTargetPlaceholder && !approvalTargetPlaceholderFocused){
         approvalTargetPlaceholderFocused=true;
         approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();

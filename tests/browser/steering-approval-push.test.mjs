@@ -74,6 +74,8 @@ test(`held approval history preserves notification reader (${mode})`,async()=>{
   const composer=doc.querySelector('textarea');
   if(mode.endsWith('away')){
    composer.value='Keep this draft';composer.focus();composer.setSelectionRange(2,7);messages.scrollTop=73;
+   assert.equal(doc.activeElement,composer);
+   assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
   }
   let focusCalls=0;card.scrollIntoView=()=>{focusCalls++;};
   if(mode==='route')doc.querySelector('[data-view="chats"]').click();
@@ -98,6 +100,74 @@ test(`held approval history preserves notification reader (${mode})`,async()=>{
   }
   assert.equal(reads,retry?2:1,'all cards share bounded reads; retry is explicit');
   assert.equal(calls.some(p=>p.endsWith('/decision')||p.startsWith('/auth/verify')),false);
+ }finally{app.destroy();win.close();}
+});
+for(const mode of ['away','follow','placed-away','alias-away','route','owner'])
+test(`held initial approval detail preserves notification reader (${mode})`,async()=>{
+ const detail=deferred(),older=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',
+  {url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ const alias=mode==='alias-away',placed=mode==='placed-away',
+  target={kind:'approval',session_id:'s',run_session_id:alias?'old-alias':'s',run_id:'r',
+   approval_id:'a',request_id:'native-a'},
+  item={...approvalItem(),status:'pending',run_session_id:target.run_session_id},
+  sibling={...item,id:'b',run_id:'older',request_id:'native-b'};
+ let owner='owner',detailReads=0,historyReads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target')return target;
+  if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+  if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[
+   {id:20,role:'user',content:'Latest request',run_id:placed?'r':'newer',session_id:'s'}],
+   offset:10,total:11};
+  if(p==='/sessions/s/messages?limit=10&offset=0&turn_boundary=true'){
+   historyReads++;
+   return older.promise;
+  }
+  if(p==='/approvals')return {items:[item,sibling],complete:true};
+  if(p==='/approvals/a'){detailReads++;return detail.promise;}
+  if(p==='/approvals/b')return sibling;
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  return {items:[]};
+ }},win);
+ try{
+  const card=doc.querySelector('[data-approval-id="a"]'),messages=doc.querySelector('.messages');
+  await waitFor(()=>detailReads===1 && doc.activeElement===card,
+   'the target detail is held after the pending list renders and focuses the card');
+  assert.equal(historyReads,0,'history waits for the held target detail');
+  const composer=doc.querySelector('textarea');
+  if(mode.endsWith('away')){
+   composer.value='Keep this draft';composer.focus();composer.setSelectionRange(2,7);messages.scrollTop=73;
+  }
+  if(mode==='route'){
+   doc.querySelector('[data-view="chats"]').click();await tick();
+  }
+  if(mode==='owner'){owner='other';win.history.replaceState({},'','/hermes/');await app.start();}
+  detail.resolve(item);
+  if(mode==='route'||mode==='owner'){
+   await tick();await tick();
+   assert.equal(historyReads,0,'a stale detail cannot start history recovery');
+   assert.equal(doc.querySelector('[data-approval-id="a"]'),null);
+  }else{
+   await waitFor(()=>historyReads===1,'history starts only after the held detail resolves');
+   older.resolve({items:[{id:1,role:'user',content:'Older request',run_id:'older',session_id:'s'},
+    ...(placed?[]:[{id:2,role:'user',content:'Target request',run_id:'r',session_id:'s'}])],
+    offset:0,total:11});
+   await waitFor(()=>card.previousElementSibling?.dataset.historyRun==='r');
+   assert.equal(historyReads,1,'the older page is requested once');
+   assert.equal(item.run_session_id,target.run_session_id,'the detail preserves original-run identity');
+   if(mode.endsWith('away')){
+    assert.equal(doc.activeElement,composer,'history must not steal focus moved before detail');
+    assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
+    assert.equal(messages.scrollTop,73);
+   }else{
+    assert.equal(doc.activeElement,card,'a reader still following the target sees it relocated');
+   }
+  }
+  assert.equal(calls.includes('/inbox/n/target'),true);
+  assert.equal(detailReads,1,'the notification target detail was held exactly once');
+  assert.equal(calls.some(p=>p.endsWith('/decision')||p.startsWith('/auth/verify')
+   ||p.startsWith('/runs/')),false,'reading and relocating an approval performs no decisions or run actions');
  }finally{app.destroy();win.close();}
 });
 for(const runSession of ['s','old-alias'])for(const mode of ['pending','sending','unknown'])
