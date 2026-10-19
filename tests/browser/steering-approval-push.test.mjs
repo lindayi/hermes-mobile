@@ -1970,15 +1970,18 @@ test(`retained ${outcome} decision survives a newer chat run (${runSession})`,as
  }finally{decision.resolve({status:'resolved'});app.destroy();win.close();}
 });
 
+for(const detailOutcome of ['unavailable','details_unavailable',404])
 for(const runSession of ['s','old-alias'])for(const outcome of [403,404,409,'held',503])
-test(`exact unavailable after omitted decision re-entry (${runSession}, ${outcome})`,async()=>{
+test(`exact ${detailOutcome} after omitted decision re-entry (${runSession}, ${outcome})`,async()=>{
  const decision=deferred(),afterRejection=deferred(),calls=[],
   dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),
   win=dom.window,doc=win.document;
  let passkeys=0,posts=0,detailReads=0,listReads=0,reentered=false,rejected=false;
  win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>{passkeys++;return fakeCredential();}};
  const pending={...approvalItem(),run_id:'old-run',run_session_id:runSession,status:'pending'},
-  unavailable={...pending,status:'unavailable',executable:false,choices:[],error:'Run is no longer active'};
+  unavailable={...pending,status:detailOutcome===404?'unavailable':detailOutcome,executable:false,choices:[],
+   error:detailOutcome==='details_unavailable'?'':'Run is no longer active'};
+ let recovered=false;
  const app=await mountApp(doc,{clear(){},async request(p){
   calls.push(p);
   if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
@@ -1991,10 +1994,14 @@ test(`exact unavailable after omitted decision re-entry (${runSession}, ${outcom
    ...(reentered?[{id:2,role:'assistant',content:'Newer response',run_id:'new-run',session_id:'s'}]:[])
   ],total:reentered?2:1,offset:0,run:reentered?{id:'new-run',session_id:'s',status:'running'}
    :{id:'old-run',session_id:runSession,status:'waiting_for_approval'}};
-  if(p==='/approvals'){listReads++;return {items:posts?[]:[pending],complete:true};}
+  if(p==='/approvals'){listReads++;return {items:posts?[]:[pending]};}
   if(p==='/approvals/a'){
    detailReads++;
-   if(reentered)return unavailable;
+   if(reentered){
+    if(recovered)return pending;
+    if(detailOutcome===404)throw Object.assign(new Error('Not found'),{status:404});
+    return unavailable;
+   }
    if(rejected)return afterRejection.promise;
    return pending;
   }
@@ -2021,7 +2028,8 @@ test(`exact unavailable after omitted decision re-entry (${runSession}, ${outcom
   }
   const before=detailReads;await reenter();await waitFor(()=>detailReads>before);
   await tick();
-  const expected=[403,404,409].includes(outcome)?'Approval unavailable'
+  const expected=[403,404,409].includes(outcome)
+   ?detailOutcome==='details_unavailable'?'Approval details unavailable':'Approval unavailable'
    :outcome==='held'?'Decision pending':'Decision status unknown';
   assert.equal(card().querySelector('h3').textContent,expected,
    'fresh exact unavailability must not leave a rejected, non-dispatched decision pending');
@@ -2038,12 +2046,21 @@ test(`exact unavailable after omitted decision re-entry (${runSession}, ${outcom
     .filter(node=>node.textContent.includes('No decision was sent')).every(node=>node.hidden),
    'an in-flight or uncertain decision must never visibly claim that no decision was sent');
   }
+  if(detailOutcome==='details_unavailable' && [403,404,409].includes(outcome)){
+   recovered=true;
+   const before=detailReads;win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>detailReads>before && card()?.querySelectorAll('button:enabled').length===2,
+    'recoverable detail must remain retryable until fresh exact pending authority arrives');
+   assert.equal(card().querySelector('h3').textContent,'Approval required');
+   assert.equal(posts,1);assert.equal(passkeys,1);
+  }
  }finally{decision.resolve({status:'resolved'});afterRejection.resolve(unavailable);app.destroy();win.close();}
 });
 
 for(const runSession of ['s','old-alias'])
-for(const fence of ['authority','id','run_id','request_id','session_id','run_session_id','route','owner'])
-test(`rejected unavailable detail preserves ${fence} fence (${runSession})`,async()=>{
+for(const detailOutcome of ['unavailable',404])
+for(const fence of detailOutcome===404?['authority','route','owner']:['authority','id','run_id','request_id','session_id','run_session_id','route','owner'])
+test(`rejected ${detailOutcome} detail preserves ${fence} fence (${runSession})`,async()=>{
  const decision=deferred(),detail=deferred(),calls=[],
   dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),
   win=dom.window,doc=win.document;
@@ -2091,7 +2108,9 @@ test(`rejected unavailable detail preserves ${fence} fence (${runSession})`,asyn
   }
   const result=['id','run_id','request_id','session_id','run_session_id'].includes(fence)
    ?{...unavailable,[fence]:'foreign'}:unavailable;
-  detail.resolve(result);await tick();await tick();
+  if(detailOutcome===404)detail.reject(Object.assign(new Error('Not found'),{status:404}));
+  else detail.resolve(result);
+  await tick();await tick();
   if(fence==='route' || fence==='owner')assert.equal(card(),null);
   else{
    assert.notEqual(card()?.querySelector('h3').textContent,'Approval unavailable',

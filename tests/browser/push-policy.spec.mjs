@@ -610,8 +610,9 @@ test('generated chat restores an omitted dispatched decision after a newer run s
  await page.evaluate(()=>app.destroy());
 }));
 
+for(const detailOutcome of ['unavailable','details_unavailable',404])
 for(const runSession of ['session-one','old-alias'])for(const rejection of [403,404,409])
-test(`generated rejected decision settles on fresh unavailable detail (${runSession}, ${rejection})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+test(`generated rejected decision settles on fresh ${detailOutcome} detail (${runSession}, ${rejection})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
  const pending=approvalRecord({run_session_id:runSession});
  control.notificationTarget={...approvalTarget,run_session_id:runSession};
  control.approvals=[pending];control.sessionApprovals=[pending];control.approvalDetail=pending;
@@ -633,16 +634,19 @@ test(`generated rejected decision settles on fresh unavailable detail (${runSess
   {id:2,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}
  ],offset:0,total:2},pages:{},runs:{}};
  await page.getByRole('button',{name:'Chats',exact:true}).click();
- control.approvalDetail={...pending,status:'unavailable',executable:false,choices:[],error:'Run is no longer active'};
+ control.approvalDetail={...pending,status:detailOutcome===404?'unavailable':detailOutcome,executable:false,choices:[],
+  error:detailOutcome==='details_unavailable'?'':'Run is no longer active'};
+ control.approvalDetailStatus=detailOutcome===404?404:200;
  control.approvalDetailHold=null;releaseDetail();
  const reenter=async()=>{
   const detail=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1'
-   && response.request().method()==='GET' && response.status()===200);
+   && response.request().method()==='GET' && response.status()===(detailOutcome===404?404:200));
   await page.getByRole('button',{name:'First conversation',exact:true}).click();await detail;
   await page.locator('[data-history-run="newer-run"]').first().waitFor();
  };
  await reenter();
- assert.equal(await card.getByRole('heading').innerText(),'Approval unavailable',
+ const expected=detailOutcome==='details_unavailable'?'Approval details unavailable':'Approval unavailable';
+ assert.equal(await card.getByRole('heading').innerText(),expected,
   'a definitively rejected POST must not stay Decision pending after fresh exact detail');
  for(let repeat=0;repeat<2;repeat++){
   const listed=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals'
@@ -650,11 +654,22 @@ test(`generated rejected decision settles on fresh unavailable detail (${runSess
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await listed;
   await page.getByRole('button',{name:'Chats',exact:true}).click();
   await page.getByRole('button',{name:'First conversation',exact:true}).click();
-  await card.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+  await card.getByRole('heading',{name:expected,exact:true}).waitFor();
   assert.equal(await card.locator('button:enabled').count(),0);
   assert.equal(await card.evaluate(node=>node.dataset.historyRun),'approval-run');
   assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
   assert.equal(await card.count(),1);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision') && call.method==='POST').length,1);
+  assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,1);
+  assert.equal(calls.filter(call=>call.p==='/auth/verify/finish').length,1);
+ }
+ if(detailOutcome==='details_unavailable'){
+  control.approvalDetail=pending;
+  const fresh=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1'
+   && response.request().method()==='GET');
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await fresh;
+  await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+  assert.equal(await card.locator('button:enabled').count(),2);
   assert.equal(calls.filter(call=>call.p.endsWith('/decision') && call.method==='POST').length,1);
   assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,1);
   assert.equal(calls.filter(call=>call.p==='/auth/verify/finish').length,1);

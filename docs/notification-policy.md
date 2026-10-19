@@ -95,6 +95,15 @@ that rejection's authority revision. Keep its exact identity and original turn
 chronology on later refresh or re-entry, without restoring pending controls.
 Unavailability is not a final native execution outcome and cannot settle an
 in-flight or uncertain decision.
+Retained rejections show non-actionable revalidation, never Decision pending merely
+because fresh authority is required. The unknown-run `details_unavailable` projection
+stays recoverable through bounded exact-detail refreshes, including after failed
+reads or repeated chat re-entry. An authenticated detail 404 has no body identity:
+bind it to the dispatched read and current retained identity, including the read's
+authority revision, run generation, owner and route. It may show unavailable only
+for that definitive rejection, not a dispatched or uncertain decision. Generic
+network failures do not retire the card. Only fresh exact pending authority restores
+decision controls; revalidation never retries a decision or passkey ceremony.
 
 An omitted notification-target approval whose initial exact-detail read times
 out or is invalidated by an unknown-run transition keeps a truthful Retry status

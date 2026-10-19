@@ -1225,7 +1225,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             typeof identity[field]==='string' && identity[field])
           || (identity.session_id!==session.id && identity.session_id!==null))continue;
       const status=record.rejectedUnavailable?'unavailable'
-        :record.status==='unknown'?'unknown':record.needsFreshAuthority?'sending':'pending',
+        :record.status==='unknown'?'unknown':record.needsFreshAuthority?'details_unavailable':'pending',
         item={...identity,status,executable:status==='pending',choices:status==='pending'?['once','deny']:[]},key=approvalKey(item);
       approvalItems.set(key,item);
       if(status==='pending'){approvalPending.set(key,item);approvalFinals.delete(key);}
@@ -1477,12 +1477,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         resolved_external:'No longer pending',cancelled:'Cancelled',unknown:'Decision status unknown',
         sending:'Decision pending',unavailable:'Approval unavailable',details_unavailable:'Approval details unavailable'};
       const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown'
+        :actionState.needsFreshAuthority && ['pending','sending'].includes(status)?'details_unavailable'
         :status==='pending' && approvalExpired(item)?'expired':status;
       view.heading.textContent=labels[effectiveStatus] || 'Approval unavailable';
       view.error.textContent=actionState.error;view.error.hidden=!actionState.error;
       view.itemError.hidden=typeof item.error!=='string' || !item.error;
       view.expires.hidden=!Number.isFinite(item.expires_at) || effectiveStatus!=='pending';
       view.detailsUnavailable.hidden=item.details_unavailable!==true && effectiveStatus!=='details_unavailable';
+      view.detailsUnavailable.textContent=actionState.needsFreshAuthority
+        ?'Approval status needs to be checked again. No decision is in flight.'
+        :'No decision was sent. Review this action in the native client.';
       const canDecide=view.canDecide && !approvalExpired(item) && !actionState.needsFreshAuthority
         && !actionState.retentionBlocked
         && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
@@ -1530,7 +1534,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const status=actionState?.uncertain?'unknown'
           :actionState?.decisionStarted || actionState?.dispatched?'sending'
             :approvalFinals.get(key) || item.status;
-        return item.id && ['sending','unknown','expired'].includes(status)
+        return item.id && (actionState?.needsFreshAuthority || ['sending','unknown','expired'].includes(status))
           && (item.session_id===session.id || item.run_id===currentApprovalRun
             || retainedApprovalDecision(item));
       });
@@ -1541,7 +1545,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       await Promise.all(targets.map(async([key,item])=>{
         const read=readApprovalDetail(item.id,item.run_id);
         try{
-          const detail=await read.pending;
+          let detail;
+          try{detail=await read.pending;}
+          catch(error){
+            const actionState=approvalActionStates.get(key),
+              decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(error.status!==404 || !read.valid() || !current() || owner!==state.user?.id
+                || state.session?.id!==session.id || approvalItems.get(key)!==item
+                || !freshRejectedApprovalAuthority(decision,actionState,item,read.authorityRevision))throw error;
+            detail={...item,status:'unavailable',executable:false,choices:[],details_unavailable:false,error:''};
+          }
           if(!read.valid())return;
           if(!current() || owner!==state.user?.id || state.session?.id!==session.id
               || approvalItems.get(key)!==item || !detail || !sameApprovalIdentity(item,detail)
@@ -1558,13 +1571,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(detail.status==='unavailable' && decision
               && (decision.dispatched || decision.needsFreshAuthority || actionState?.uncertain)
               && !freshRejectedAuthority)return;
-          let status=detail.status==='unavailable' && freshRejectedAuthority?'unavailable'
+          if(detail.status==='details_unavailable' && decision?.needsFreshAuthority && !freshRejectedAuthority)return;
+          let status=freshRejectedAuthority && ['unavailable','details_unavailable'].includes(detail.status)?detail.status
             :actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
             ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
           if(status===currentStatus && !finalApprovalStatuses.has(detail.status))return;
           const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
           approvalItems.set(key,next);approvalPending.delete(key);
-          rememberHandledApproval(key,next,status);approvalFinals.set(key,status);clearApprovalExpiry(key);
+          if(status!=='details_unavailable')rememberHandledApproval(key,next,status);
+          approvalFinals.set(key,status);clearApprovalExpiry(key);
           if(detail.status==='unavailable' && freshRejectedAuthority)decision.rejectedUnavailable=true;
           if(finalApprovalStatuses.has(detail.status) || detail.status==='unavailable')
             settleApprovalDecision(owner,session.id,item,status);
@@ -1585,7 +1600,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')
           && (item.session_id===session.id || item.run_id===currentApprovalRun
             || retainedApprovalDecision(item))
-          && !actionState?.decisionStarted && !actionState?.uncertain;
+          && !actionState?.decisionStarted && !actionState?.uncertain && !actionState?.needsFreshAuthority;
       });
       if(!eligible.length)return;
       const start=missingApprovalDetailOffset%eligible.length,
