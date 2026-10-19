@@ -1295,6 +1295,66 @@ test('serialized null-session approval SSE preserves a held aliased decision ack
  }finally{app.destroy();win.close();}
 });
 
+for(const sourceSession of ['s','old-alias'])test(`successful omission retires only the missing placeholder (${sourceSession})`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const pending={...approvalItem(),status:'pending',run_session_id:sourceSession};
+ const placeholder={...pending,id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
+  details_unavailable:true,executable:false,choices:[],expires_at:null,
+  error:'Native approval details are unavailable; review in the native client'};
+ const present={...placeholder,id:'present',request_id:'present-request'};
+ const final={...pending,id:'final',request_id:'final-request',status:'resolved',expires_at:1,executable:false,choices:[]};
+ let response={items:[placeholder,present,pending,final]},failure=null;
+ win.EventSource=class{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ };
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Canonical chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:sourceSession,status:'waiting_for_approval'}};
+  if(p==='/approvals'){if(failure)throw failure;return response;}
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();
+  const card=id=>doc.querySelector(`[data-approval-id="${id}"]`);
+  await waitFor(()=>card('a')?.querySelector('button.primary') && win.activeStream);
+  const refresh=async()=>{
+   const before=calls.filter(call=>call.p==='/approvals').length;
+   win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>calls.filter(call=>call.p==='/approvals').length>before);await tick();
+  };
+  failure=Object.assign(new Error('Temporary list failure'),{status:503});await refresh();failure=null;
+  for(const malformed of [null,{items:null},{items:[null]},{items:[{}]}]){
+   response=malformed;await refresh();
+   assert.equal(card('placeholder').querySelector('h3').textContent,'Approval details unavailable');
+  }
+  const held=deferred();response=held.promise;await refresh();
+  response={items:[placeholder,present,pending]};await refresh();
+  held.resolve({items:[present,pending]});await tick();
+  assert.equal(card('placeholder').querySelector('h3').textContent,'Approval details unavailable',
+   'an older omission cannot override a newer still-present list');
+  response={items:[present,pending]};await refresh();
+  assert.equal(card('placeholder').querySelector('h3').textContent,'Approval unavailable',
+   'external resolution may omit a placeholder without a terminal run event');
+  assert.ok([...card('placeholder').querySelectorAll('p')].filter(node=>!node.hidden)
+   .every(node=>!/native client|No decision was sent/.test(node.textContent)));
+  assert.equal(card('placeholder').querySelector('button'),null);
+  assert.equal(card('present').querySelector('h3').textContent,'Approval details unavailable');
+  assert.ok(card('a').querySelector('button.primary'),'the pending sibling is still actionable');
+  assert.equal(card('final').querySelector('h3').textContent,'Resolved');
+  response={items:[{...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']},present,pending]};
+  win.activeStream.emit('approval',{...response.items[0],session_id:sourceSession});
+  await refresh();
+  assert.equal(card('placeholder').querySelector('h3').textContent,'Approval unavailable','late list/SSE replay cannot revive retirement');
+  assert.equal(card('placeholder').querySelector('button'),null);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
 for(const status of ['completed','cancelled'])test(`terminal ${status} retires placeholder and pending sibling without replay`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
  const pending={...approvalItem(),status:'pending'};

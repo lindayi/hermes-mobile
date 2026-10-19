@@ -16,6 +16,8 @@ Session-bound execution approvals render inline in their originating request chr
 
 An authenticated pending list can replace an exact-identity details-unavailable placeholder after a missed stream upgrade. Focus and polling recovery must not reopen handled or authoritative finals, reset an in-flight/uncertain decision, or lose mounted local-expiry provenance.
 
+A successful, well-formed approval list that omits a details-unavailable placeholder retires it as unavailable even while a sibling keeps the run waiting. Clear obsolete native-client and no-decision guidance; omission does not prove resolution or a decision outcome. Keep still-listed placeholders and reject late pending replay. Failed, malformed, stale or superseded lists must not retire cards.
+
 Completion or cancellation retires details-unavailable placeholders alongside pending siblings for that exact run. Remove placeholder-only native-client guidance and reject late pending replay. Preserve authoritative finals, other runs, owner/route fences and sending/unknown decisions; retirement never sends a decision.
 
 Observed RED→GREEN at each changed seam. Real Chromium verifies reopen while native messages are already persisted and live stream continues, activity chronology/stop placement, symbol/accessibility, filters/search and no overflow at 320px/short/desktop. Isolated backend tests verify classification/auth and native/run attribution. Independent review + immutable staged full Python/browser suite precede guarded deployment. Canonical master updated in place; no accounts/certificates/cron executions or native private-state mutations for tests.

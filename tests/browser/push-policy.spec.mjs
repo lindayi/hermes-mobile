@@ -830,6 +830,61 @@ test('generated rejected approval proof exposes no action details or decision co
  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
 }));
 
+for(const sourceSession of ['session-one','old-alias'])test(`generated successful omission retires only the missing placeholder (${sourceSession})`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+ const pending=approvalRecord({run_session_id:sourceSession});
+ const placeholder={...pending,id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
+  details_unavailable:true,executable:false,choices:[],expires_at:null,
+  error:'Native approval details are unavailable; review in the native client'};
+ const present={...placeholder,id:'present',request_id:'present-request'};
+ const final={...pending,id:'final',request_id:'final-request',status:'resolved',expires_at:1,executable:false,choices:[]};
+ control.approvals=[placeholder,present,pending,final];
+ control.activeRun={id:pending.run_id,session_id:sourceSession,status:'waiting_for_approval'};
+ await mount(page);await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const card=id=>page.locator(`[data-approval-id="${id}"]`);
+ await card(pending.id).getByRole('button',{name:'Approve once',exact:true}).waitFor();
+ await card('placeholder').getByRole('heading',{name:'Approval details unavailable',exact:true}).waitFor();
+ const refresh=async()=>{
+  const response=page.waitForResponse(res=>new URL(res.url()).pathname.endsWith('/app-api/approvals'));
+  await page.evaluate(()=>dispatchEvent(new Event('focus')));await response;
+  await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ };
+ const listURL='**/app-api/approvals';
+ for(const [status,body] of [[503,{detail:'Temporary failure'}],[200,null],[200,{items:null}],[200,{items:[null]}],[200,{items:[{}]}]]){
+  await page.route(listURL,route=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)}));
+  await refresh();await page.unroute(listURL);
+  assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable');
+ }
+ let release;
+ const held=new Promise(resolve=>release=resolve);
+ await page.route(listURL,async route=>{
+  await held;await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({items:[present,pending]})});
+ },{times:1});
+ const requested=page.waitForRequest(req=>new URL(req.url()).pathname.endsWith('/app-api/approvals'));
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));await requested;
+ await refresh();
+ const stale=page.waitForResponse(res=>new URL(res.url()).pathname.endsWith('/app-api/approvals'));
+ release();await stale;await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable',
+  'a superseded omission cannot retire a still-present placeholder');
+ control.approvals=[present,pending];
+ control.approvalDetails={placeholder:{...placeholder,status:'resolved_external'}};
+ await refresh();
+ await card('placeholder').getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(await card('placeholder').getByText(/native client|No decision was sent/).filter({visible:true}).count(),0);
+ assert.equal(await card('placeholder').getByRole('button').count(),0);
+ assert.equal(await card('present').getByRole('heading').innerText(),'Approval details unavailable');
+ assert.equal(await card(pending.id).getByRole('button',{name:'Approve once',exact:true}).count(),1);
+ assert.equal(await card('final').getByRole('heading').innerText(),'Resolved');
+ control.approvals=[{...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']},present,pending];
+ emitRunEvent('approval',{...control.approvals[0],session_id:sourceSession},'late-pending');
+ await refresh();
+ assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval unavailable');
+ assert.equal(await card('placeholder').getByRole('button').count(),0);
+ assert.equal(control.activeRun.status,'waiting_for_approval','no terminal run event was needed');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+ await page.evaluate(()=>app.destroy());
+}));
+
 for(const status of ['completed','cancelled'])test(`generated terminal ${status} retires placeholder and pending sibling without replay`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
  const pending=approvalRecord();
  const placeholder=approvalRecord({id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',

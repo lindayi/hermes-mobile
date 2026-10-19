@@ -1379,7 +1379,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       void refreshTransitionalApprovalDetails();
       try{
         const data=await api.request('/approvals');
-        if(!current() || revision!==approvalRevision || !Array.isArray(data.items))return;
+        if(!current() || revision!==approvalRevision || !Array.isArray(data?.items)
+            || !data.items.every(item=>item && ['id','run_id','request_id'].every(field=>
+              typeof item[field]==='string' && item[field])))return;
         approvalListRevision++;
         const items=data.items.filter(item=>{
           const key=approvalKey(item),actionState=approvalActionStates.get(key);
@@ -1424,6 +1426,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             actionState.pending=false;actionState.error='';
           }
           if(!approvalFinals.has(key))approvalFinals.set(key,'unavailable');
+        }
+        const listedKeys=new Set(data.items.map(approvalKey));
+        for(const [key,item] of approvalItems){
+          const actionState=approvalActionStates.get(key);
+          if(approvalFinals.get(key)!=='details_unavailable' || listedKeys.has(key)
+              || actionState?.pending || actionState?.decisionStarted || actionState?.uncertain)continue;
+          const finalItem={...item,status:'unavailable',executable:false,choices:[],details_unavailable:false,error:''};
+          rememberHandledApproval(key,finalItem,'unavailable');
+          approvalItems.set(key,finalItem);approvalFinals.set(key,'unavailable');clearApprovalExpiry(key);
         }
         approvalPending=next;
         for(const [key,item] of next){approvalItems.set(key,item);approvalFinals.delete(key);}
