@@ -922,15 +922,35 @@ class Orchestrator:
                     session_id=session_id, status=status, expires_at=row['expires_at'], choices=['once', 'deny'], executable=ready,
                     error=None if ready else 'Native API cannot atomically bind decisions to this action')
 
-    def approvals(self, user):
+    def approvals(self, user, *, session_ids=None):
         if user['profile'] != self.profile:
-            return {'items': []}
+            return {'items': [], 'complete': True} if session_ids is not None else {'items': []}
+        params = [user['id'], user['profile'], time.time()]
+        scope = ''
+        bounded = session_ids is not None
+        if bounded:
+            if (not isinstance(session_ids, (list, tuple, set))
+                    or not 0 < len(session_ids) <= 100
+                    or any(not isinstance(value, str) or not value or len(value) > 200
+                           or len(value.encode('utf-8')) > 512 for value in session_ids)):
+                return {'items': [], 'complete': True}
+            session_ids = tuple(dict.fromkeys(session_ids))
+            marks = ','.join('?' for _ in session_ids)
+            scope = f'''AND (r.session_id IN ({marks}) OR EXISTS(
+                SELECT 1 FROM run_history_anchors h WHERE h.run_id=r.id
+                AND (h.session_id IN ({marks}) OR h.canonical_session_id IN ({marks}))))'''
+            params.extend((*session_ids, *session_ids, *session_ids))
+        limit = 1001 if bounded else 1000
         with closing(self.journal.connect()) as c:
-            rows = c.execute("""SELECT a.*,r.session_id FROM orchestration_approvals a JOIN runs r ON a.run_id=r.id
+            rows = c.execute(f"""SELECT a.*,r.session_id FROM orchestration_approvals a JOIN runs r ON a.run_id=r.id
                 WHERE r.user_id=? AND r.profile=? AND r.status='waiting_for_approval'
-                AND ((a.status='pending' AND a.expires_at>?) OR a.status='details_unavailable') ORDER BY a.rowid LIMIT 1000""",
-                (user['id'], user['profile'], time.time())).fetchall()
-        return {'items': [self._approval_view(row) for row in rows]}
+                AND ((a.status='pending' AND a.expires_at>?) OR a.status='details_unavailable')
+                {scope} ORDER BY a.rowid LIMIT {limit}""", params).fetchall()
+        complete = len(rows) <= 1000
+        result = {'items': [self._approval_view(row) for row in rows[:1000]]}
+        if bounded:
+            result['complete'] = complete
+        return result
 
     def approval(self, user, approval_id):
         if user['profile'] != self.profile:
@@ -949,10 +969,14 @@ class Orchestrator:
             status = 'expired'
         elif status == 'pending' and row['run_status'] != 'waiting_for_approval':
             status = 'unavailable'
+        elif status == 'details_unavailable' and row['run_status'] in ('completed', 'failed', 'cancelled'):
+            status = 'unavailable'
         view = self._approval_view(row)
         view['status'] = status
         if status != 'pending':
             view.update(choices=[], executable=False)
+        if status == 'unavailable' and row['status'] == 'details_unavailable':
+            view['error'] = ''
         return view
 
     async def decide(self, user, approval_id, decision):

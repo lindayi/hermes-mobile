@@ -318,10 +318,10 @@ _ISSUE98_PHOTO_POLICY_FIXTURE = {
 }
 
 _PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
-    'backend/app.py': '93d0bd54d6bc7a7d31b4da75db61cf6bd61478983f37c653544c25d3b8d6d2e6',
+    'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
     'backend/notifications.py': 'a56b13b0c78a9dc067a7cc252753a7c3b822df5cc9fc2aa8f2321859be08726e',
     'backend/native_catalog.py': 'f6b54791ba24637b193ff247b34c9992764e6ba27dd4abd368eb61c83de15f69',
-    'backend/orchestration.py': 'c36d265cf3f84d3e064efed9b52b181e43a395fd000a52ee10e7129b8f880db2',
+    'backend/orchestration.py': '1e58ad55318720c75b254b9ad4c8ba83f4f1b5cd6165f2c0d3e9ee32b6201fa9',
 }
 
 

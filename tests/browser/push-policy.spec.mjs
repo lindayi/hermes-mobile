@@ -20,7 +20,7 @@ const responseBatch=(page,path,count)=>new Promise(resolve=>{
 });
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],approvalHold:null,approvalDetail:null,approvalDetails:null,approvalDetailHold:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],sessionApprovals:null,sessionApprovalComplete:true,approvalHold:null,approvalDetail:null,approvalDetails:null,approvalDetailHold:null,approvalDetailHoldFor:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -40,13 +40,19 @@ async function fixture(run){
     if(p==='/auth/me'){if(control.authHold)await control.authHold;data={user:{id:control.user,status:'ready'},csrf_token:control.csrf || 'fixture-csrf'};}
     if(p==='/auth/logout' && control.logoutDelay)await new Promise(resolve=>setTimeout(resolve,control.logoutDelay));
     if(p==='/push/presence' && call.body.visible && control.presenceHold)await control.presenceHold;
-    if(p==='/approvals'){if(control.approvalHold)await control.approvalHold;data={items:control.approvals};}
+    if(p==='/approvals'){
+     if(control.approvalHold)await control.approvalHold;
+     const scoped=requestURL.searchParams.has('session_id');
+     data={items:scoped?(control.sessionApprovals??control.approvals):control.approvals,
+      ...(scoped?{complete:control.sessionApprovalComplete}:{})};
+    }
     if(p.startsWith('/approvals/') && p.endsWith('/decision') && req.method==='POST'){
      if(control.decisionHold)await control.decisionHold;
      status=control.decisionStatus;data=status===200?{status:'resolved'}:{detail:'Synthetic unavailable'};
     }else if(p.startsWith('/approvals/') && req.method==='GET'){
      const id=decodeURIComponent(p.split('/').at(-1)),detail=control.approvalDetails?.[id] || control.approvalDetail;
-     if(control.approvalDetailHold)await control.approvalDetailHold;
+     if(control.approvalDetailHold
+        && (!control.approvalDetailHoldFor||control.approvalDetailHoldFor===id))await control.approvalDetailHold;
      if(control.approvalDetailLost){res.destroy();return;}
      if(detail?.id===id){data=detail;status=control.approvalDetailStatus;}
     }
@@ -831,6 +837,50 @@ test('generated rejected approval proof exposes no action details or decision co
  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
 }));
 
+test('generated cold chat discovers scoped approvals and reports bounded results',{timeout:30000},()=>fixture(async({page,control,calls})=>{
+const target=approvalRecord({run_id:'cold-run',request_id:'cold-request',run_session_id:'session-one'});
+control.approvals=[];
+control.sessionApprovals=[target];
+control.sessionApprovalComplete=false;
+control.activeRun={id:'cold-run',session_id:'session-one',status:'waiting_for_approval'};
+await page.getByRole('button',{name:'First conversation',exact:true}).click();
+const card=page.locator(`[data-approval-id="${target.id}"]`);
+await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+await page.getByText(/more than 1,000 approvals are waiting.*some are not shown/i).waitFor();
+const listCall=calls.find(call=>call.p==='/approvals');
+assert.equal(new URLSearchParams(listCall.query).get('session_id'),'session-one',
+ 'a cold chat enumerates its own approvals before the global list cap');
+assert.equal(await page.locator(`[data-approval-id="${target.id}"]`).count(),1);
+assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+assert.equal(control.runEventSequence,0,'the persisted list, not a new approval event, reveals the card');
+await page.evaluate(()=>app.destroy());
+}));
+
+test('generated external detail clears guidance from the actual placeholder response',{timeout:30000},()=>fixture(async({page,control,calls})=>{
+const placeholder=approvalRecord({id:'placeholder',request_id:'placeholder-request',
+ status:'details_unavailable',expires_at:null,executable:false,choices:[],
+ error:'Native approval details are unavailable after interruption; review in the native client'});
+const sibling=approvalRecord({id:'sibling',request_id:'sibling-request'});
+control.approvals=[placeholder,sibling];
+control.approvalDetails={placeholder:{...placeholder,status:'resolved_external'}};
+control.activeRun={id:placeholder.run_id,session_id:'session-one',status:'waiting_for_approval'};
+await page.getByRole('button',{name:'First conversation',exact:true}).click();
+const card=page.locator(`[data-approval-id="${placeholder.id}"]`);
+await card.getByRole('heading',{name:'Approval details unavailable',exact:true}).waitFor();
+control.approvals=[sibling];
+const detail=page.waitForResponse(response=>
+ new URL(response.url()).pathname.endsWith(`/approvals/${placeholder.id}`));
+const list=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
+await page.evaluate(()=>dispatchEvent(new Event('focus')));
+await Promise.all([detail,list]);
+await card.getByRole('heading',{name:'No longer pending',exact:true}).waitFor();
+assert.equal(await card.getByText(/native client|No decision was sent/).filter({visible:true}).count(),0);
+assert.equal(await card.getByRole('button').count(),0);
+assert.equal(await page.locator(`[data-approval-id="${sibling.id}"]`).getByRole('button').count(),2);
+assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+await page.evaluate(()=>app.destroy());
+}));
+
 for(const visibleCount of [1000,1])test(`generated bounded omission preserves live placeholder and pending upgrade (${visibleCount})`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
  const live=approvalRecord(),sibling=approvalRecord({id:'sibling',request_id:'sibling-request'}),
   placeholder={...live,status:'details_unavailable',expires_at:null,
@@ -1383,6 +1433,52 @@ test('generated approval detail batches rotate past transient failures and stay 
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
   ||call.p.startsWith('/runs/')&&call.method==='POST').length,0,'detail reconciliation is read-only');
  await page.evaluate(()=>app.destroy());
+}));
+
+test('generated held approval detail aborts and releases fair reconciliation',{timeout:30000},()=>fixture(async({page,control,calls})=>{
+await page.clock.install();
+const items=Array.from({length:12},(_,index)=>approvalRecord({
+ id:`missing-${index}`,request_id:`missing-request-${index}`,status:'details_unavailable',
+ expires_at:null,executable:false,choices:[],
+ error:'Native approval details are unavailable after interruption; review in the native client'
+}));
+const sibling=approvalRecord({id:'sibling',request_id:'sibling-request'});
+control.approvals=[...items,sibling];
+control.approvalDetails=Object.fromEntries(items.map(item=>[item.id,item]));
+control.activeRun={id:items[0].run_id,session_id:'session-one',status:'waiting_for_approval'};
+let release;
+control.approvalDetailHold=new Promise(resolve=>{release=resolve;});
+control.approvalDetailHoldFor=items[0].id;
+await page.getByRole('button',{name:'First conversation',exact:true}).click();
+await page.waitForFunction(()=>document.querySelectorAll('.approval-card').length===13);
+control.approvals=[sibling];
+const firstBatch=items.slice(0,10).map(item=>page.waitForRequest(request=>
+ new URL(request.url()).pathname.endsWith(`/approvals/${item.id}`)
+ && request.method()==='GET'));
+const firstList=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
+await page.evaluate(()=>dispatchEvent(new Event('focus')));
+await Promise.all([firstList,...firstBatch]);
+await page.clock.fastForward(10000);
+await page.waitForTimeout(40);
+control.approvalDetailHold=null;
+const later=page.waitForRequest(request=>
+ new URL(request.url()).pathname.endsWith(`/approvals/${items[10].id}`));
+const retry=page.waitForRequest(request=>
+ new URL(request.url()).pathname.endsWith(`/approvals/${items[0].id}`));
+const nextList=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
+await page.evaluate(()=>dispatchEvent(new Event('focus')));
+await Promise.all([nextList,later,retry]);
+assert.equal(calls.filter(call=>call.p===`/approvals/${items[0].id}`).length,2,
+ 'a timed-out exact read is removed from the in-flight cache and retried');
+assert.ok(calls.some(call=>call.p===`/approvals/${items[10].id}`),
+ 'later cards progress after a held request exceeds its abort deadline');
+assert.equal(await page.locator('.approval-card').count(),13);
+assert.equal(await page.locator('.approval-card h3').evaluateAll(nodes=>
+ nodes.filter(node=>node.textContent==='Approval details unavailable').length),12);
+assert.equal(await page.locator(`[data-approval-id="${sibling.id}"] button`).count(),2);
+assert.equal(calls.filter(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')).length,0);
+release();
+await page.evaluate(()=>app.destroy());
 }));
 
 for(const status of ['sending','unknown'])test(`generated mounted expiry survives cache eviction before fresh ${status}`,{timeout:60000},()=>fixture(async({page,control,calls})=>{

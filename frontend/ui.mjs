@@ -1125,7 +1125,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       approvalTargetPlaceholder=null,
       approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false;
     const approvalExpiryTimers=new Map();
-    let approvalDetailBatchOffset=0,missingApprovalDetailOffset=0,missingApprovalDetailsRefreshing=false;
+    let approvalDetailBatchOffset=0,missingApprovalDetailOffset=0,missingApprovalDetailsRefreshing=false,
+      approvalListIncomplete=false;
     const approvalDataFields=[
       'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
       'target','expires_at','executable','choices','error','details_unavailable'
@@ -1142,7 +1143,18 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const readApprovalDetail=approvalId=>{
       const existing=approvalDetailReads.get(approvalId);
       if(existing)return existing;
-      const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`);
+      const controller=new win.AbortController();
+      let deadline;
+      const request=Promise.resolve().then(()=>
+        api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal}));
+      const timeout=new Promise((_,reject)=>{
+        deadline=win.setTimeout(()=>{
+          controller.abort();
+          const error=new Error('Approval detail request timed out.');
+          error.name='AbortError';reject(error);
+        },10000);
+      });
+      const pending=Promise.race([request,timeout]).finally(()=>win.clearTimeout(deadline));
       approvalDetailReads.set(approvalId,pending);
       pending.then(
         ()=>{if(approvalDetailReads.get(approvalId)===pending)approvalDetailReads.delete(approvalId);},
@@ -1334,9 +1346,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     renderApprovals=()=>{
       const count=approvalPending.size;
-      approvalNotice.hidden=!count && !genericApproval;
-      approvalNotice.textContent=count?`${count} approval${count===1?'':'s'} require your review.`
+      const summary=count?`${count} approval${count===1?'':'s'} require your review.`
         :genericApproval?'An approval needs your review. Open this chat to check its current state.':'';
+      approvalNotice.hidden=!count && !genericApproval && !approvalListIncomplete;
+      approvalNotice.textContent=approvalListIncomplete
+        ?`${summary ? `${summary} ` : ''}More than 1,000 approvals are waiting in this chat; some are not shown.`
+        :summary;
       for(const [key,item] of approvalItems){
         if(item.session_id!==session.id && item.run_id!==currentApprovalRun)continue;
         renderApprovalCard(item,approvalPending.has(key)?'pending':approvalFinals.get(key) || 'unavailable');
@@ -1410,7 +1425,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const status=detail.status==='pending' && approvalExpired(detail)?'expired':detail.status,
             live=status==='pending' || status==='details_unavailable',
             next=live?detail:{...detail,status,executable:false,choices:[],details_unavailable:false,
-              error:approvalDetailsUnavailable(detail)?'':detail.error};
+              error:approvalDetailsUnavailable(detail) || approvalDetailsUnavailable(item)?'':detail.error};
           if(live && actionState?.pending)return;
           if(sameApprovalData(item,next))return;
           if(actionState?.pending){actionState.pending=false;actionState.error='';}
@@ -1429,11 +1444,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const revision=++approvalRevision;
       void refreshTransitionalApprovalDetails();
       try{
-        const data=await api.request('/approvals');
+        const data=await api.request('/approvals',{query:{session_id:session.id}});
         if(!current() || revision!==approvalRevision || !Array.isArray(data?.items)
             || !data.items.every(item=>item && ['id','run_id'].every(field=>
               typeof item[field]==='string' && item[field])))return;
         approvalListRevision++;
+        approvalListIncomplete=data.complete===false;
         const items=data.items.filter(item=>{
           const key=approvalKey(item),actionState=approvalActionStates.get(key);
           const upgradesPlaceholder=approvalFinals.get(key)==='details_unavailable'

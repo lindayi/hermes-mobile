@@ -238,7 +238,7 @@ def create_app(settings=None, *, gateway_client=None):
             return None
         return user
 
-    def notification_session_binding(user, session_id, current_user=None):
+    def notification_session_binding(user, session_id, current_user=None, *, include_aliases=False):
         from contextlib import closing
         from .session_visibility import classification_sql
         current=current_user or notification_user(user['id'])
@@ -285,7 +285,10 @@ def create_app(settings=None, *, gateway_client=None):
                                            (*params,tip)).fetchone()
             if not classification or classification[0]=='hidden':
                 return None
-            return {'session_id':tip,'classification':classification[0]}
+            result={'session_id':tip,'classification':classification[0]}
+            if include_aliases:
+                result['session_ids']=sorted(chain)
+            return result
         except (KeyError,ValueError,PermissionError,sqlite3.Error):
             return None
 
@@ -973,14 +976,24 @@ def create_app(settings=None, *, gateway_client=None):
         return StreamingResponse(stream(),media_type='text/event-stream',headers={'X-Accel-Buffering':'no','Cache-Control':'no-store'})
 
     @app.get(BASE+'/approvals')
-    def approvals(user=Depends(ready_user)):
-        result=runtime_for(user).approvals(user)
+    def approvals(session_id:str|None=Query(default=None,max_length=200),user=Depends(ready_user)):
+        scoped=session_id is not None
+        if scoped:
+            binding=notification_session_binding(user,session_id,current_user=user,include_aliases=True)
+            if not binding or binding['classification']!='chats':
+                return {'items':[],'complete':True}
+            result=runtime_for(user).approvals(user,session_ids=binding['session_ids'])
+        else:
+            result=runtime_for(user).approvals(user)
         requested=[{'id':str(index),'run_id':item['run_id'],'request_id':item['request_id'],
                     'approval_id':item['id'],'session_id':item.get('session_id')}
                    for index,item in enumerate(result['items'])]
         bindings=approval_notification_bindings(user['id'],requested,expected_user=user)
-        return {'items':[approval_chat_view(item,bindings.get(str(index)))
-                         for index,item in enumerate(result['items']) if str(index) in bindings]}
+        response={'items':[approval_chat_view(item,bindings.get(str(index)))
+                           for index,item in enumerate(result['items']) if str(index) in bindings]}
+        if scoped:
+            response['complete']=result['complete']
+        return response
 
     @app.get(BASE+'/approvals/{aid}')
     def approval(aid:str,user=Depends(ready_user)):

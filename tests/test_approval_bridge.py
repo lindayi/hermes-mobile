@@ -409,6 +409,97 @@ def test_assembled_approval_detail_work_runs_off_event_loop(tmp_path, monkeypatc
         assert client.get(BASE+'/approvals/not-owned').status_code==404
 
 
+def test_terminal_run_exact_detail_retires_unavailable_placeholder_without_stream_event(tmp_path):
+    with environment(tmp_path) as (app,client,user,rid,_):
+        runtime=app.state.orchestrator
+        journal=app.state.journal
+        journal.finish(user['id'],rid,'waiting_for_approval')
+        run=journal.get(user['id'],rid)
+        runtime._missing_approval(user,run,'interrupted-action')
+        item=runtime.approvals(user)['items'][0]
+        assert item['status']=='details_unavailable'
+        with journal.connect() as db:
+            assert db.execute('SELECT count(*) FROM events WHERE run_id=? AND name=?',
+                              (rid,'approval')).fetchone()[0]==1
+
+        journal.finish(user['id'],rid,'completed')
+
+        response=client.get(BASE+f"/approvals/{item['id']}")
+        assert response.status_code==200
+        detail=response.json()
+        assert detail['status']=='unavailable'
+        assert detail['executable'] is False and detail['choices']==[]
+        assert not detail.get('details_unavailable',False)
+        assert 'native client' not in detail.get('error','').lower()
+
+
+def test_session_approval_enumeration_precedes_global_cap_and_marks_truncation(tmp_path):
+    from contextlib import closing
+
+    with environment(tmp_path) as (app,client,user,rid,_):
+        runtime=app.state.orchestrator
+        journal=app.state.journal
+        journal.finish(user['id'],rid,'completed')
+        with sqlite3.connect(tmp_path/'home'/'state.db') as db:
+            db.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?)',
+                       ('other-chat','Other synthetic chat','whatsapp',3,4,None))
+
+        older,_=journal.submit(user['id'],user['profile'],'other-chat','Older request','older-cap')
+        with closing(journal.connect()) as db, db:
+            db.execute("UPDATE runs SET status='waiting_for_approval' WHERE id=?",(older['id'],))
+        older=journal.get(user['id'],older['id'])
+        runtime._missing_approval(user,older,'older-action-0')
+        with closing(journal.connect()) as db, db:
+            for index in range(1,1001):
+                approval_id=f'older-{index:032x}'
+                request_id=f'older-action-{index}'
+                action='{"details_unavailable":true}'
+                db.execute('INSERT INTO orchestration_approvals VALUES(?,?,?,?,?,?)',
+                           (approval_id,older['id'],request_id,action,'details_unavailable',0))
+                row=dict(id=approval_id,run_id=older['id'],request_id=request_id,
+                         action=action,status='details_unavailable',expires_at=0,
+                         session_id='other-chat')
+                db.execute('INSERT INTO events(run_id,name,data,created_at) VALUES(?,?,?,?)',
+                           (older['id'],'approval',json.dumps(runtime._approval_view(row)),time.time()))
+
+        target,_=journal.submit(user['id'],user['profile'],'old-alias',
+            'Canonical chat request','target-cap',
+            history_anchor=lambda:{'session_id':'old-alias','canonical_session_id':'wa-1','message_id':1})
+        with closing(journal.connect()) as db, db:
+            db.execute("UPDATE runs SET status='waiting_for_approval',upstream_id=? WHERE id=?",
+                       ('native-target',target['id']))
+        target=journal.get(user['id'],target['id'])
+        runtime._approval(user,target,{
+            'event':'approval.request','run_id':'native-target',
+            'request_id':'target-action','command':'echo target'})
+        with journal.connect() as db:
+            target_item=db.execute('SELECT id,request_id FROM orchestration_approvals '
+                                   'WHERE run_id=? AND request_id=?',
+                                   (target['id'],'target-action')).fetchone()
+        assert any(event['name']=='approval' for event in journal.events(user['id'],target['id']))
+
+        global_items=client.get(BASE+'/approvals').json()['items']
+        assert len(global_items)==1000
+        assert all(item['id']!=target_item['id'] for item in global_items)
+
+        response=client.get(BASE+'/approvals?session_id=wa-1')
+        assert response.status_code==200
+        result=response.json()
+        assert result['complete'] is True
+        assert [item['id'] for item in result['items']]==[target_item['id']]
+        assert result['items'][0]['session_id']=='wa-1'
+        assert result['items'][0]['run_session_id']=='old-alias'
+
+        truncated=client.get(BASE+'/approvals?session_id=other-chat')
+        assert truncated.status_code==200
+        assert truncated.json()['complete'] is False
+        assert len(truncated.json()['items'])==1000
+
+        foreign=client.get(BASE+'/approvals?session_id=foreign-session')
+        assert foreign.status_code==200
+        assert foreign.json()=={'items':[],'complete':True}
+
+
 @pytest.mark.parametrize('final_status', ['expired','resolved','unavailable'])
 def test_final_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_path, final_status):
     with environment(tmp_path) as (app, client, user, rid, _):

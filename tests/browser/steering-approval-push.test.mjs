@@ -1452,12 +1452,99 @@ test('omitted exact reads are bounded, deduplicated and fair beyond one batch de
  }finally{app.destroy();win.close();}
 });
 
+test('cold chat loads session-scoped approvals and reports a bounded partial list',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const target={...approvalItem(),status:'pending',session_id:'s',run_session_id:'old-alias'};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,
+   run:{id:'r',session_id:'old-alias',status:'waiting_for_approval'}};
+  if(p==='/approvals')return o.query?.session_id==='s'?{items:[target],complete:false}:{items:[]};
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();
+  const card=()=>doc.querySelector('[data-approval-id="a"]');
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  const listCall=calls.find(call=>call.p==='/approvals');
+  assert.equal(listCall?.o.query?.session_id,'s','cold chat enumeration is bound to its canonical session');
+  assert.match(doc.querySelector('.approval-notice').textContent,/more than 1,000.*some are not shown/i);
+  assert.equal(doc.querySelectorAll('[data-approval-id="a"]').length,1);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+test('a held approval detail times out, releases the batch, and allows fair retries',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
+ const nativeSetTimeout=win.setTimeout.bind(win),nativeClearTimeout=win.clearTimeout.bind(win);
+ const deadlines=new Map(),calls=[];let nextTimer=0,aborted=0;
+ win.setTimeout=(callback,delay,...args)=>{
+  if(delay===10000){const id=++nextTimer;deadlines.set(id,()=>callback(...args));return id;}
+  return nativeSetTimeout(callback,delay,...args);
+ };
+ win.clearTimeout=id=>{if(!deadlines.delete(id))nativeClearTimeout(id);};
+ const placeholders=Array.from({length:12},(_,index)=>({
+  ...approvalItem(),id:`missing-${index}`,request_id:`native-${index}`,status:'details_unavailable',
+  expires_at:null,executable:false,choices:[],
+  error:'Native approval details are unavailable after interruption; review in the native client'
+ }));
+ const sibling={...approvalItem(),id:'sibling',request_id:'native-sibling'};
+ let listed=[...placeholders,sibling],first=true;
+ const reads=[];
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,
+   run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:listed};
+  if(p.startsWith('/approvals/')){
+   const item=placeholders.find(value=>value.id===decodeURIComponent(p.split('/').at(-1)));
+   reads.push(item.id);
+   if(item.id==='missing-0'&&first){
+    first=false;
+    return new Promise((resolve,reject)=>{
+     o.signal?.addEventListener('abort',()=>{
+      aborted++;reject(Object.assign(new Error('request aborted'),{name:'AbortError'}));
+     },{once:true});
+    });
+   }
+   return item;
+  }
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="missing-11"]'));
+  listed=[sibling];win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>reads.length===10);
+  await waitFor(()=>deadlines.size===1,'the held detail must have an abort deadline');
+  const [timer,expire]=deadlines.entries().next().value;deadlines.delete(timer);expire();
+  await waitFor(()=>aborted===1);
+  await new Promise(resolve=>setImmediate(resolve));
+  const before=reads.length;
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>reads.length>before,
+   `timeout must release the missing-detail batch gate; reads=${reads.join(',')}; lists=${calls.filter(call=>call.p==='/approvals').length}`);
+  assert.ok(reads.slice(before).includes('missing-10'),'later targets progress after the held request times out');
+  assert.equal(reads.filter(id=>id==='missing-0').length,2,'the timed-out detail can be retried');
+  for(const item of placeholders)
+   assert.equal(doc.querySelector(`[data-approval-id="${item.id}"] h3`).textContent,'Approval details unavailable');
+  assert.equal(doc.querySelectorAll('[data-approval-id="sibling"] button').length,2);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
 for(const outcome of ['details_unavailable','pending','sending','unknown','resolved','resolved_external','cancelled','expired','unavailable',404])
 test(`omitted placeholder uses exact detail truthfully (${outcome})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
  const live={...approvalItem(),status:'pending',run_session_id:'old-alias'};
- const placeholder={...live,status:'details_unavailable',details_unavailable:true,expires_at:null,
-  executable:false,choices:[],error:'Review in the native client'};
+ const placeholder={...live,status:'details_unavailable',expires_at:null,
+  executable:false,choices:[],error:'Native approval details are unavailable after interruption; review in the native client'};
  let listed=[placeholder];
  const app=await mountApp(doc,{clear(){},async request(p){
   calls.push(p);
@@ -1467,7 +1554,9 @@ test(`omitted placeholder uses exact detail truthfully (${outcome})`,async()=>{
   if(p==='/approvals')return {items:listed};
   if(p==='/approvals/a'){
    if(outcome===404)throw Object.assign(new Error('Unavailable'),{status:404});
-   return outcome==='details_unavailable'?placeholder:{...live,status:outcome};
+   if(outcome==='details_unavailable'||outcome==='resolved_external')
+    return {...placeholder,status:outcome};
+   return {...live,status:outcome};
   }
   return {items:[]};
  }},win);
