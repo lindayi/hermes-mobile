@@ -72,6 +72,11 @@ of Inbox; positively classified cron/test sessions retain their Inbox card and
 explicit decisions. Missing or ambiguous bindings remain unavailable, not an
 Inbox fallback based only on category or session ID.
 
+The pending-approval list uses request-scoped journal proof batches and one native
+classification per source session, then revalidates current authorization. Its
+synchronous database work runs in the request threadpool, never on the async event
+loop; no authorization or classification cache survives the request.
+
 Push preferences remain independent of Inbox visibility and retention. Visibility
 changes do not alter outbox status, receipts, acknowledgements, or retry history.
 Regression gates cover HTTP delivery/ACK plus Activity, API list/count/cleanup,

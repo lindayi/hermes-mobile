@@ -490,6 +490,9 @@ def create_app(settings=None, *, gateway_client=None):
         source=item.get('session_id')
         binding=approval_notification_binding(user['id'],item['run_id'],item['request_id'],
                                               item['id'],source)
+        return approval_chat_view(item,binding)
+
+    def approval_chat_view(item,binding):
         if not binding:
             return {**item,'inbox_visible':False}
         if binding['kind']=='chat':
@@ -969,9 +972,14 @@ def create_app(settings=None, *, gateway_client=None):
         return StreamingResponse(stream(),media_type='text/event-stream',headers={'X-Accel-Buffering':'no','Cache-Control':'no-store'})
 
     @app.get(BASE+'/approvals')
-    async def approvals(user=Depends(ready_user)):
+    def approvals(user=Depends(ready_user)):
         result=runtime_for(user).approvals(user)
-        return {'items':[approval_chat_binding(user,item) for item in result['items']]}
+        requested=[{'id':str(index),'run_id':item['run_id'],'request_id':item['request_id'],
+                    'approval_id':item['id'],'session_id':item.get('session_id')}
+                   for index,item in enumerate(result['items'])]
+        bindings=approval_notification_bindings(user['id'],requested)
+        return {'items':[approval_chat_view(item,bindings.get(str(index)))
+                         for index,item in enumerate(result['items'])]}
 
     @app.get(BASE+'/approvals/{aid}')
     async def approval(aid:str,user=Depends(ready_user)):

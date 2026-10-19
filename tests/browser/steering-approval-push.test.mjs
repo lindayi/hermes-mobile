@@ -1295,6 +1295,56 @@ test('serialized null-session approval SSE preserves a held aliased decision ack
  }finally{app.destroy();win.close();}
 });
 
+for(const sourceSession of ['s','old-alias'])test(`focus list recovers placeholder without an upgrade event (${sourceSession})`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const pending={...approvalItem(),status:'pending',run_session_id:sourceSession};
+ let approvals=[{...pending,status:'details_unavailable',executable:false,choices:[],expires_at:null}];
+ const acknowledgement=deferred();
+ win.EventSource=class{constructor(){this.listeners={};win.activeStream=this;}addEventListener(name,fn){this.listeners[name]=fn;}close(){}};
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Canonical chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:sourceSession,status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:approvals};
+  if(p==='/approvals/a')return approvals[0];
+  if(p==='/auth/verify/options')return {challenge_id:'fixture',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {verified:true};
+  if(p==='/approvals/a/decision')return acknowledgement.promise;
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Approval details unavailable');
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.equal(card.querySelector('button'),null);
+  const refresh=async()=>{
+   const before=calls.filter(call=>call.p==='/approvals').length;
+   win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>calls.filter(call=>call.p==='/approvals').length>before);await tick();
+  };
+  for(const mismatch of [{request_id:'foreign-request'},{run_session_id:'foreign-session'},{session_id:'foreign-chat'}]){
+   approvals=[{...pending,...mismatch}];await refresh();
+   assert.equal(card.querySelector('button'),null,'a changed identity cannot upgrade the placeholder');
+  }
+  approvals=[pending];await refresh();
+  await waitFor(()=>card.querySelector('button.primary'),'authenticated pending list must upgrade the placeholder');
+  assert.equal(doc.querySelectorAll('[data-approval-id="a"]').length,1);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'reading is not consent');
+  card.querySelector('button.primary').click();
+  await waitFor(()=>calls.filter(call=>call.p.endsWith('/decision')).length===1);
+  await refresh();
+  assert.ok([...card.querySelectorAll('button')].every(button=>button.disabled));
+  acknowledgement.resolve({status:'resolved'});
+  await waitFor(()=>card.querySelector('h3').textContent==='Resolved');
+  await refresh();
+  assert.equal(card.querySelector('h3').textContent,'Resolved');
+  assert.equal(card.querySelector('button'),null,'pending replay cannot reopen an acknowledged decision');
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+ }finally{app.destroy();win.close();}
+});
+
 test('ordinary run accepts the producer null-session placeholder and rejects conflicting sessions',async()=>{
  const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
  let owner='owner';

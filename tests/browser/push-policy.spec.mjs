@@ -932,6 +932,35 @@ test('generated second detail GET cannot replay a successfully answered approval
  await page.evaluate(()=>app.destroy());releaseRefresh();
 }));
 
+for(const sourceSession of ['session-one','old-alias'])test(`generated focus list recovers placeholder without an upgrade event (${sourceSession})`,{timeout:30000},()=>fixture(async({page,control,calls})=>{
+ const pending=approvalRecord({run_session_id:sourceSession});
+ control.activeRun={id:'approval-run',session_id:sourceSession,status:'waiting_for_approval'};
+ control.approvals=[{...pending,status:'details_unavailable',executable:false,choices:[],expires_at:null}];
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('heading',{name:'Approval details unavailable',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ control.approvals=[pending];
+ await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+ await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+ assert.equal(await page.locator('[data-approval-id="approval-1"]').count(),1);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'reading is not consent');
+ await holdPasskey(page);
+ let acknowledge;
+ control.decisionHold=new Promise(resolve=>{acknowledge=resolve;});
+ await card.getByRole('button',{name:'Approve once',exact:true}).click();
+ await page.waitForFunction(()=>window.passkeyRequest.started);
+ await page.evaluate(()=>finishPasskey());
+ await page.waitForFunction(()=>document.querySelector('[data-approval-id="approval-1"] h3')?.textContent==='Decision pending');
+ acknowledge();
+ await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+ await page.waitForTimeout(100);
+ await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+}));
+
 test('generated ordinary chat accepts the actual null-session approval placeholder event',{timeout:30000},()=>fixture(async({page,control,calls})=>{
  const producerEvent={id:'approval-1',run_id:'approval-run',request_id:'request-1',session_id:null,
  status:'details_unavailable',expires_at:null,choices:[],executable:false,

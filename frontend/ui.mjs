@@ -1381,8 +1381,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const data=await api.request('/approvals');
         if(!current() || revision!==approvalRevision || !Array.isArray(data.items))return;
         approvalListRevision++;
-        const items=data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id)
-          && !handledApprovals.has(approvalKey(item)) && !approvalFinals.has(approvalKey(item)));
+        const items=data.items.filter(item=>{
+          const key=approvalKey(item),actionState=approvalActionStates.get(key);
+          const upgradesPlaceholder=approvalFinals.get(key)==='details_unavailable'
+            && item.status==='pending' && sameApprovalIdentity(approvalItems.get(key),item)
+            && !actionState?.pending && !actionState?.uncertain;
+          return (item.run_id===currentApprovalRun || item.session_id===session.id)
+            && !handledApprovals.has(key) && (!approvalFinals.has(key) || upgradesPlaceholder);
+        });
         const activeItems=[];
         for(const item of items){
           if(approvalDetailsUnavailable(item)){

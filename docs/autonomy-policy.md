@@ -852,7 +852,7 @@ deployment evidence.
 
 | PR #119 candidate path | SHA-256 |
 | --- | --- |
-| `backend/app.py` | `77a19ab97b94a6a48fd1819a426b21c0c4cb20e8fa7f9b30d82f104d6da5ce38` |
+| `backend/app.py` | `b835cd65beced0bbadb06db416718b7b28606f06e8d9ab207b7fcab0f125398e` |
 | `backend/notifications.py` | `42de0bcae886c139aa61ea23ef4dd0a24cc17a8d338ab3edbfeadd6b47a70935` |
 | `backend/orchestration.py` | `82589613f732673df5c17b7add63fb127fac5084919562e00768a36c118c362b` |
 

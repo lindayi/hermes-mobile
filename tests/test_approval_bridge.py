@@ -188,6 +188,139 @@ def test_approval_target_resolves_absent_run_alias_through_verified_lineage(tmp_
         assert details['status']=='pending'
 
 
+def test_pending_list_batches_real_proofs_and_repeated_sessions(tmp_path, monkeypatch):
+    import asyncio
+    from contextlib import contextmanager
+
+    with environment(tmp_path) as (app, client, user, existing_run, _):
+        journal=app.state.journal
+        runtime=app.state.orchestrator
+        journal.finish(user['id'],existing_run,'completed')
+        with sqlite3.connect(tmp_path/'home'/'state.db') as db:
+            db.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?)',
+                       ('cron-session','Synthetic scheduled session','cron',3,4,None))
+        identities=[]
+        for owner,profile,session in [
+                (user['id'],'default','wa-1'),(user['id'],'default','old-alias'),
+                (user['id'],'default','cron-session'),('foreign','default','foreign-session'),
+                (user['id'],'foreign-profile','foreign-profile-session')]:
+            run,_=journal.submit(owner,profile,session,'Synthetic request',f'pending-{len(identities)}',
+                history_anchor=(lambda: {'session_id':'old-alias',
+                    'canonical_session_id':'wa-1','message_id':1}) if session=='old-alias' else None)
+            journal.finish(owner,run['id'],'completed')
+            identities.append(run['id'])
+        with journal.connect() as db, db:
+            db.execute("UPDATE runs SET status='waiting_for_approval' WHERE id IN (?,?,?,?,?)",identities)
+            for group,run_id in enumerate(identities):
+                for index in range(70):
+                    db.execute('INSERT INTO orchestration_approvals VALUES(?,?,?,?,?,?)',
+                        (f'pending-{group}-{index}',run_id,f'request-{group}-{index}',
+                         '{"command":"echo synthetic"}','pending',time.time()+600))
+
+        original_approvals=runtime.approvals
+        observed={}
+
+        def approvals(owner):
+            try:
+                asyncio.get_running_loop()
+                observed['event_loop']=True
+            except RuntimeError:
+                observed['event_loop']=False
+            result=original_approvals(owner)
+            assert len(result['items'])==210
+            first=result['items'][0]
+            observed['invalid']=[
+                {**first,'request_id':'wrong-request'},
+                {**first,'session_id':None},
+                {**first,'session_id':'foreign-session'},
+                {**first,'run_id':identities[3],'id':'pending-3-0','request_id':'request-3-0'},
+                {**first,'run_id':identities[4],'id':'pending-4-0','request_id':'request-4-0'},
+            ]
+            return {'items':result['items']+observed['invalid']}
+
+        monkeypatch.setattr(runtime,'approvals',approvals)
+        work={'auth':0,'journal':0,'native':0,'lineage':0,'proofs':0}
+        original_transaction=app.state.auth.store.transaction
+
+        @contextmanager
+        def transaction(*args,**kwargs):
+            work['auth']+=1
+            with original_transaction(*args,**kwargs) as db:
+                yield db
+
+        original_connect=journal.connect
+
+        def connect(*args,**kwargs):
+            work['journal']+=1
+            db=original_connect(*args,**kwargs)
+            def trace(sql):
+                if 'JOIN orchestration_approvals a ON a.run_id=' in sql:
+                    work['proofs']+=1
+            db.set_trace_callback(trace)
+            return db
+
+        original_native=app.state.catalog._connect
+        original_lineage=app.state.background_delivery._lineage
+
+        def native(*args,**kwargs):
+            work['native']+=1
+            return original_native(*args,**kwargs)
+
+        def lineage(*args,**kwargs):
+            work['lineage']+=1
+            return original_lineage(*args,**kwargs)
+
+        monkeypatch.setattr(app.state.auth.store,'transaction',transaction)
+        monkeypatch.setattr(journal,'connect',connect)
+        monkeypatch.setattr(app.state.catalog,'_connect',native)
+        monkeypatch.setattr(app.state.background_delivery,'_lineage',lineage)
+        response=client.get(BASE+'/approvals')
+        assert response.status_code==200
+        items=response.json()['items']
+        assert len(items)==215
+        for group in range(3):
+            selected=[item for item in items[:210] if item['id'].startswith(f'pending-{group}-')]
+            assert len(selected)==70
+            assert all(item['session_id']==('cron-session' if group==2 else 'wa-1') for item in selected)
+            assert all(item['inbox_visible'] is (group==2) for item in selected)
+            if group!=2:
+                assert all(item['run_session_id']==('old-alias' if group==1 else 'wa-1') for item in selected)
+        assert all(item['inbox_visible'] is False and 'run_session_id' not in item for item in items[210:])
+        assert work['auth']<=4, work
+        assert work['proofs']==3, work
+        assert work['journal']<=10, work
+        assert work['native']<=12, work
+        assert work['lineage']==3, work
+        assert observed['event_loop'] is False
+        print('Pending-list real work:',work,'event_loop:',observed['event_loop'])
+        before=work.copy()
+        assert client.get(BASE+'/approvals').status_code==200
+        assert work['lineage']-before['lineage']==3,'classification must be request-scoped, not cached'
+
+
+@pytest.mark.parametrize('change', ['role','profile','status'])
+def test_pending_list_revalidates_authorization_after_classification(tmp_path, monkeypatch, change):
+    with environment(tmp_path) as (app, client, user, rid, _):
+        runtime=app.state.orchestrator
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'auth-change','run_id':'native-run','command':'echo synthetic'})
+        original=app.state.background_delivery._lineage
+
+        def lineage(*args,**kwargs):
+            result=original(*args,**kwargs)
+            value={'role':'member','profile':'foreign-profile','status':'pending'}[change]
+            with app.state.auth.store.transaction() as db:
+                db.execute(f'UPDATE users SET {change}=? WHERE id=?',(value,user['id']))
+            return result
+
+        monkeypatch.setattr(app.state.background_delivery,'_lineage',lineage)
+        response=client.get(BASE+'/approvals')
+        assert response.status_code==200
+        assert len(response.json()['items'])==1
+        assert response.json()['items'][0]['inbox_visible'] is False
+        assert 'run_session_id' not in response.json()['items'][0]
+
+
 @pytest.mark.parametrize('final_status', ['expired','resolved','unavailable'])
 def test_final_approval_target_keeps_authorized_chat_but_has_no_decision(tmp_path, final_status):
     with environment(tmp_path) as (app, client, user, rid, _):
