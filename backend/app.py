@@ -238,10 +238,10 @@ def create_app(settings=None, *, gateway_client=None):
             return None
         return user
 
-    def notification_session_binding(user, session_id):
+    def notification_session_binding(user, session_id, current_user=None):
         from contextlib import closing
         from .session_visibility import classification_sql
-        current=notification_user(user['id'])
+        current=current_user or notification_user(user['id'])
         if not current or current['profile']!=user['profile'] or not isinstance(session_id,str):
             return None
         try:
@@ -320,6 +320,49 @@ def create_app(settings=None, *, gateway_client=None):
             return {'kind':'inbox'}
         return None
 
+    def approval_notification_bindings(user_id, approvals):
+        from contextlib import closing
+        if not approvals:
+            return {}
+        user=notification_user(user_id)
+        if not user:
+            return {}
+        verified=[]
+        with closing(journal.connect()) as db:
+            for start in range(0,len(approvals),100):
+                batch=approvals[start:start+100]
+                values=','.join('(?,?,?,?,?)' for _ in batch)
+                params=[value for row in batch for value in
+                        (row['id'],row['run_id'],row['request_id'],row['approval_id'],row['session_id'])]
+                params.extend((user_id,user['profile']))
+                verified.extend(db.execute(f'''WITH requested(inbox_id,run_id,request_id,approval_id,session_id) AS
+                    (VALUES {values})
+                    SELECT requested.inbox_id,requested.session_id
+                    FROM requested JOIN runs r ON r.id=requested.run_id
+                    JOIN orchestration_approvals a ON a.run_id=requested.run_id
+                        AND a.id=requested.approval_id AND a.request_id=requested.request_id
+                    WHERE r.user_id=? AND r.profile=? AND r.session_id IS requested.session_id''',
+                    params).fetchall())
+        targets={}
+        bindings={}
+        for row in verified:
+            session_id=row['session_id']
+            if session_id is None:
+                bindings[row['inbox_id']]={'kind':'inbox'}
+                continue
+            if session_id not in targets:
+                targets[session_id]=notification_session_binding(user,session_id,current_user=user)
+            target=targets[session_id]
+            if target and target['classification']=='chats':
+                bindings[row['inbox_id']]={'kind':'chat','session_id':target['session_id'],
+                                           'run_session_id':session_id}
+            elif target and target['classification'] in ('cron','tests'):
+                bindings[row['inbox_id']]={'kind':'inbox'}
+        current=notification_user(user_id)
+        if not current or current['profile']!=user['profile'] or current['role']!=user['role']:
+            return {}
+        return bindings
+
     def valid_presence(user_id,session_id):
         return resolve_presence(user_id,session_id) is not None
 
@@ -367,6 +410,7 @@ def create_app(settings=None, *, gateway_client=None):
     notifications.request_validator=valid_request_notification
     notifications.request_target_resolver=request_notification_binding
     notifications.approval_target_resolver=approval_notification_binding
+    notifications.approval_targets_resolver=approval_notification_bindings
     notifications.presence_resolver=resolve_presence
     notifications.event_validator=valid_notification_event
     request_notifications=RequestNotificationService(notifications,journal,

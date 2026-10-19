@@ -21,6 +21,10 @@ def test_new_owned_approval_is_durable_bound_and_deduplicated(tmp_path):
         assert db.execute('SELECT count(*) FROM outbox').fetchone()[0] == 1
         assert db.execute('SELECT expires_at FROM outbox').fetchone()[0] == 200
     assert NotificationService(tmp_path/'push.sqlite').list_inbox('alice') == []
+    service.approval_target_resolver = lambda owner, run, request, approval, session: (
+        {'kind': 'inbox'} if (owner, run, request, approval, session) ==
+        ('alice', 'run-other', 'native-other', 'approval-other', None) else None
+    )
     non_chat = service.ingest_approval('alice', 'run-other', 'native-other', 'approval-other',
         None, 200)
     assert service.list_inbox('alice') == [non_chat]

@@ -53,6 +53,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     return (approvalStatusRank[cached] ?? 0)>(approvalStatusRank[fresh] ?? 0)?cached:fresh;
   };
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
+  const approvalDetailsUnavailable=item=>item?.status==='details_unavailable' || item?.details_unavailable===true;
   const locallyExpiredApproval=key=>locallyExpiredApprovals.has(key)||mountedLocallyExpiredApprovals.has(key);
   const rememberHandledApproval=(key,item,status,locallyExpired=false)=>{
     handledApprovals.delete(key);
@@ -1384,6 +1385,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           && !handledApprovals.has(approvalKey(item)) && !approvalFinals.has(approvalKey(item)));
         const activeItems=[];
         for(const item of items){
+          if(approvalDetailsUnavailable(item)){
+            const key=approvalKey(item);
+            approvalItems.set(key,item);approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
+            continue;
+          }
           if(!approvalExpired(item)){activeItems.push(item);continue;}
           const key=approvalKey(item),actionState=approvalActionStates.get(key);
           if(actionState?.decisionStarted || actionState?.uncertain){
@@ -1424,17 +1430,26 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       run(id,runSessionId){currentApprovalRun=id;currentApprovalRunSession=runSessionId || session.id;renderApprovals();},
       event(item,runId,runSessionId){
         const sourceSessionId=runSessionId || currentApprovalRunSession;
-        if((Object.hasOwn(item,'run_id') && item.run_id!==runId)
-            || (Object.hasOwn(item,'run_session_id') && item.run_session_id!==sourceSessionId)
-            || (Object.hasOwn(item,'session_id') && item.session_id!==sourceSessionId))return false;
+        if(typeof runId!=='string' || !runId || typeof sourceSessionId!=='string' || !sourceSessionId
+            || (Object.hasOwn(item,'run_id') && item.run_id!==runId)
+            || (item.run_session_id!=null && item.run_session_id!==sourceSessionId)
+            || (item.session_id!=null && item.session_id!==sourceSessionId))return false;
         let value={...item,run_id:runId,
           run_session_id:item.run_session_id || item.session_id || sourceSessionId,session_id:session.id},
           key=approvalKey(value);
-        if(version!==routeVersion || handledApprovals.has(key) || approvalFinals.has(key))return false;
+        const priorStatus=approvalFinals.get(key);
+        if(version!==routeVersion || handledApprovals.has(key)
+            || (approvalFinals.has(key) && !(priorStatus==='details_unavailable' && item.status==='pending')))return false;
+        if(priorStatus==='details_unavailable')approvalFinals.delete(key);
         const previous=approvalItems.get(key);
         if(sameApprovalData(previous,value))value=previous;
         approvalRevision++;
-        if(value.id || value.request_id){approvalItems.set(key,value);approvalPending.set(key,value);}
+        if(value.id || value.request_id){
+          approvalItems.set(key,value);
+          if(approvalDetailsUnavailable(value)){
+            approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
+          }else{approvalPending.set(key,value);approvalFinals.delete(key);}
+        }
         else genericApproval=true;
         renderApprovals();return true;
       },

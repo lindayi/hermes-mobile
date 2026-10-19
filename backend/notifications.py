@@ -49,6 +49,7 @@ class NotificationService:
                  clock=time.time, session_validator=None, approval_validator=None, presence_validator=None,
                  event_validator=None, presence_resolver=None, request_validator=None,
                  request_target_resolver=None, approval_target_resolver=None,
+                 approval_targets_resolver=None,
                  device_claim_guard=None):
         self.db_path = str(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -68,6 +69,7 @@ class NotificationService:
         self.request_validator = request_validator
         self.request_target_resolver = request_target_resolver
         self.approval_target_resolver = approval_target_resolver
+        self.approval_targets_resolver = approval_targets_resolver
         self.device_claim_guard = device_claim_guard
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS inbox (
@@ -533,13 +535,25 @@ class NotificationService:
         return result
 
     def _inbox_approval_ids(self, user_id):
-        resolver = self.approval_target_resolver
-        if not resolver:
+        batch_resolver = getattr(self, 'approval_targets_resolver', None)
+        resolver = getattr(self, 'approval_target_resolver', None)
+        if not batch_resolver and not resolver:
             return set()
         with self._db() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='approval_notifications'").fetchone():
+                return set()
             approvals = db.execute('''SELECT i.id,i.session_id,a.approval_id,a.run_id,a.request_id
                 FROM inbox i JOIN approval_notifications a ON a.inbox_id=i.id
-                WHERE i.user_id=?''', (user_id,)).fetchall()
+                WHERE i.user_id=? AND NOT EXISTS (
+                    SELECT 1 FROM dismissed_inbox d
+                    WHERE d.inbox_id=i.id AND d.user_id=i.user_id)''', (user_id,)).fetchall()
+        if batch_resolver:
+            bindings = batch_resolver(user_id, [dict(row) for row in approvals])
+            if not isinstance(bindings, dict):
+                raise RuntimeError('Approval visibility resolver returned an invalid result')
+            return {row['id'] for row in approvals
+                    if isinstance(bindings.get(row['id']), dict)
+                    and bindings[row['id']].get('kind') == 'inbox'}
         visible = set()
         for row in approvals:
             binding = resolver(user_id, row['run_id'], row['request_id'],
@@ -620,6 +634,25 @@ class NotificationService:
             return db.execute(f'''SELECT count(*) FROM inbox WHERE user_id=? AND read=1
                 AND {_attention_visible_sql(db)}''',
                 (user_id,)).fetchone()[0]
+
+    def inbox_page(self, user_id, limit=100, offset=0):
+        visible_approvals = self._inbox_approval_ids(user_id)
+        with self._db() as db:
+            db.execute('BEGIN')
+            self._set_attention_approvals(db, visible_approvals)
+            visible = _attention_visible_sql(db)
+            items = [self._item(row) for row in db.execute(
+                f'''SELECT * FROM inbox WHERE user_id=? AND {visible}
+                ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?''',
+                (user_id, min(max(limit, 1), 200), max(offset, 0)))]
+            for item in items:
+                metadata = db.execute('SELECT approval_id,run_id,request_id,expires_at FROM approval_notifications WHERE inbox_id=?',
+                                      (item['id'],)).fetchone()
+                if metadata:
+                    item.update(dict(metadata))
+            read_count = db.execute(f'''SELECT count(*) FROM inbox WHERE user_id=? AND read=1
+                AND {visible}''', (user_id,)).fetchone()[0]
+            return {'items': items, 'read_count': read_count}
 
     def list_inbox(self, user_id, limit=100, offset=0):
         visible_approvals = self._inbox_approval_ids(user_id)
@@ -704,8 +737,7 @@ def build_notifications_router(service, auth_service):
     @router.get('/inbox')
     def inbox(user=Depends(auth_service.require_user), limit: int = Query(100, ge=1, le=200),
               offset: int = Query(0, ge=0)):
-        return {'items': service.list_inbox(user['id'], limit, offset),
-                'read_count': service.read_count(user['id'])}
+        return service.inbox_page(user['id'], limit, offset)
 
     @router.get('/inbox/{item_id}/target')
     def notification_target(item_id: str, user=Depends(auth_service.require_user)):

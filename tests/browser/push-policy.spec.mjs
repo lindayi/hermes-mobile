@@ -932,6 +932,58 @@ test('generated second detail GET cannot replay a successfully answered approval
  await page.evaluate(()=>app.destroy());releaseRefresh();
 }));
 
+test('generated ordinary chat accepts the actual null-session approval placeholder event',{timeout:30000},()=>fixture(async({page,control,calls})=>{
+ const producerEvent={id:'approval-1',run_id:'approval-run',request_id:'request-1',session_id:null,
+ status:'details_unavailable',expires_at:null,choices:[],executable:false,
+ error:'Native approval details are unavailable after interruption; review in the native client'};
+ const serialized=JSON.parse(JSON.stringify(producerEvent));
+ assert.equal(serialized.session_id,null);
+ assert.equal(Object.hasOwn(serialized,'run_session_id'),false);
+ await page.evaluate(()=>{window.EventSource=class{
+ constructor(){this.listeners={};window.nullSessionApprovalStream=this;}
+ addEventListener(name,listener){this.listeners[name]=listener;}
+ emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+ close(){this.closed=true;}
+ };});
+ control.activeRun={id:'approval-run',session_id:'session-one',status:'waiting_for_approval'};
+ control.approvals=[];
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ await page.waitForFunction(()=>window.nullSessionApprovalStream);
+ assert.ok(await page.evaluate(()=>window.nullSessionApprovalStream),'the ordinary chat opens its tracked run stream');
+ const initialLists=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ await page.evaluate(item=>window.nullSessionApprovalStream.emit('approval',item),
+ {...serialized,session_id:'foreign-session'});
+ await page.waitForTimeout(50);
+ assert.equal(await page.locator('[data-approval-id="approval-1"]').count(),0,
+ 'the run rejects a conflicting non-null session identity');
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,initialLists);
+ control.approvals=[{...producerEvent,session_id:'session-one'}];
+ await page.evaluate(item=>window.nullSessionApprovalStream.emit('approval',item),serialized);
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('heading',{name:'Approval details unavailable',exact:true}).waitFor();
+ await card.getByText('No decision was sent. Review this action in the native client.',{exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0);
+ assert.equal(await card.getAttribute('data-history-session'),'session-one');
+ assert.ok(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length>initialLists,
+ 'the event reconciles the tracked run approval list');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+ await page.locator('[data-view="chats"]').click();
+ await page.getByRole('button',{name:'First conversation',exact:true}).waitFor();
+ const afterRoute=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ await page.evaluate(item=>window.nullSessionApprovalStream.emit('approval',item),
+  {...serialized,id:'stale-route',request_id:'stale-route'});
+ await page.waitForTimeout(50);
+ assert.equal(await page.locator('[data-approval-id="stale-route"]').count(),0);
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,afterRoute);
+ control.user='other-owner';await page.evaluate(()=>app.start());
+ const afterOwner=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
+ await page.evaluate(item=>window.nullSessionApprovalStream.emit('approval',item),
+  {...serialized,id:'stale-owner',request_id:'stale-owner'});
+ await page.waitForTimeout(50);
+ assert.equal(await page.locator('[data-approval-id="stale-owner"]').count(),0);
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,afterOwner);
+}));
+
 test('held approval details cannot replace an ambiguous decision with sending',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
  const pending=approvalRecord(),sending=approvalRecord({status:'sending',executable:false,choices:[]});
  control.notificationTarget=approvalTarget;control.approvals=[pending];control.approvalDetail=sending;

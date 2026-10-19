@@ -1242,10 +1242,14 @@ for(const transport of ['events','polling'])test(`approval notification resumes 
  }finally{app.destroy();win.close();}
 });
 
-test('approval SSE without session fields preserves a held aliased decision acknowledgement',async()=>{
+test('serialized null-session approval SSE preserves a held aliased decision acknowledgement',async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
  const acknowledgement=deferred();let decisionPosts=0;
- const {session_id,run_session_id,...streamApproval}=approvalItem();
+ const {run_session_id,...streamApproval}=approvalItem();
+ streamApproval.session_id=null;streamApproval.status='pending';
+ const serializedApproval=JSON.parse(JSON.stringify(streamApproval));
+ assert.equal(serializedApproval.session_id,null,'the producer serializes an explicit null session');
+ assert.equal(Object.hasOwn(serializedApproval,'run_session_id'),false,'the producer does not add a run-session field');
  const approval={...approvalItem(),session_id:'s',run_session_id:'old-alias'};
  const run={id:'r',session_id:'old-alias',status:'waiting_for_approval',input:'Aliased request',created_at:1};
  class Events{
@@ -1275,17 +1279,83 @@ test('approval SSE without session fields preserves a held aliased decision ackn
   await waitFor(()=>card?.querySelector('button.primary'));
   card.querySelector('button.primary').click();
   await waitFor(()=>decisionPosts===1);
-  win.activeStream.emit('approval',{...streamApproval,id:'a',run_id:'r',request_id:'native-a'});
+  win.activeStream.emit('approval',{...serializedApproval,id:'a',run_id:'r',request_id:'native-a'});
   await waitFor(()=>calls.filter(call=>call.p==='/approvals').length>1);
   assert.equal(calls.filter(call=>call.p==='/approvals')[1].p,'/approvals');
   acknowledgement.resolve({status:'resolved'});
   await waitFor(()=>doc.querySelector('[data-approval-id="a"] h3')?.textContent==='Resolved');
   assert.equal(decisionPosts,1,'the held explicit decision is sent exactly once');
   assert.equal(doc.querySelector('[data-approval-id="a"] .inline-error')?.textContent,'');
-  win.activeStream.emit('approval',{...streamApproval,id:'a',run_id:'r',request_id:'native-a'});
+  assert.equal(doc.querySelector('[data-approval-id="a"]').dataset.historySession,'s',
+   'the approval card stays in the canonical chat while its tracked run keeps the source alias');
+  win.activeStream.emit('approval',{...serializedApproval,id:'a',run_id:'r',request_id:'native-a'});
   await new Promise(resolve=>setTimeout(resolve,30));
   assert.equal(doc.querySelector('[data-approval-id="a"] h3').textContent,'Resolved',
    'a replay cannot replace the acknowledged final card');
+ }finally{app.destroy();win.close();}
+});
+
+test('ordinary run accepts the producer null-session placeholder and rejects conflicting sessions',async()=>{
+ const calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
+ let owner='owner';
+ class Events{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ }
+ win.EventSource=Events;
+ const producerEvent={id:'placeholder',run_id:'r',request_id:'native-placeholder',session_id:null,
+  status:'details_unavailable',expires_at:null,choices:[],executable:false,
+  error:'Native approval details are unavailable after interruption; review in the native client'};
+ const serialized=JSON.parse(JSON.stringify(producerEvent));
+ assert.equal(serialized.session_id,null);
+ assert.equal(Object.hasOwn(serialized,'run_session_id'),false);
+ let approvals=[];
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Ordinary chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:approvals};
+  if(p==='/approvals/placeholder')return approvals[0];
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row[aria-label="Ordinary chat"]').click();
+  await waitFor(()=>win.activeStream);
+  const initialLists=calls.filter(path=>path==='/approvals').length;
+  win.activeStream.emit('approval',{...serialized,session_id:'foreign-session'});
+  await tick();
+  assert.equal(doc.querySelector('[data-approval-id="placeholder"]'),null,
+   'a conflicting non-null source session is rejected');
+  assert.equal(calls.filter(path=>path==='/approvals').length,initialLists);
+  approvals=[{...producerEvent,session_id:'s'}];
+  win.activeStream.emit('approval',serialized);
+  await waitFor(()=>doc.querySelector('[data-approval-id="placeholder"] h3'));
+  await waitFor(()=>calls.filter(path=>path==='/approvals').length>initialLists);
+  const card=doc.querySelector('[data-approval-id="placeholder"]');
+  assert.equal(card.querySelector('h3').textContent,'Approval details unavailable');
+  assert.match(card.textContent,/No decision was sent/);
+  assert.equal(card.querySelector('button'),null);
+  assert.equal(card.dataset.historySession,'s');
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,0);
+  const staleStream=win.activeStream;
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('.session-row[aria-label="Ordinary chat"]'));
+  const beforeRouteEvent=calls.filter(path=>path==='/approvals').length;
+  staleStream.emit('approval',{...serialized,id:'stale-route',request_id:'stale-route'});
+  await tick();
+  assert.equal(doc.querySelector('[data-approval-id="stale-route"]'),null,
+   'a null-session event from a left route is ignored');
+  assert.equal(calls.filter(path=>path==='/approvals').length,beforeRouteEvent);
+  owner='another-owner';await app.start();
+  const beforeOwnerEvent=calls.filter(path=>path==='/approvals').length;
+  staleStream.emit('approval',{...serialized,id:'stale-owner',request_id:'stale-owner'});
+  await tick();
+  assert.equal(doc.querySelector('[data-approval-id="stale-owner"]'),null,
+   'a tracked event from the prior owner is ignored');
+  assert.equal(calls.filter(path=>path==='/approvals').length,beforeOwnerEvent);
  }finally{app.destroy();win.close();}
 });
 

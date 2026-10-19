@@ -203,6 +203,177 @@ def test_request_and_session_approval_rows_are_hidden_without_changing_push_stor
         assert {row[0] for row in db.execute('SELECT status FROM outbox')} == {'sent'}
 
 
+def test_inbox_route_batches_approval_visibility_and_shares_snapshot(attention_env):
+    service, client, now, user = attention_env
+    owner = user['id']
+    dismissed_ids = set()
+    visible_ids = set()
+    with service._db() as db:
+        for index in range(72):
+            item_id = f'history-{index}'
+            session_id = 'chat-alias' if index % 3 == 0 else (
+                'cron-session' if index % 3 == 1 else None)
+            db.execute('INSERT INTO inbox VALUES(?,?,?,?,?,?,?,?)',
+                       (item_id, owner, f'approval:{index}', 'Approval required',
+                        'Review the action.', session_id, now[0] - 100 + index, 1))
+            db.execute('INSERT INTO approval_notifications VALUES(?,?,?,?,?)',
+                       (item_id, f'action-{index}', f'run-{index}',
+                        f'request-{index}', now[0] + 600))
+            if index % 10 == 0:
+                db.execute('INSERT INTO dismissed_inbox VALUES(?,?,?)',
+                           (item_id, owner, now[0]))
+                dismissed_ids.add(item_id)
+            else:
+                if session_id != 'chat-alias':
+                    visible_ids.add(item_id)
+        latest = 'newest-non-chat'
+        db.execute('INSERT INTO inbox VALUES(?,?,?,?,?,?,?,?)',
+                   (latest, owner, 'approval:newest', 'Approval required',
+                    'Review the newest action.', None, now[0] + 2, 1))
+        db.execute('INSERT INTO approval_notifications VALUES(?,?,?,?,?)',
+                   (latest, 'action-newest', 'run-newest', 'request-newest', now[0] + 600))
+    visible_ids.add(latest)
+
+    stats = {'batches': 0, 'auth_reads': 0, 'approval_queries': 0, 'lineage_reads': 0}
+
+    def batch_resolver(user_id, rows):
+        stats['batches'] += 1
+        stats['auth_reads'] += 1
+        stats['approval_queries'] += 1
+        assert user_id == owner
+        ids = {row['id'] for row in rows}
+        assert ids == {f'history-{index}' for index in range(72)} - dismissed_ids | {latest}
+        sessions = {row['session_id'] for row in rows}
+        stats['lineage_reads'] += len(sessions & {'chat-alias'})
+        return {
+            row['id']: {'kind': 'chat' if row['session_id'] == 'chat-alias' else 'inbox'}
+            for row in rows
+        }
+
+    service.approval_targets_resolver = batch_resolver
+    scheduled = service.ingest(owner, 'scheduled:batch', 'Scheduled update', 'Still visible',
+                               category='scheduled')
+    with service._db() as db:
+        db.execute('UPDATE inbox SET created_at=? WHERE id=?', (now[0] + 1, scheduled['id']))
+
+    page = client.get(BASE + '/inbox?limit=1').json()
+    assert [item['id'] for item in page['items']] == [latest]
+    assert page['read_count'] == len(visible_ids)
+    next_page = client.get(BASE + '/inbox?limit=1&offset=1').json()
+    assert [item['id'] for item in next_page['items']] == [scheduled['id']]
+    assert stats == {'batches': 2, 'auth_reads': 2, 'approval_queries': 2,
+                     'lineage_reads': 2}
+
+
+def test_assembled_inbox_batches_real_approval_proofs_and_repeated_aliases(tmp_path, monkeypatch):
+    import sqlite3
+    import time
+    from contextlib import contextmanager
+    from test_steering import environment
+
+    with environment(tmp_path) as (app, client, user, original_run, _):
+        journal = app.state.journal
+        service = app.state.notifications
+        journal.finish(user['id'], original_run, 'completed')
+        with sqlite3.connect(app.state.settings.profiles['default'] / 'state.db') as db:
+            db.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?)',
+                       ('cron-session', 'Synthetic scheduled session', 'cron', 3, 4, None))
+
+        retained = []
+        dismissed = set()
+        visible = []
+        for index in range(210):
+            is_chat = index % 2 == 1
+            session_id = 'old-alias' if is_chat else 'cron-session'
+            run, _ = journal.submit(user['id'], 'default', session_id, 'Synthetic request',
+                f'inbox-batch-{index}',
+                history_anchor=(lambda: {'session_id': 'old-alias',
+                    'canonical_session_id': 'wa-1', 'message_id': 1}) if is_chat else None)
+            journal.finish(user['id'], run['id'], 'completed')
+            approval_id = f'approval-{index}'
+            request_id = f'request-{index}'
+            with journal.connect() as db:
+                db.execute('INSERT INTO orchestration_approvals VALUES(?,?,?,?,?,?)',
+                           (approval_id, run['id'], request_id, '{}', 'resolved', time.time() + 600))
+            item_id = f'receipt-{index}'
+            retained.append(item_id)
+            with service._db() as db:
+                db.execute('INSERT INTO inbox VALUES(?,?,?,?,?,?,?,?)',
+                           (item_id, user['id'], f'approval:{run["id"]}', 'Approval required',
+                            'Synthetic action.', session_id, 100 + index, 1))
+                db.execute('INSERT INTO approval_notifications VALUES(?,?,?,?,?)',
+                           (item_id, approval_id, run['id'], request_id, time.time() + 600))
+                if index % 13 == 0:
+                    db.execute('INSERT INTO dismissed_inbox VALUES(?,?,?)',
+                               (item_id, user['id'], time.time()))
+                    dismissed.add(item_id)
+                elif not is_chat:
+                    visible.append((index, item_id))
+
+        scheduled = service.ingest(user['id'], 'scheduled:batch-route', 'Scheduled update',
+                                   'Preserved Inbox item.', category='scheduled')
+        with service._db() as db:
+            db.execute('UPDATE inbox SET created_at=99 WHERE id=?', (scheduled['id'],))
+
+        work = {'batches': 0, 'auth': 0, 'journal': 0, 'native': 0, 'lineage': 0}
+        resolver = service.approval_targets_resolver
+
+        def batch_resolver(owner, rows):
+            work['batches'] += 1
+            assert owner == user['id']
+            assert len(rows) == len(retained) - len(dismissed)
+            assert {row['id'] for row in rows} == set(retained) - dismissed
+            return resolver(owner, rows)
+
+        service.approval_targets_resolver = batch_resolver
+        original_transaction = app.state.auth.store.transaction
+
+        @contextmanager
+        def tracked_transaction(*args, **kwargs):
+            work['auth'] += 1
+            with original_transaction(*args, **kwargs) as db:
+                yield db
+
+        original_journal_connect = journal.connect
+
+        def tracked_journal_connect(*args, **kwargs):
+            work['journal'] += 1
+            return original_journal_connect(*args, **kwargs)
+
+        original_native_connect = app.state.catalog._connect
+
+        def tracked_native_connect(profile):
+            work['native'] += 1
+            return original_native_connect(profile)
+
+        original_lineage = app.state.background_delivery._lineage
+
+        def tracked_lineage(*args, **kwargs):
+            work['lineage'] += 1
+            return original_lineage(*args, **kwargs)
+
+        monkeypatch.setattr(app.state.auth.store, 'transaction', tracked_transaction)
+        monkeypatch.setattr(journal, 'connect', tracked_journal_connect)
+        monkeypatch.setattr(app.state.catalog, '_connect', tracked_native_connect)
+        monkeypatch.setattr(app.state.background_delivery, '_lineage', tracked_lineage)
+
+        page = client.get(BASE + '/inbox?limit=1').json()
+        visible.sort(reverse=True)
+        assert [item['id'] for item in page['items']] == [visible[0][1]]
+        assert page['read_count'] == len(visible)
+        next_page = client.get(BASE + '/inbox?limit=1&offset=1').json()
+        assert [item['id'] for item in next_page['items']] == [visible[1][1]]
+        assert work['batches'] == 2
+        assert work['auth'] <= 8
+        assert work['journal'] <= 12
+        assert work['native'] <= 16
+        assert work['lineage'] == 4
+        with service._db() as db:
+            assert db.execute('SELECT count(*) FROM inbox WHERE user_id=?', (user['id'],)).fetchone()[0] == 211
+            assert db.execute('SELECT count(*) FROM approval_notifications').fetchone()[0] == 210
+            assert db.execute('SELECT count(*) FROM dismissed_inbox').fetchone()[0] == len(dismissed)
+
+
 def test_notification_target_lookup_is_owner_scoped_and_binds_request_or_approval(attention_env):
     service, client, now, user = attention_env
     service.approval_validator = lambda *identity: True

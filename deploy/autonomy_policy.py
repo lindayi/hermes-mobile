@@ -221,10 +221,10 @@ SOURCE_FINGERPRINTS = {
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
     'backend/model_controls.py': 'fee5b5b6130e73d5fdce0a79362c09f5ace7621e8b426b5fb1b574cd3cd2bbef',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
-    'backend/notifications.py': 'e18c0c656ea15681f92debdffe3578ac629a6f128bd299babad979a68e3da09e',
+    'backend/notifications.py': 'a56b13b0c78a9dc067a7cc252753a7c3b822df5cc9fc2aa8f2321859be08726e',
     'backend/runs.py': 'be188d9897ff925fc55677881b380bba5f97f3c5d6b3ae3d6e7faca72c3d8464',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': '9680845f1fbf52c37ef9aba600a5cc1323927c91a0455e106b911c63475d2d9d',
+    'backend/app.py': '393be5e3028c30635e573a26d3e22f52ee44bcb22604312d2d8be10620b62307',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
