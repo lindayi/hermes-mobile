@@ -91,6 +91,13 @@ def test_owned_cron_approval_keeps_inbox_destination_and_projection(tmp_path):
         assert listed['cron-action']['session_id']=='wa-1'
         assert listed['cron-action']['inbox_visible'] is True
         assert listed['chat-action']['inbox_visible'] is False
+        for request_id in ('cron-action','chat-action'):
+            item=listed[request_id]
+            detail=client.get(BASE+f"/approvals/{item['id']}")
+            assert detail.status_code==200
+            assert detail.json()==item
+            assert item['command']==f"echo synthetic {'cron' if request_id=='cron-action' else 'chat'} approval"
+            assert item['executable'] is True and item['choices']==['once','deny']
         assert notification.flush()['sent']==2
         assert len(sent)==2
         with notification._db() as db:
@@ -186,6 +193,9 @@ def test_approval_target_resolves_absent_run_alias_through_verified_lineage(tmp_
         details=client.get(BASE+f"/approvals/{approval['id']}").json()
         assert details['session_id']=='wa-1' and details['run_session_id']=='old-alias'
         assert details['status']=='pending'
+        listing=client.get(BASE+'/approvals').json()['items'][0]
+        assert listing==details
+        assert listing['command']=='echo alias'
 
 
 def test_pending_list_batches_real_proofs_and_repeated_sessions(tmp_path, monkeypatch):
@@ -277,7 +287,7 @@ def test_pending_list_batches_real_proofs_and_repeated_sessions(tmp_path, monkey
         response=client.get(BASE+'/approvals')
         assert response.status_code==200
         items=response.json()['items']
-        assert len(items)==215
+        assert len(items)==210
         for group in range(3):
             selected=[item for item in items[:210] if item['id'].startswith(f'pending-{group}-')]
             assert len(selected)==70
@@ -285,7 +295,8 @@ def test_pending_list_batches_real_proofs_and_repeated_sessions(tmp_path, monkey
             assert all(item['inbox_visible'] is (group==2) for item in selected)
             if group!=2:
                 assert all(item['run_session_id']==('old-alias' if group==1 else 'wa-1') for item in selected)
-        assert all(item['inbox_visible'] is False and 'run_session_id' not in item for item in items[210:])
+        assert not any(item in items for item in observed['invalid'])
+        assert all(item['request_id']!='wrong-request' and item['session_id'] is not None for item in items)
         assert work['auth']<=4, work
         assert work['proofs']==3, work
         assert work['journal']<=10, work
@@ -298,13 +309,18 @@ def test_pending_list_batches_real_proofs_and_repeated_sessions(tmp_path, monkey
         assert work['lineage']-before['lineage']==3,'classification must be request-scoped, not cached'
 
 
+@pytest.mark.parametrize('endpoint', ['list','detail'])
 @pytest.mark.parametrize('change', ['role','profile','status'])
-def test_pending_list_revalidates_authorization_after_classification(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize('stage', ['classification','runtime'])
+def test_pending_list_revalidates_authorization_after_classification(tmp_path, monkeypatch, change, endpoint, stage):
     with environment(tmp_path) as (app, client, user, rid, _):
         runtime=app.state.orchestrator
         runtime._approval(user,runtime.get(user,rid),{
             'event':'approval.request','request_id':'auth-change','run_id':'native-run','command':'echo synthetic'})
-        original=app.state.background_delivery._lineage
+        approval_id=runtime.approvals(user)['items'][0]['id']
+        target,name=(app.state.background_delivery,'_lineage') if stage=='classification' else (
+            runtime,'approval' if endpoint=='detail' else 'approvals')
+        original=getattr(target,name)
 
         def lineage(*args,**kwargs):
             result=original(*args,**kwargs)
@@ -313,12 +329,84 @@ def test_pending_list_revalidates_authorization_after_classification(tmp_path, m
                 db.execute(f'UPDATE users SET {change}=? WHERE id=?',(value,user['id']))
             return result
 
-        monkeypatch.setattr(app.state.background_delivery,'_lineage',lineage)
-        response=client.get(BASE+'/approvals')
+        monkeypatch.setattr(target,name,lineage)
+        response=client.get(BASE+'/approvals'+(f'/{approval_id}' if endpoint=='detail' else ''))
+        assert response.status_code==(404 if endpoint=='detail' else 200)
+        if endpoint=='list':
+            assert response.json()=={'items':[]}
+        assert 'echo synthetic' not in response.text
+        assert 'executable' not in response.text and 'choices' not in response.text
+        assert 'request_id' not in response.text
+
+
+@pytest.mark.parametrize('endpoint', ['list','detail'])
+@pytest.mark.parametrize('invalid', ['request','approval','run','null-session','foreign-session','missing-native','ambiguous-alias'])
+def test_approval_reads_omit_unverified_action_details(tmp_path, monkeypatch, endpoint, invalid):
+    with environment(tmp_path) as (app, client, user, rid, _):
+        runtime=app.state.orchestrator
+        runtime.gateway.execution_ready=True
+        runtime.gateway.action_approvals_ready=True
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'bound-action','run_id':'native-run',
+            'command':'echo private synthetic action','target':'private synthetic target'})
+        item=runtime.approvals(user)['items'][0]
+        assert item['executable'] is True and item['choices']==['once','deny']
+        changed={**item}
+        if invalid in ('request','approval','run','null-session','foreign-session'):
+            field,value={
+                'request':('request_id','wrong-request'),'approval':('id','wrong-approval'),
+                'run':('run_id','foreign-run'),'null-session':('session_id',None),
+                'foreign-session':('session_id','foreign-session')}[invalid]
+            changed[field]=value
+        else:
+            with sqlite3.connect(tmp_path/'home'/'state.db') as db:
+                db.execute("DELETE FROM sessions WHERE id='wa-1'")
+            if invalid=='ambiguous-alias':
+                other,_=app.state.journal.submit(user['id'],'default','other-alias','Synthetic','other-alias')
+                with app.state.journal.connect() as db, db:
+                    db.execute('INSERT INTO run_history_anchors(run_id,session_id,canonical_session_id,message_id) VALUES(?,?,?,?)',
+                               (rid,'wa-1','first-tip',1))
+                    db.execute('INSERT INTO run_history_anchors(run_id,session_id,canonical_session_id,message_id) VALUES(?,?,?,?)',
+                               (other['id'],'wa-1','second-tip',1))
+        monkeypatch.setattr(runtime,'approvals',lambda owner:{'items':[changed]})
+        monkeypatch.setattr(runtime,'approval',lambda owner,aid:changed)
+        response=client.get(BASE+'/approvals'+(f"/{item['id']}" if endpoint=='detail' else ''))
+        assert response.status_code==(404 if endpoint=='detail' else 200)
+        if endpoint=='list':
+            assert response.json()=={'items':[]}
+        for text in ('private synthetic','executable','choices','request_id'):
+            assert text not in response.text
+
+
+def test_assembled_approval_detail_work_runs_off_event_loop(tmp_path, monkeypatch):
+    import asyncio
+
+    with environment(tmp_path) as (app, client, user, rid, _):
+        runtime=app.state.orchestrator
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'threaded-detail','run_id':'native-run',
+            'command':'echo threaded detail'})
+        approval_id=runtime.approvals(user)['items'][0]['id']
+        observed=[]
+        for target,name in [(runtime,'approval'),(app.state.journal,'connect'),
+                            (app.state.background_delivery,'_lineage')]:
+            original=getattr(target,name)
+
+            def probe(*args,_original=original,_name=name,**kwargs):
+                try:
+                    asyncio.get_running_loop()
+                    observed.append((_name,True))
+                except RuntimeError:
+                    observed.append((_name,False))
+                return _original(*args,**kwargs)
+
+            monkeypatch.setattr(target,name,probe)
+        response=client.get(BASE+f'/approvals/{approval_id}')
         assert response.status_code==200
-        assert len(response.json()['items'])==1
-        assert response.json()['items'][0]['inbox_visible'] is False
-        assert 'run_session_id' not in response.json()['items'][0]
+        assert response.json()['command']=='echo threaded detail'
+        assert {'approval','connect','_lineage'}<={name for name,_ in observed}
+        assert all(not on_loop for _,on_loop in observed),observed
+        assert client.get(BASE+'/approvals/not-owned').status_code==404
 
 
 @pytest.mark.parametrize('final_status', ['expired','resolved','unavailable'])

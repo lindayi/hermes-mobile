@@ -1461,8 +1461,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       },
       finish(runId){
         approvalRevision++;
-        for(const [key,item] of approvalPending)if(item.run_id===runId){
-          const finalItem={...item,status:'unavailable',executable:false,choices:[]};
+        for(const [key,item] of approvalItems)if(item.run_id===runId
+            && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
+          const finalItem={...item,status:'unavailable',executable:false,choices:[],
+            ...(approvalDetailsUnavailable(item)?{details_unavailable:false,error:''}:{})};
           rememberHandledApproval(key,finalItem,'unavailable');
           approvalPending.delete(key);approvalItems.set(key,finalItem);approvalFinals.set(key,'unavailable');
           const actionState=approvalActionStates.get(key);

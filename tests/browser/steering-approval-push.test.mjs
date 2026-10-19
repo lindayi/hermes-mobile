@@ -1295,6 +1295,57 @@ test('serialized null-session approval SSE preserves a held aliased decision ack
  }finally{app.destroy();win.close();}
 });
 
+for(const status of ['completed','cancelled'])test(`terminal ${status} retires placeholder and pending sibling without replay`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const pending={...approvalItem(),status:'pending'};
+ const placeholder={...pending,id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
+  details_unavailable:true,executable:false,choices:[],expires_at:null,
+  error:'Native approval details are unavailable after interruption; review in the native client'};
+ const other={...placeholder,id:'other',request_id:'other-request',run_id:'other-run'};
+ const final={...pending,id:'final',request_id:'final-request',status:'resolved',expires_at:1,executable:false,choices:[]};
+ let approvals=[placeholder,pending,other,final];
+ win.EventSource=class{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ };
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:approvals};
+  if(p.startsWith('/approvals/'))return approvals.find(item=>item.id===p.split('/').at(-1));
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"] button.primary') && win.activeStream);
+  const card=id=>doc.querySelector(`[data-approval-id="${id}"]`);
+  assert.equal(card('placeholder').querySelector('h3').textContent,'Approval details unavailable');
+  assert.match(card('placeholder').textContent,/native client/);
+  assert.equal(card('final').querySelector('h3').textContent,'Resolved');
+  const stream=win.activeStream;
+  stream.emit('status',{status});
+  await waitFor(()=>card('a').querySelector('h3').textContent==='Approval unavailable');
+  assert.equal(card('placeholder').querySelector('h3').textContent,'Approval unavailable');
+  assert.ok([...card('placeholder').querySelectorAll('p')].filter(node=>!node.hidden)
+   .every(node=>!/native client|No decision was sent/.test(node.textContent)));
+  assert.equal(card('placeholder').querySelector('button'),null);
+  assert.equal(card('other').querySelector('h3').textContent,'Approval details unavailable');
+  assert.equal(card('final').querySelector('h3').textContent,'Resolved');
+  approvals=[{...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']},pending,other];
+  stream.emit('approval',approvals[0]);
+  win.dispatchEvent(new win.Event('focus'));await tick();await tick();
+  assert.equal(card('placeholder').querySelector('h3').textContent,'Approval unavailable');
+  assert.equal(card('a').querySelector('h3').textContent,'Approval unavailable');
+  assert.equal(card('placeholder').querySelector('button'),null);
+  assert.equal(card('a').querySelector('button'),null);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
 for(const sourceSession of ['s','old-alias'])test(`focus list recovers placeholder without an upgrade event (${sourceSession})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
  const pending={...approvalItem(),status:'pending',run_session_id:sourceSession};

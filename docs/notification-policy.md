@@ -72,9 +72,14 @@ of Inbox; positively classified cron/test sessions retain their Inbox card and
 explicit decisions. Missing or ambiguous bindings remain unavailable, not an
 Inbox fallback based only on category or session ID.
 
-The pending-approval list uses request-scoped journal proof batches and one native
-classification per source session, then revalidates current authorization. Its
-synchronous database work runs in the request threadpool, never on the async event
+The pending-approval list and detail require positive current authority before
+returning action details or decision capabilities. Omit individually unverified
+list items and reject unverified details, including changed role/profile/status;
+an Inbox visibility flag is not an authorization denial. Keep positively proven
+non-chat approvals, never infer that exception from failed proof.
+The list uses request-scoped journal proof batches and one native classification
+per source session, then revalidates current authorization. Both list and detail
+synchronous database work run in the request threadpool, never on the async event
 loop; no authorization or classification cache survives the request.
 
 Push preferences remain independent of Inbox visibility and retention. Visibility

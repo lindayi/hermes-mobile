@@ -812,6 +812,60 @@ test('generated pending-list card loses controls after its held detail returns d
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 
+test('generated rejected approval proof exposes no action details or decision controls',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ control.notificationTarget=approvalTarget;
+ control.approvals=[];
+ control.approvalDetail=approvalRecord({command:'private synthetic rejected command',target:'private synthetic target'});
+ control.approvalDetailStatus=404;
+ await mount(page,'?notification=notice-target');
+ await page.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(await page.locator('[data-approval-id]').count(),0);
+ assert.equal(await page.getByRole('region',{name:'Approval action details'}).count(),0);
+ assert.equal(await page.getByRole('button',{name:/Approve once|Deny/}).count(),0);
+ assert.doesNotMatch(await page.locator('body').innerText(),/private synthetic/);
+ const response=page.waitForResponse(res=>res.url().endsWith('/approvals'));
+ await page.evaluate(()=>dispatchEvent(new Event('focus')));await response;
+ assert.equal(await page.locator('[data-approval-id]').count(),0);
+ assert.equal(await page.getByRole('button',{name:/Approve once|Deny/}).count(),0);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+}));
+
+for(const status of ['completed','cancelled'])test(`generated terminal ${status} retires placeholder and pending sibling without replay`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+ const pending=approvalRecord();
+ const placeholder=approvalRecord({id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
+  details_unavailable:true,executable:false,choices:[],expires_at:null,
+  error:'Native approval details are unavailable after interruption; review in the native client'});
+ const other={...placeholder,id:'other',request_id:'other-request',run_id:'other-run'};
+ const final=approvalRecord({id:'final',request_id:'final-request',status:'resolved',expires_at:1,executable:false,choices:[]});
+ control.approvals=[placeholder,pending,other,final];
+ control.approvalDetails=Object.fromEntries(control.approvals.map(item=>[item.id,item]));
+ control.activeRun={id:pending.run_id,session_id:pending.session_id,status:'waiting_for_approval'};
+ await mount(page);await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const card=id=>page.locator(`[data-approval-id="${id}"]`);
+ await card(pending.id).getByRole('button',{name:'Approve once',exact:true}).waitFor();
+ await card('placeholder').getByRole('heading',{name:'Approval details unavailable',exact:true}).waitFor();
+ await card('final').getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ const deadline=Date.now()+2500;
+ while(!control.runEventStreams.length&&Date.now()<deadline)await page.waitForTimeout(10);
+ assert.ok(control.runEventStreams.length);
+ emitRunEvent('status',{status},`terminal-${status}`);
+ await card(pending.id).getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ await card('placeholder').getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
+ assert.equal(await card('placeholder').getByText(/native client|No decision was sent/).filter({visible:true}).count(),0);
+ assert.equal(await card('placeholder').getByRole('button').count(),0);
+ assert.equal(await card('other').getByRole('heading').innerText(),'Approval details unavailable');
+ assert.equal(await card('final').getByRole('heading').innerText(),'Resolved');
+ control.approvals=[{...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']},pending,other];
+ emitRunEvent('approval',control.approvals[0],'late-pending');
+ const refreshed=page.waitForResponse(response=>response.url().endsWith('/approvals'));
+ await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await refreshed;await page.waitForTimeout(50);
+ assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval unavailable');
+ assert.equal(await card(pending.id).getByRole('heading').innerText(),'Approval unavailable');
+ assert.equal(await card('placeholder').getByRole('button').count(),0);
+ assert.equal(await card(pending.id).getByRole('button').count(),0);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+}));
+
 test('generated terminal run finish wins over held pending detail but fresh final detail replaces it',{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
  const pending=approvalRecord();
  control.notificationTarget=approvalTarget;control.approvals=[pending];

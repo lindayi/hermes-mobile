@@ -320,12 +320,13 @@ def create_app(settings=None, *, gateway_client=None):
             return {'kind':'inbox'}
         return None
 
-    def approval_notification_bindings(user_id, approvals):
+    def approval_notification_bindings(user_id, approvals, *, expected_user=None):
         from contextlib import closing
         if not approvals:
             return {}
         user=notification_user(user_id)
-        if not user:
+        if (not user or expected_user is not None and
+                any(user[key]!=expected_user[key] for key in ('role','profile','status'))):
             return {}
         verified=[]
         with closing(journal.connect()) as db:
@@ -487,14 +488,14 @@ def create_app(settings=None, *, gateway_client=None):
     notifications.approval_validator=valid_approval
 
     def approval_chat_binding(user,item):
-        source=item.get('session_id')
-        binding=approval_notification_binding(user['id'],item['run_id'],item['request_id'],
-                                              item['id'],source)
-        return approval_chat_view(item,binding)
+        bindings=approval_notification_bindings(user['id'],[{
+            'id':'detail','run_id':item['run_id'],'request_id':item['request_id'],
+            'approval_id':item['id'],'session_id':item.get('session_id')}],expected_user=user)
+        return approval_chat_view(item,bindings.get('detail'))
 
     def approval_chat_view(item,binding):
         if not binding:
-            return {**item,'inbox_visible':False}
+            raise KeyError(item['id'])
         if binding['kind']=='chat':
             return {**item,'session_id':binding['session_id'],
                     'run_session_id':binding['run_session_id'],'inbox_visible':False}
@@ -977,12 +978,12 @@ def create_app(settings=None, *, gateway_client=None):
         requested=[{'id':str(index),'run_id':item['run_id'],'request_id':item['request_id'],
                     'approval_id':item['id'],'session_id':item.get('session_id')}
                    for index,item in enumerate(result['items'])]
-        bindings=approval_notification_bindings(user['id'],requested)
+        bindings=approval_notification_bindings(user['id'],requested,expected_user=user)
         return {'items':[approval_chat_view(item,bindings.get(str(index)))
-                         for index,item in enumerate(result['items'])]}
+                         for index,item in enumerate(result['items']) if str(index) in bindings]}
 
     @app.get(BASE+'/approvals/{aid}')
-    async def approval(aid:str,user=Depends(ready_user)):
+    def approval(aid:str,user=Depends(ready_user)):
         try:
             return approval_chat_binding(user,runtime_for(user).approval(user,aid))
         except KeyError:
