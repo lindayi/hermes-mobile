@@ -970,7 +970,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let oldestOffset=result.offset ?? 0,loadingOlder=null;
     const turnHint=h('p',{class:'caption turn-continuation',hidden:!result.turn_boundary?.truncated},'This turn continues earlier. Load older messages to see the rest.');
     messages.prepend(turnHint);
-    let more,renderApprovals=()=>{};
+    let more,renderApprovals=()=>{},approvalHistoryReader=null;
     const loadOlder=()=>{
       if(loadingOlder)return loadingOlder;
       if(!current() || oldestOffset<=0)return Promise.resolve(false);
@@ -978,6 +978,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const request=(async()=>{
         const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
         if(!current())return false;
+        if(approvalHistoryReader)
+          approvalHistoryReader.moved ||= doc.activeElement!==approvalHistoryReader.focus
+            || messages.scrollTop!==approvalHistoryReader.top;
         const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
         const viewport=messages.getBoundingClientRect(),readerAnchor=[...messages.children].find(node=>{
           const rect=node.getBoundingClientRect();
@@ -1001,6 +1004,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         messages.scrollTop=readerAnchor?.isConnected
           ?messages.scrollTop+readerAnchor.getBoundingClientRect().top-readerTop
           :previousTop+messages.scrollHeight-previousHeight;
+        if(approvalHistoryReader){
+          approvalHistoryReader.focus=doc.activeElement;approvalHistoryReader.top=messages.scrollTop;
+        }
         return Boolean(page.items?.length);
       })();
       const pending=request.finally(()=>{if(loadingOlder===pending)loadingOlder=null;});
@@ -1353,8 +1359,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           || ['error','missing','limited'].includes(approvalHistoryOutcome))return Promise.resolve();
       // One bounded walk serves all cards in this chat, not one walk per approval.
       approvalHistoryLoading=Promise.resolve().then(async()=>{
-        const previousOffset=oldestOffset;
+        const previousOffset=oldestOffset,
+          target=notificationTarget?.kind==='approval'
+            ?unplacedApprovalItems().find(item=>item.id===notificationTarget.approval_id):null;
         approvalHistoryOutcome='loading';showApprovalHistory();
+        if(target)approvalHistoryReader={focus:doc.activeElement,top:messages.scrollTop,moved:false};
         try{
           while(current() && unplacedApprovalItems().length && oldestOffset>0 && approvalHistoryPages<100){
             const previousOffset=oldestOffset;
@@ -1375,10 +1384,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           approvalHistoryLoading=null;
           if(current()){
             showApprovalHistory();
-            if(oldestOffset<previousOffset && notificationTarget?.kind==='approval'){
+            if(oldestOffset<previousOffset && target && approvalAnchor(target)?.isConnected
+                && !approvalHistoryReader?.moved){
               approvalTargetFocusedCard=false;focusApprovalTarget();
             }
           }
+          approvalHistoryReader=null;
         }
       });
       return approvalHistoryLoading;

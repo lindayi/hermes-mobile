@@ -956,6 +956,7 @@ class Orchestrator:
     def approval(self, user, approval_id):
         if user['profile'] != self.profile:
             raise KeyError(approval_id)
+        read_at = time.time()
         with closing(self.journal.connect()) as c:
             row = c.execute("""SELECT a.*,r.user_id,r.profile,r.session_id,r.status AS run_status
                 FROM orchestration_approvals a JOIN runs r ON a.run_id=r.id
@@ -968,7 +969,7 @@ class Orchestrator:
         if status == 'invalid':
             status = 'unavailable'
         elif (status == 'pending' and type(row['expires_at']) in (int, float)
-                and row['expires_at'] <= time.time()):
+                and row['expires_at'] <= read_at):
             status = 'expired'
         elif status == 'pending' and row['run_status'] == 'unknown':
             status = 'details_unavailable'

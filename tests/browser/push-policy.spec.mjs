@@ -130,6 +130,98 @@ const approvalHistory=()=>({
  pages:{0:{items:[{id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'}],offset:0,total:11}},
  runs:{}
 });
+test('generated read-time pending detail past deadline preserves held explicit decision ACK',{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const item=approvalRecord();
+ control.notificationTarget=approvalTarget;control.sessionApprovals=[item];control.approvalDetail=item;
+ let release;control.decisionHold=new Promise(resolve=>release=resolve);
+ await mount(page,'?notification=notice-target');await holdPasskey(page);
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once',exact:true}).click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ const posted=page.waitForRequest(request=>new URL(request.url()).pathname.endsWith('/approval-1/decision'));
+ await page.evaluate(()=>finishPasskey());await posted;
+ control.sessionApprovals=[];control.approvalDetail={...item,expires_at:Date.now()/1000-1};
+ const detail=responseBatch(page,'/approvals/approval-1',1);
+ await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await detail;
+ await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+ assert.equal(await card.getByRole('heading').innerText(),'Decision pending');
+ assert.equal(await card.locator('button:enabled').count(),0);
+ release();await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+ assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,1);
+}));
+for(const mode of ['placed-away','offpage-away','offpage-follow','retry-away','retry-follow','route','owner'])
+test(`generated held approval history preserves notification reader (${mode})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const offpage=mode!=='placed-away',retry=mode.startsWith('retry'),item=approvalRecord(),
+  sibling=approvalRecord({id:'approval-2',run_id:'older-run',request_id:'request-2'});
+ control.notificationTarget=approvalTarget;control.sessionApprovals=[item,sibling];
+ control.approvalDetails={'approval-1':item,'approval-2':sibling};
+ const rows=Array.from({length:24},(_,index)=>({id:20+index,role:index%2?'assistant':'user',
+  content:`Latest synthetic message ${index}. `.repeat(12),run_id:!offpage&&index===0?'approval-run':'newer-run',session_id:'session-one'}));
+ control.realHistory={latest:{items:rows,offset:10,total:34},pages:{0:{items:[
+  {id:1,role:'user',content:'Older request',run_id:'older-run',session_id:'session-one'},
+  ...(offpage?[{id:2,role:'user',content:'Target request',run_id:'approval-run',session_id:'session-one'}]:[])
+ ],offset:0,total:34}},runs:{}};
+ control.requestReadPath='history';
+ if(retry)control.requestReadErrors=1;
+ let release;control.requestReadHold=retry?null:new Promise(resolve=>release=resolve);
+ const requested=()=>page.waitForRequest(request=>new URL(request.url()).pathname.endsWith('/sessions/session-one/messages')
+  && new URL(request.url()).searchParams.has('offset'));
+ const first=requested();await mount(page,'?notification=notice-target');await first;
+ const card=page.locator('[data-approval-id="approval-1"]'),messages=page.locator('.messages'),
+  composer=page.getByRole('textbox',{name:'Message Hermes'});
+ await page.waitForFunction(()=>document.activeElement?.dataset.approvalId==='approval-1');
+ if(retry){
+  const button=page.getByRole('button',{name:'Retry approval history',exact:true});
+  await button.waitFor();control.requestReadHold=new Promise(resolve=>release=resolve);
+  const next=requested();await button.click();await next;
+ }
+ if(mode.endsWith('away')){
+  await composer.fill('Keep this draft');await composer.focus();
+  await composer.evaluate(node=>node.setSelectionRange(2,7));
+  await messages.evaluate(node=>{node.scrollTop=350;});
+ }
+ if(mode==='route'){
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.getByRole('button',{name:'Second conversation',exact:true}).click();
+  await composer.focus();
+ }
+ if(mode==='owner'){
+  control.user='other-owner';
+  await page.evaluate(async()=>{history.replaceState({},'','/hermes/');await app.start();});
+ }
+ const reader=mode.endsWith('away')?await messages.evaluate(node=>{
+  const box=node.getBoundingClientRect(),anchor=[...node.children].find(child=>{
+   const rect=child.getBoundingClientRect();return !child.hidden&&rect.bottom>box.top&&rect.top<box.bottom;
+  });window.readerAnchor=anchor;
+  return {top:anchor.getBoundingClientRect().top};
+ }):null;
+ const response=responseBatch(page,'/sessions/session-one/messages',1);
+ control.requestReadHold=null;release();await response;
+ if(mode==='route'||mode==='owner'){
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await card.count(),0);
+  if(mode==='route')assert.equal(await composer.evaluate(node=>document.activeElement===node),true);
+ }else{
+  await page.waitForFunction(()=>document.querySelector('[data-approval-id="approval-2"]')?.previousElementSibling?.dataset.historyRun==='older-run');
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
+  if(reader){
+   assert.equal(await composer.evaluate(node=>document.activeElement===node),true,'history preserves composer focus');
+   assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[2,7]);
+   assert.ok(Math.abs(await page.evaluate(()=>readerAnchor.getBoundingClientRect().top)-reader.top)<=1,
+    'the same visible reader anchor stays in place');
+  }else{
+   assert.equal(await card.evaluate(node=>document.activeElement===node),true);
+   assert.equal(await card.evaluate(node=>{
+    const rect=node.getBoundingClientRect(),view=node.closest('.messages').getBoundingClientRect();
+    return rect.top>=view.top&&rect.bottom<=view.bottom;
+   }),true,'the followed target is visible at its chronological anchor');
+  }
+ }
+ assert.equal(calls.filter(call=>call.p.endsWith('/messages')&&new URLSearchParams(call.query).has('offset')).length,retry?2:1);
+ assert.equal(calls.some(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')),false);
+}));
 for(const runSession of ['session-one','old-alias'])for(const mode of ['pending','sending','unknown'])
 test(`generated ordinary paginated approval reentry (${runSession}, ${mode})`,{timeout:30000},()=>fixture(async({page,control,calls})=>{
  const pending=approvalRecord({run_session_id:runSession}),

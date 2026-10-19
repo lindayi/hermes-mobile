@@ -1,14 +1,96 @@
 """Approval ingress -> real journal intent -> real owned Inbox/outbox."""
+import asyncio
 import json
 import sqlite3
 import time
+import threading
 
+import httpx
 from fastapi import HTTPException
 import pytest
 
 from test_steering import environment
 from test_auth import BASE
 from test_notifications import subscription
+
+
+def test_detail_pending_snapshot_cannot_expire_a_concurrently_claimed_decision(tmp_path, monkeypatch):
+    def handler(request):
+        if request.url.path == '/v1/capabilities':
+            return httpx.Response(200, json={'features': {'run_approval_request_id': True}})
+
+    with environment(tmp_path, handler) as (app, client, user, rid, _):
+        runtime = app.state.orchestrator
+        runtime.gateway.execution_ready = True
+        runtime.gateway.action_approvals_ready = True
+        runtime._approval(user, runtime.get(user, rid), {
+            'event': 'approval.request', 'request_id': 'interleaved-action',
+            'run_id': 'native-run', 'command': 'echo synthetic'})
+        item = runtime.approvals(user)['items'][0]
+        clock = [item['expires_at'] - 1]
+        monkeypatch.setattr('backend.orchestration.time.time', lambda: clock[0])
+        claimed = threading.Event()
+        release = client.portal.call(asyncio.Event)
+        sent = []
+
+        async def approve(run_id, request_id, choice):
+            sent.append((run_id, request_id, choice))
+            claimed.set()
+            await release.wait()
+            return {'run_id': run_id, 'request_id': request_id, 'choice': choice, 'resolved': 1}
+
+        monkeypatch.setattr(runtime.gateway, 'approve', approve)
+        original_get = runtime.get
+        decision = []
+
+        def interleave(owner, run_id):
+            if not decision:
+                # The detail SELECT has completed; decide() still sees the pre-deadline clock.
+                decision.append(None)
+                decision[0] = client.portal.start_task_soon(runtime.decide, user, item['id'], 'once')
+                assert claimed.wait(5), 'the real decision must claim before crossing the deadline'
+                clock[0] = item['expires_at'] + 1
+            return original_get(owner, run_id)
+
+        monkeypatch.setattr(runtime, 'get', interleave)
+        try:
+            response = client.get(BASE + f"/approvals/{item['id']}")
+            assert response.status_code == 200
+            with app.state.journal.connect() as db:
+                assert db.execute('SELECT status FROM orchestration_approvals WHERE id=?',
+                                  (item['id'],)).fetchone()[0] == 'sending'
+            assert response.json()['status'] == 'pending', 'the earlier snapshot is not final expiry'
+            assert response.json()['run_id'] == rid
+            assert response.json()['request_id'] == 'interleaved-action'
+            assert client.get(BASE + f"/approvals/{item['id']}").json()['status'] == 'sending'
+        finally:
+            client.portal.call(release.set)
+            if decision and decision[0]:
+                assert decision[0].result(5)['status'] == 'resolved'
+        assert sent == [('native-run', 'interleaved-action', 'once')]
+        assert client.get(BASE + f"/approvals/{item['id']}").json()['status'] == 'resolved'
+
+
+@pytest.mark.parametrize('status', ['pending', 'sending', 'unknown', 'resolved'])
+def test_detail_read_time_expiry_preserves_nonpending_states(tmp_path, monkeypatch, status):
+    with environment(tmp_path) as (app, client, user, rid, _):
+        runtime = app.state.orchestrator
+        runtime._approval(user, runtime.get(user, rid), {
+            'event': 'approval.request', 'request_id': 'expired-action',
+            'run_id': 'native-run', 'command': 'echo synthetic'})
+        item = runtime.approvals(user)['items'][0]
+        with app.state.journal.connect() as db, db:
+            db.execute('UPDATE orchestration_approvals SET status=?,expires_at=? WHERE id=?',
+                       (status, time.time() - 1, item['id']))
+        detail = client.get(BASE + f"/approvals/{item['id']}").json()
+        assert detail['status'] == ('expired' if status == 'pending' else status)
+        assert detail['choices'] == [] and detail['executable'] is False
+        for foreign in [dict(user, id='foreign'), dict(user, profile='foreign')]:
+            with pytest.raises(KeyError):
+                runtime.approval(foreign, item['id'])
+        with app.state.journal.connect() as db, db:
+            db.execute("UPDATE orchestration_approvals SET run_id='missing-run' WHERE id=?", (item['id'],))
+        assert client.get(BASE + f"/approvals/{item['id']}").status_code == 404
 
 
 def test_new_approval_creates_owned_deduplicated_notification(tmp_path):

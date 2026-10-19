@@ -103,6 +103,13 @@ labelled group outside the request timeline. Missing/deleted history and exhaust
 bounds do not resolve approvals. History errors retain discovery and offer an
 explicit read-only retry. History recovery preserves reader position and focus,
 and late responses cannot change another route or owner.
+Notification history recovery reveals a relocated target only while the reader
+still follows it. Loading an older sibling must not refocus an already placed
+target. Composer focus, selection and reader position survive held history reads.
+Detail expiry uses the pending snapshot's read-time clock, not a later clock
+after authorization work; a concurrent pre-deadline decision claim must not be
+projected as final expiry. Decision-time expiry and atomic single-use claims
+remain unchanged.
 Retained rejections show non-actionable revalidation, never Decision pending merely
 because fresh authority is required. The unknown-run `details_unavailable` projection
 stays recoverable through bounded exact-detail refreshes, including after failed
