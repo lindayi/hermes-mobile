@@ -27639,6 +27639,7 @@ def test_pre_send_superseded_repair_can_use_next_attempt_but_uncertain_cannot(
     coordinator = Coordinator(api, store)
     plan = coordinator._build_plan(apply=False)
     first = plan["pull_requests"][0]["repair"]
+    first = _bind_test_source_anchor(store, first)
     assert store.claim_action(first["key"], first)
     store.update_action(first["key"], "superseded")
 
@@ -27655,6 +27656,7 @@ def test_pre_send_superseded_repair_can_use_next_attempt_but_uncertain_cannot(
     blocked_coordinator = Coordinator(blocked_api, blocked_store)
     plan = blocked_coordinator._build_plan(apply=False)
     first = plan["pull_requests"][0]["repair"]
+    first = _bind_test_source_anchor(blocked_store, first)
     assert blocked_store.claim_action(first["key"], first)
     blocked_store.update_action(first["key"], "uncertain")
 
