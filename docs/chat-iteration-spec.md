@@ -22,4 +22,6 @@ Cold chat discovery uses an authenticated session-scoped list, with authorizatio
 
 Completion or cancellation retires details-unavailable placeholders alongside pending siblings for that exact run. Remove placeholder-only native-client guidance and reject late pending replay. Preserve authoritative finals, other runs, owner/route fences and sending/unknown decisions; retirement never sends a decision.
 
+An unknown run state is recoverable, not proof that its approvals ended. Preserve matching placeholders through unknown-to-waiting recovery and same-owner reopening. When disconnected-stream polling observes a resumed active run, reconcile approvals even if no pending sibling remains; list omission still requires exact-detail confirmation and never sends a decision.
+
 Observed RED→GREEN at each changed seam. Real Chromium verifies reopen while native messages are already persisted and live stream continues, activity chronology/stop placement, symbol/accessibility, filters/search and no overflow at 320px/short/desktop. Isolated backend tests verify classification/auth and native/run attribution. Independent review + immutable staged full Python/browser suite precede guarded deployment. Canonical master updated in place; no accounts/certificates/cron executions or native private-state mutations for tests.

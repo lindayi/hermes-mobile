@@ -977,7 +977,7 @@ for(const sourceSession of ['session-one','old-alias'])test(`generated successfu
  await page.evaluate(()=>app.destroy());
 }));
 
-for(const status of ['completed','cancelled'])test(`generated terminal ${status} retires placeholder and pending sibling without replay`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+for(const status of ['completed','cancelled','unknown'])test(`generated ${status==='unknown'?'recoverable':'terminal'} ${status} ${status==='unknown'?'preserves placeholder recovery':'retires placeholder and pending sibling without replay'}`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
  const pending=approvalRecord();
  const placeholder=approvalRecord({id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
   details_unavailable:true,executable:false,choices:[],expires_at:null,
@@ -996,6 +996,27 @@ for(const status of ['completed','cancelled'])test(`generated terminal ${status}
  while(!control.runEventStreams.length&&Date.now()<deadline)await page.waitForTimeout(10);
  assert.ok(control.runEventStreams.length);
  emitRunEvent('status',{status},`terminal-${status}`);
+ if(status==='unknown'){
+  await page.locator('[role="status"][aria-hidden="true"]').filter({hasText:/^unknown$/}).waitFor();
+  assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable');
+  assert.equal(await card(pending.id).getByRole('heading').innerText(),'Approval required');
+  const upgraded={...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']};
+  control.approvals=[pending,other];
+  control.approvalDetails[placeholder.id]=upgraded;
+  control.activeRun={...control.activeRun,status:'waiting_for_approval'};
+  const exact=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/placeholder'
+   && response.request().method()==='GET');
+  await page.evaluate(()=>dispatchEvent(new Event('focus')));
+  await exact;
+  await card('placeholder').getByRole('button',{name:'Approve once',exact:true}).waitFor();
+  control.approvals=[upgraded,pending,other];
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.getByRole('button',{name:'First conversation',exact:true}).click();
+  await card('placeholder').getByRole('button',{name:'Approve once',exact:true}).waitFor();
+  assert.equal(await card('placeholder').count(),1);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+  return;
+ }
  await card(pending.id).getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
  await card('placeholder').getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
  assert.equal(await card('placeholder').getByText(/native client|No decision was sent/).filter({visible:true}).count(),0);
@@ -1050,9 +1071,9 @@ test('generated terminal run finish wins over held pending detail but fresh fina
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
 }));
 
-test('generated disconnected-stream polling reconciles an externally answered approval and keeps its sibling',{timeout:30000},()=>fixture(async({page,control,calls,disconnectRunStreams})=>{
+for(const resumed of [false,true])test(`generated disconnected-stream polling reconciles an externally answered approval ${resumed?'after running resumes':'and keeps its sibling'}`,{timeout:30000},()=>fixture(async({page,control,calls,disconnectRunStreams})=>{
  const answered=approvalRecord(),sibling=approvalRecord({id:'approval-2',request_id:'request-2'});
- control.approvals=[answered,sibling];
+ control.approvals=resumed?[answered]:[answered,sibling];
  control.activeRun={id:answered.run_id,session_id:answered.session_id,status:'waiting_for_approval'};
  await page.getByRole('button',{name:'First conversation',exact:true}).click();
  const connectDeadline=Date.now()+2500;
@@ -1060,7 +1081,7 @@ test('generated disconnected-stream polling reconciles an externally answered ap
  assert.ok(control.runEventStreams.length,'generated chat opens its run event stream');
  const answeredCard=page.locator(`[data-approval-id="${answered.id}"]`),siblingCard=page.locator(`[data-approval-id="${sibling.id}"]`);
  await answeredCard.getByRole('button',{name:'Approve once'}).waitFor();
- await siblingCard.getByRole('button',{name:'Approve once'}).waitFor();
+ if(!resumed)await siblingCard.getByRole('button',{name:'Approve once'}).waitFor();
  await page.getByRole('textbox',{name:'Message Hermes'}).focus();
  disconnectRunStreams();
  const disconnectDeadline=Date.now()+1000;
@@ -1068,7 +1089,8 @@ test('generated disconnected-stream polling reconciles an externally answered ap
  assert.equal(control.runEventStreams.length,0,'poll recovery runs with no connected event stream');
  const initialLists=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
  const initialPolls=calls.filter(call=>call.p===`/runs/${answered.run_id}`&&call.method==='GET').length;
- control.approvals=[sibling];
+ control.approvals=resumed?[]:[sibling];
+ if(resumed)control.activeRun={...control.activeRun,status:'running'};
  control.approvalDetails={[answered.id]:{...answered,status:'unavailable',executable:false,choices:[]}};
  const pollResponse=page.waitForResponse(response=>response.url().endsWith(`/runs/${answered.run_id}`)&&response.request().method()==='GET');
  await page.evaluate(()=>dispatchEvent(new Event('pageshow')));
@@ -1079,10 +1101,15 @@ test('generated disconnected-stream polling reconciles an externally answered ap
  await answeredCard.getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
  assert.equal(calls.filter(call=>call.p===`/runs/${answered.run_id}`&&call.method==='GET').length,initialPolls+1);
  assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,initialLists+1,
-  'one waiting poll performs one bounded approval reconciliation');
+  'one current poll performs one bounded approval reconciliation');
  assert.equal(await answeredCard.getByRole('button').count(),0);
- assert.equal(await siblingCard.getByRole('button').count(),2);
- assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ if(resumed){
+  assert.equal(await siblingCard.count(),0);
+  assert.equal(await page.locator('.approval-notice').isHidden(),true);
+ }else{
+  assert.equal(await siblingCard.getByRole('button').count(),2);
+  assert.equal(await page.locator('.approval-notice').innerText(),'1 approval require your review.');
+ }
  assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Message Hermes',
   'polling does not move reader focus');
  await page.waitForTimeout(100);
@@ -1581,11 +1608,14 @@ for(const status of ['sending','expired'])test(`a held ${status} detail cannot u
  await listResponse;
  await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
  assert.equal(calls.filter(call=>call.p===detailPath && call.method==='GET').length,before+1);
- const staleResponse=page.waitForResponse(response=>response.url().endsWith(detailPath) && response.request().method()==='GET');
+ const cancelled=page.waitForEvent('requestfailed',{predicate:request=>
+  new URL(request.url()).pathname==='/hermes/app-api'+detailPath && request.method()==='GET'});
  await page.getByRole('button',{name:'Chats',exact:true}).click();
  await page.getByRole('button',{name:/Second conversation/}).click();
  await page.getByRole('heading',{name:'Second conversation'}).waitFor();
- control.approvalDetailHold=null;release();await staleResponse;
+ const failed=await cancelled;
+ assert.match(failed.failure().errorText,/abort|cancel/i,'route teardown cancels the actual detail GET');
+ control.approvalDetailHold=null;release();
  await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
  assert.equal(await page.locator('.approval-card').count(),0,'a response from the closed chat cannot place an approval');
  assert.equal(calls.filter(call=>call.p==='/approvals/approval-1/decision').length,0);

@@ -1517,15 +1517,17 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         else genericApproval=true;
         renderApprovals();return true;
       },
-      finish(runId){
+      finish(runId,status){
+        if(status==='unknown')return;
         approvalRevision++;
         for(const [key,item] of approvalItems)if(item.run_id===runId
             && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
-          const finalItem={...item,status:'unavailable',executable:false,choices:[],
+          const actionState=approvalActionStates.get(key),
+            finalStatus=actionState?.decisionStarted?'sending':actionState?.uncertain?'unknown':'unavailable';
+          const finalItem={...item,status:finalStatus,executable:false,choices:[],
             ...(approvalDetailsUnavailable(item)?{details_unavailable:false,error:''}:{})};
-          rememberHandledApproval(key,finalItem,'unavailable');
-          approvalPending.delete(key);approvalItems.set(key,finalItem);approvalFinals.set(key,'unavailable');
-          const actionState=approvalActionStates.get(key);
+          rememberHandledApproval(key,finalItem,finalStatus);
+          approvalPending.delete(key);approvalItems.set(key,finalItem);approvalFinals.set(key,finalStatus);
           if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain)
             approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
         }
@@ -2568,7 +2570,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(current.error)inform(typeof current.error==='string' ? current.error : 'The run failed.',true);
       if(finalStates.has(current.status)) {
         article.dataset.historyFinal='true';
-        approvalState?.finish(run.id);
+        approvalState?.finish(run.id,current.status);
         void composerAction.refresh?.();
         for(const item of pendingTools.splice(0)){
           const next=toolPreview({name:item.name,summary:item.summary,status:'unknown'});
@@ -2624,7 +2626,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         // Fresh terminal reads still reconcile offline; newer events defer them to the next poll.
         const currentRevision=token===connection?.token();
         if(connection?.success(token))connection.run(current.status);
-        if(currentRevision && current.status==='waiting_for_approval')void approvalState?.reconcile();
+        if(currentRevision && ['queued','running','waiting_for_approval','waiting_for_clarification','stopping'].includes(current.status))
+          void approvalState?.reconcile();
         if(currentRevision && (finalStates.has(current.status) || current.status==='stopping')) {recovered();apply(current);}
       } catch(error) {
         if(!disposed && version===routeVersion) {

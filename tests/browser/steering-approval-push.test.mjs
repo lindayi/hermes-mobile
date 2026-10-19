@@ -781,6 +781,51 @@ test('a held unavailable detail cannot replace an acknowledged decision after sa
  }finally{app.destroy();win.close();}
 });
 
+test('terminal retirement preserves a dispatched approval across same-owner notification reentry',async()=>{
+ const ack=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const pending={...approvalItem(),status:'pending'};
+ let detailStatus='pending',listed=[pending];
+ win.EventSource=class{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ };
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:listed};
+  if(p==='/approvals/a')return {...pending,status:detailStatus};
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return ack.promise;
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  await waitFor(()=>card()?.querySelector('button.primary') && win.activeStream);
+  card().querySelector('button.primary').click();
+  await waitFor(()=>calls.includes('/approvals/a/decision'));
+  listed=[];detailStatus='sending';
+  win.activeStream.emit('status',{status:'completed'});
+  assert.equal(card().querySelector('h3').textContent,'Decision pending');
+  assert.equal(card().querySelector('button'),null,'terminal retirement never restores controls');
+  await app.start();
+  await waitFor(()=>card()?.querySelector('h3').textContent==='Decision pending',
+   'reentry must not replace a dispatched decision with cached unavailable');
+  detailStatus='unknown';win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>card()?.querySelector('h3').textContent==='Decision status unknown');
+  assert.equal(card().querySelector('button'),null);
+  assert.equal(calls.filter(path=>path.endsWith('/decision')).length,1);
+  ack.resolve({status:'resolved'});await tick();
+  assert.equal(card().querySelector('h3').textContent,'Decision status unknown','old-route ACK cannot update the reopened card');
+ }finally{ack.resolve({status:'resolved'});app.destroy();win.close();}
+});
+
 for(const staleStatus of ['pending','sending','unknown'])test(`an initial ${staleStatus} detail cannot replace an acknowledged approval`,async()=>{
  const detail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  win.PublicKeyCredential=class {};
@@ -1698,7 +1743,7 @@ test(`late omitted detail cannot override newer ${newer}`,async()=>{
  }finally{app.destroy();win.close();}
 });
 
-for(const status of ['completed','cancelled'])test(`terminal ${status} retires placeholder and pending sibling without replay`,async()=>{
+for(const status of ['completed','cancelled','unknown'])test(`${status==='unknown'?'recoverable':'terminal'} ${status} ${status==='unknown'?'preserves placeholder recovery':'retires placeholder and pending sibling without replay'}`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
  const pending={...approvalItem(),status:'pending'};
  const placeholder={...pending,id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
@@ -1706,7 +1751,7 @@ for(const status of ['completed','cancelled'])test(`terminal ${status} retires p
   error:'Native approval details are unavailable after interruption; review in the native client'};
  const other={...placeholder,id:'other',request_id:'other-request',run_id:'other-run'};
  const final={...pending,id:'final',request_id:'final-request',status:'resolved',expires_at:1,executable:false,choices:[]};
- let approvals=[placeholder,pending,other,final];
+ let approvals=[placeholder,pending,other,final],recoveredDetail=null;
  win.EventSource=class{
   constructor(){this.listeners={};win.activeStream=this;}
   addEventListener(name,fn){this.listeners[name]=fn;}
@@ -1719,6 +1764,7 @@ for(const status of ['completed','cancelled'])test(`terminal ${status} retires p
   if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
   if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
   if(p==='/approvals')return {items:approvals};
+  if(p==='/approvals/placeholder' && recoveredDetail)return recoveredDetail;
   if(p.startsWith('/approvals/'))return approvals.find(item=>item.id===p.split('/').at(-1));
   return {items:[]};
  }},win);
@@ -1731,6 +1777,24 @@ for(const status of ['completed','cancelled'])test(`terminal ${status} retires p
   assert.equal(card('final').querySelector('h3').textContent,'Resolved');
   const stream=win.activeStream;
   stream.emit('status',{status});
+  if(status==='unknown'){
+   assert.equal(card('placeholder').querySelector('h3').textContent,'Approval details unavailable');
+   assert.equal(card('a').querySelector('h3').textContent,'Approval required');
+   recoveredDetail={...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']};
+   approvals=[pending,other];
+   win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>card('placeholder').querySelector('button.primary'));
+   assert.equal(card('placeholder').querySelector('h3').textContent,'Approval required');
+   assert.ok(calls.some(call=>call.p==='/approvals/placeholder'),'recovery uses exact pending detail without a new stream');
+   approvals=[recoveredDetail,pending,other];
+   doc.querySelector('[data-view="chats"]').click();
+   await waitFor(()=>doc.querySelector('.session-row'));
+   doc.querySelector('.session-row').click();
+   await waitFor(()=>card('placeholder')?.querySelector('button.primary'));
+   assert.equal(doc.querySelectorAll('[data-approval-id="placeholder"]').length,1);
+   assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+   return;
+  }
   await waitFor(()=>card('a').querySelector('h3').textContent==='Approval unavailable');
   assert.equal(card('placeholder').querySelector('h3').textContent,'Approval unavailable');
   assert.ok([...card('placeholder').querySelectorAll('p')].filter(node=>!node.hidden)
