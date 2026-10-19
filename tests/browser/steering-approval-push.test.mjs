@@ -1970,7 +1970,7 @@ test(`retained ${outcome} decision survives a newer chat run (${runSession})`,as
  }finally{decision.resolve({status:'resolved'});app.destroy();win.close();}
 });
 
-for(const detailOutcome of ['unavailable','details_unavailable',404])
+for(const detailOutcome of ['unavailable','details_unavailable',404,503,'network'])
 for(const runSession of ['s','old-alias'])for(const outcome of [403,404,409,'held',503])
 test(`exact ${detailOutcome} after omitted decision re-entry (${runSession}, ${outcome})`,async()=>{
  const decision=deferred(),afterRejection=deferred(),calls=[],
@@ -1998,8 +1998,10 @@ test(`exact ${detailOutcome} after omitted decision re-entry (${runSession}, ${o
   if(p==='/approvals/a'){
    detailReads++;
    if(reentered){
-    if(recovered)return pending;
+    if(recovered)return recovered==='resolved'?{...pending,status:'resolved',executable:false,choices:[]}:pending;
     if(detailOutcome===404)throw Object.assign(new Error('Not found'),{status:404});
+    if(detailOutcome===503)throw Object.assign(new Error('Temporary failure'),{status:503});
+    if(detailOutcome==='network')throw new TypeError('Synthetic network failure');
     return unavailable;
    }
    if(rejected)return afterRejection.promise;
@@ -2025,11 +2027,17 @@ test(`exact ${detailOutcome} after omitted decision re-entry (${runSession}, ${o
    decision.reject(Object.assign(new Error('Synthetic decision rejection'),{status:outcome}));
    await waitFor(()=>outcome===503?card()?.querySelector('h3').textContent==='Decision status unknown'
     :card()?.textContent.includes('before deciding') && listReads>=2);
+   if([403,404,409].includes(outcome)){
+    assert.equal(card().querySelector('h3').textContent,'Approval details unavailable',
+     'a rejected decision stays truthful while its fresh detail read is held');
+    assert.equal(card().querySelectorAll('button:enabled').length,0);
+    assert.ok(card().textContent.includes('No decision is in flight.'));
+   }
   }
   const before=detailReads;await reenter();await waitFor(()=>detailReads>before);
   await tick();
   const expected=[403,404,409].includes(outcome)
-   ?detailOutcome==='details_unavailable'?'Approval details unavailable':'Approval unavailable'
+   ?['details_unavailable',503,'network'].includes(detailOutcome)?'Approval details unavailable':'Approval unavailable'
    :outcome==='held'?'Decision pending':'Decision status unknown';
   assert.equal(card().querySelector('h3').textContent,expected,
    'fresh exact unavailability must not leave a rejected, non-dispatched decision pending');
@@ -2046,12 +2054,17 @@ test(`exact ${detailOutcome} after omitted decision re-entry (${runSession}, ${o
     .filter(node=>node.textContent.includes('No decision was sent')).every(node=>node.hidden),
    'an in-flight or uncertain decision must never visibly claim that no decision was sent');
   }
-  if(detailOutcome==='details_unavailable' && [403,404,409].includes(outcome)){
+  if(['details_unavailable',503,'network'].includes(detailOutcome) && [403,404,409].includes(outcome)){
    recovered=true;
    const before=detailReads;win.dispatchEvent(new win.Event('focus'));
    await waitFor(()=>detailReads>before && card()?.querySelectorAll('button:enabled').length===2,
     'recoverable detail must remain retryable until fresh exact pending authority arrives');
    assert.equal(card().querySelector('h3').textContent,'Approval required');
+   assert.equal(posts,1);assert.equal(passkeys,1);
+   recovered='resolved';win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>card()?.querySelector('h3').textContent==='Resolved',
+    'fresh final detail replaces recoverable revalidation without inventing a decision outcome');
+   assert.equal(card().querySelectorAll('button:enabled').length,0);
    assert.equal(posts,1);assert.equal(passkeys,1);
   }
  }finally{decision.resolve({status:'resolved'});afterRejection.resolve(unavailable);app.destroy();win.close();}

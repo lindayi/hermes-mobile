@@ -1491,7 +1491,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         && !actionState.retentionBlocked
         && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
       view.decisions.hidden=!canDecide;
-      for(const control of [view.approve,view.deny])if(control)control.disabled=actionState.pending || actionState.uncertain;
+      for(const control of [view.approve,view.deny])if(control)
+        control.disabled=actionState.pending || actionState.uncertain || actionState.needsFreshAuthority;
       if(!canDecide && !actionState.pending && !actionState.needsFreshAuthority
           && !actionState.retentionBlocked
           && view.decisions.childNodes.length)view.decisions.replaceChildren();

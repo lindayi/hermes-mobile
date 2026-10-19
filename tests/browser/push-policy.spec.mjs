@@ -610,7 +610,7 @@ test('generated chat restores an omitted dispatched decision after a newer run s
  await page.evaluate(()=>app.destroy());
 }));
 
-for(const detailOutcome of ['unavailable','details_unavailable',404])
+for(const detailOutcome of ['unavailable','details_unavailable',404,503])
 for(const runSession of ['session-one','old-alias'])for(const rejection of [403,404,409])
 test(`generated rejected decision settles on fresh ${detailOutcome} detail (${runSession}, ${rejection})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
  const pending=approvalRecord({run_session_id:runSession});
@@ -628,6 +628,10 @@ test(`generated rejected decision settles on fresh ${detailOutcome} detail (${ru
   && response.request().method()==='POST' && response.status()===rejection);
  await page.evaluate(()=>finishPasskey());await rejected;
  await card.getByRole('alert').filter({hasText:rejection===403?'Passkey verification expired':'no longer pending'}).waitFor();
+ assert.equal(await card.getByRole('heading').innerText(),'Approval details unavailable',
+  'a rejected POST is not in flight while revalidation is delayed');
+ assert.equal(await card.locator('button:enabled').count(),0);
+ await card.getByText('Approval status needs to be checked again. No decision is in flight.',{exact:true}).waitFor();
  control.activeRun={id:'newer-run',session_id:'session-one',status:'running',input:'Newer request'};
  control.realHistory={latest:{items:[
   {id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'},
@@ -636,16 +640,30 @@ test(`generated rejected decision settles on fresh ${detailOutcome} detail (${ru
  await page.getByRole('button',{name:'Chats',exact:true}).click();
  control.approvalDetail={...pending,status:detailOutcome===404?'unavailable':detailOutcome,executable:false,choices:[],
   error:detailOutcome==='details_unavailable'?'':'Run is no longer active'};
- control.approvalDetailStatus=detailOutcome===404?404:200;
+ control.approvalDetailStatus=typeof detailOutcome==='number'?detailOutcome:200;
  control.approvalDetailHold=null;releaseDetail();
+ control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
  const reenter=async()=>{
+  const requested=page.waitForRequest(request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1'
+   && request.method()==='GET');
   const detail=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1'
-   && response.request().method()==='GET' && response.status()===(detailOutcome===404?404:200));
-  await page.getByRole('button',{name:'First conversation',exact:true}).click();await detail;
+   && response.request().method()==='GET' && response.status()===(typeof detailOutcome==='number'?detailOutcome:200));
+  await page.getByRole('button',{name:'First conversation',exact:true}).click();await requested;
+  assert.equal(await card.getByRole('heading').innerText(),'Approval details unavailable');
+  const reads=calls.filter(call=>call.p==='/approvals/approval-1').length;
+  for(let repeat=0;repeat<2;repeat++){
+   const listed=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals'
+   && new URL(response.url()).searchParams.get('session_id')==='session-one');
+   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await listed;
+  }
+  assert.equal(calls.filter(call=>call.p==='/approvals/approval-1').length,reads,
+   'repeated focus shares the held exact detail read');
+  assert.equal(await card.locator('button:enabled').count(),0);
+  control.approvalDetailHold=null;releaseDetail();await detail;
   await page.locator('[data-history-run="newer-run"]').first().waitFor();
  };
  await reenter();
- const expected=detailOutcome==='details_unavailable'?'Approval details unavailable':'Approval unavailable';
+ const expected=['details_unavailable',503].includes(detailOutcome)?'Approval details unavailable':'Approval unavailable';
  assert.equal(await card.getByRole('heading').innerText(),expected,
   'a definitively rejected POST must not stay Decision pending after fresh exact detail');
  for(let repeat=0;repeat<2;repeat++){
@@ -663,8 +681,9 @@ test(`generated rejected decision settles on fresh ${detailOutcome} detail (${ru
   assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,1);
   assert.equal(calls.filter(call=>call.p==='/auth/verify/finish').length,1);
  }
- if(detailOutcome==='details_unavailable'){
+ if(['details_unavailable',503].includes(detailOutcome)){
   control.approvalDetail=pending;
+  control.approvalDetailStatus=200;
   const fresh=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1'
    && response.request().method()==='GET');
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await fresh;
