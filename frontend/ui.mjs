@@ -1381,7 +1381,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         return item.id && !listedKeys.has(key) && !handledApprovals.has(key)
           && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')
           && (item.session_id===session.id || item.run_id===currentApprovalRun)
-          && !actionState?.pending && !actionState?.decisionStarted && !actionState?.uncertain;
+          && !actionState?.decisionStarted && !actionState?.uncertain;
       });
       if(!eligible.length)return;
       const start=missingApprovalDetailOffset%eligible.length,
@@ -1391,12 +1391,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       missingApprovalDetailsRefreshing=true;
       try{
         await Promise.all(targets.map(async([key,item])=>{
-          const actionState=approvalActionStates.get(key);
+          const actionState=approvalActionStates.get(key),wasPending=!!actionState?.pending;
           const sameRead=()=>current() && owner===state.user?.id && state.session?.id===session.id
             && revision===approvalRevision && listRevision===approvalListRevision
             && approvalItems.get(key)===item && !handledApprovals.has(key)
             && approvalActionStates.get(key)===actionState
-            && !actionState?.pending && !actionState?.decisionStarted && !actionState?.uncertain;
+            && !!actionState?.pending===wasPending && !actionState?.decisionStarted && !actionState?.uncertain;
           let detail;
           try{detail=await readApprovalDetail(item.id);}
           catch(error){
@@ -1411,7 +1411,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             live=status==='pending' || status==='details_unavailable',
             next=live?detail:{...detail,status,executable:false,choices:[],details_unavailable:false,
               error:approvalDetailsUnavailable(detail)?'':detail.error};
+          if(live && actionState?.pending)return;
           if(sameApprovalData(item,next))return;
+          if(actionState?.pending){actionState.pending=false;actionState.error='';}
           approvalItems.set(key,next);
           if(status==='pending'){
             approvalPending.set(key,next);approvalFinals.delete(key);

@@ -2274,6 +2274,39 @@ test('stale pending detail cannot restore an approval after acknowledged decisio
  }finally{app.destroy();win.close();}
 });
 
+test('bounded omission during verification retains an exact live approval and held decision acknowledgement',async()=>{
+ const credential=deferred(),ack=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:()=>credential.promise};
+ let listed=[approvalItem()];
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0};
+  if(p==='/approvals')return {items:listed};
+  if(p==='/approvals/a')return {...approvalItem(),status:'pending'};
+  if(p==='/auth/verify/options')return {challenge_id:'fixture',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision')return ack.promise;
+  return {items:[]};
+ }},win);
+ try{
+  const card=doc.querySelector('[data-approval-id="a"]');
+  card.querySelector('button.primary').click();await waitFor(()=>calls.includes('/auth/verify/options'));
+  listed=[];win.dispatchEvent(new win.Event('focus'));await tick();await tick();
+  assert.equal(card.querySelector('h3').textContent,'Decision pending','omission and exact live detail preserve ongoing verification');
+  assert.equal(calls.filter(p=>p.endsWith('/decision')).length,0);
+  credential.resolve(fakeCredential());await waitFor(()=>calls.includes('/approvals/a/decision'));
+  const detailReads=calls.filter(p=>p==='/approvals/a').length;
+  win.dispatchEvent(new win.Event('focus'));await tick();await tick();
+  assert.equal(calls.filter(p=>p==='/approvals/a').length,detailReads,'held ACK must not launch missing-card revalidation');
+  assert.equal(card.querySelector('h3').textContent,'Decision pending');
+  ack.resolve({status:'resolved'});await waitFor(()=>card.querySelector('h3').textContent==='Resolved');
+  assert.equal(calls.filter(p=>p.endsWith('/decision')).length,1);
+ }finally{app.destroy();win.close();}
+});
+
 test('approval removal during verification clears local pending state without deciding',async()=>{
  const credential=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  win.PublicKeyCredential=class {};
@@ -2286,6 +2319,10 @@ test('approval removal during verification clears local pending state without de
   if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
   if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[],total:0,offset:0};
   if(p==='/approvals')return {items:++approvalReads===1?[approvalItem()]:[]};
+  if(p==='/approvals/a'){
+   if(approvalReads>1)throw Object.assign(new Error('Approval removed'),{status:404});
+   return {...approvalItem(),status:'pending'};
+  }
   if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
   if(p==='/auth/verify/finish')return {ok:true};
   return {items:[]};
