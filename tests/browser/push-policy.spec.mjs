@@ -733,6 +733,7 @@ test('generated run status refresh removes an externally answered approval and p
  await page.getByRole('textbox',{name:'Message Hermes'}).focus();
  const initialReads=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
  control.approvals=[sibling];
+ control.approvalDetails={[answered.id]:{...answered,status:'unavailable',executable:false,choices:[]}};
  emitRunEvent('status',{status:'waiting_for_approval'},'external-approval-response');
  const deadline=Date.now()+2500;
  while(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length===initialReads&&Date.now()<deadline)
@@ -830,6 +831,46 @@ test('generated rejected approval proof exposes no action details or decision co
  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
 }));
 
+for(const visibleCount of [1000,1])test(`generated bounded omission preserves live placeholder and pending upgrade (${visibleCount})`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
+ const live=approvalRecord(),sibling=approvalRecord({id:'sibling',request_id:'sibling-request'}),
+  placeholder={...live,status:'details_unavailable',expires_at:null,
+  choices:[],executable:false,details_unavailable:true,error:'Review in the native client'};
+ const produced=[...Array.from({length:1000},(_,index)=>approvalRecord({id:`older-${index}`,
+  request_id:`request-${index}`,run_id:'older-run',session_id:'session-two',run_session_id:'session-two'})),placeholder];
+ produced[0]=sibling;
+ control.approvals=produced.slice(0,1000).slice(0,visibleCount);
+ control.approvalDetail=placeholder;
+ control.activeRun={id:live.run_id,session_id:'session-one',status:'waiting_for_approval',input:'Synthetic request',created_at:1};
+ await mount(page);await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ await page.waitForFunction(()=>window.app && document.querySelector('.conversation'));
+ while(!control.runEventStreams.length)await page.waitForTimeout(10);
+ const event={...placeholder,session_id:null};delete event.run_session_id;
+ const listed=responseBatch(page,'/approvals',1);emitRunEvent('approval',JSON.parse(JSON.stringify(event)));await listed;
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await page.waitForTimeout(100);
+ assert.equal(await card.getByRole('heading').innerText(),'Approval details unavailable',
+  'a truncated or authorization-filtered list is not a complete snapshot');
+ assert.ok(calls.some(call=>call.p==='/approvals/approval-1'),'the generated API revalidates exact authenticated detail');
+ control.approvalDetail=live;
+ await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+ await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+ const refreshed=responseBatch(page,'/approvals',1);
+ emitRunEvent('approval',{...live,session_id:null,run_session_id:null});await refreshed;
+ await page.waitForTimeout(100);
+ assert.equal(await card.getByRole('button').count(),2,'the same truncation must not remove an upgraded pending card');
+ assert.equal(await page.locator('[data-approval-id="approval-1"]').count(),1);
+ control.approvalDetail={...live,status:'resolved_external',executable:false,choices:[]};
+ await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+ await card.getByRole('heading',{name:'No longer pending',exact:true}).waitFor();
+ assert.equal(await card.getByRole('button').count(),0,'exact external resolution needs no terminal run event');
+ assert.equal(await page.locator('[data-approval-id="sibling"]').getByRole('button').count(),2);
+ assert.equal(control.activeRun.status,'waiting_for_approval');
+ emitRunEvent('approval',{...live,session_id:null,run_session_id:null});
+ await page.waitForTimeout(100);
+ assert.equal(await card.getByRole('heading').innerText(),'No longer pending','late pending replay cannot revive an exact final');
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+}));
+
 for(const sourceSession of ['session-one','old-alias'])test(`generated successful omission retires only the missing placeholder (${sourceSession})`,{timeout:30000},()=>fixture(async({page,control,calls,mount,emitRunEvent})=>{
  const pending=approvalRecord({run_session_id:sourceSession});
  const placeholder={...pending,id:'placeholder',request_id:'placeholder-request',status:'details_unavailable',
@@ -867,7 +908,7 @@ for(const sourceSession of ['session-one','old-alias'])test(`generated successfu
  assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable',
   'a superseded omission cannot retire a still-present placeholder');
  control.approvals=[present,pending];
- control.approvalDetails={placeholder:{...placeholder,status:'resolved_external'}};
+ control.approvalDetails={placeholder:{...placeholder,status:'unavailable'}};
  await refresh();
  await card('placeholder').getByRole('heading',{name:'Approval unavailable',exact:true}).waitFor();
  assert.equal(await card('placeholder').getByText(/native client|No decision was sent/).filter({visible:true}).count(),0);
@@ -977,6 +1018,7 @@ test('generated disconnected-stream polling reconciles an externally answered ap
  const initialLists=calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length;
  const initialPolls=calls.filter(call=>call.p===`/runs/${answered.run_id}`&&call.method==='GET').length;
  control.approvals=[sibling];
+ control.approvalDetails={[answered.id]:{...answered,status:'unavailable',executable:false,choices:[]}};
  const pollResponse=page.waitForResponse(response=>response.url().endsWith(`/runs/${answered.run_id}`)&&response.request().method()==='GET');
  await page.evaluate(()=>dispatchEvent(new Event('pageshow')));
  await pollResponse;

@@ -1295,6 +1295,52 @@ test('serialized null-session approval SSE preserves a held aliased decision ack
  }finally{app.destroy();win.close();}
 });
 
+for(const visibleCount of [1000,1])for(const initialStatus of ['details_unavailable','pending'])
+test(`bounded omission preserves live ${initialStatus} and later pending upgrade (${visibleCount})`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const live={...approvalItem(),status:'pending'};
+ const placeholder={...live,status:'details_unavailable',expires_at:null,executable:false,choices:[],
+  details_unavailable:true,error:'Review in the native client'};
+ const produced=[...Array.from({length:1000},(_,index)=>({...live,id:`older-${index}`,
+  request_id:`request-${index}`,run_id:'older-run',session_id:'other-chat',run_session_id:'other-chat'})),placeholder];
+ const listed=produced.slice(0,1000).slice(0,visibleCount);
+ let detail=initialStatus==='pending'?live:placeholder;
+ win.EventSource=class{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ };
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:listed};
+  if(p==='/approvals/a')return detail;
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();await waitFor(()=>win.activeStream);
+  const event={...detail,session_id:null};delete event.run_session_id;
+  win.activeStream.emit('approval',JSON.parse(JSON.stringify(event)));
+  const card=()=>doc.querySelector('[data-approval-id="a"]');
+  await waitFor(()=>card());
+  await tick();await tick();
+  assert.equal(card().querySelector('h3').textContent,initialStatus==='pending'?'Approval required':'Approval details unavailable',
+   'a live approval outside the oldest 1000 must not be retired by list omission, including after authorization filtering');
+  await waitFor(()=>calls.some(call=>call.p==='/approvals/a'),'omission requires exact authenticated revalidation');
+  detail=live;
+  win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>card().querySelector('button.primary'),'exact pending detail upgrades the omitted placeholder');
+  win.activeStream.emit('approval',{...live,session_id:null,run_session_id:null});
+  await tick();await tick();
+  assert.equal(doc.querySelectorAll('[data-approval-id="a"]').length,1);
+  assert.equal(card().querySelectorAll('button').length,2,'a later pending SSE replay remains actionable');
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
 for(const sourceSession of ['s','old-alias'])test(`successful omission retires only the missing placeholder (${sourceSession})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
  const pending={...approvalItem(),status:'pending',run_session_id:sourceSession};
@@ -1316,6 +1362,7 @@ for(const sourceSession of ['s','old-alias'])test(`successful omission retires o
   if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Canonical chat'}],total:1};
   if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:sourceSession,status:'waiting_for_approval'}};
   if(p==='/approvals'){if(failure)throw failure;return response;}
+  if(p==='/approvals/placeholder')throw Object.assign(new Error('Approval no longer available'),{status:404});
   return {items:[]};
  }},win);
  try{
@@ -1352,6 +1399,170 @@ for(const sourceSession of ['s','old-alias'])test(`successful omission retires o
   assert.equal(card('placeholder').querySelector('h3').textContent,'Approval unavailable','late list/SSE replay cannot revive retirement');
   assert.equal(card('placeholder').querySelector('button'),null);
   assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+test('omitted exact reads are bounded, deduplicated and fair beyond one batch despite transient failures',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
+ const sibling={...approvalItem(),status:'pending'};
+ const placeholders=Array.from({length:23},(_,index)=>({...sibling,id:`missing-${index}`,
+  request_id:`native-${index}`,status:'details_unavailable',details_unavailable:true,
+  executable:false,choices:[],expires_at:null,error:'Review in the native client'}));
+ let listed=[...placeholders,sibling],hold=deferred(),status='details_unavailable',fail=true;
+ const reads=[];
+ const app=await mountApp(doc,{clear(){},async request(p){
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0};
+  if(p==='/approvals')return {items:listed};
+  if(p.startsWith('/approvals/')){
+   const item=placeholders.find(item=>item.id===p.split('/').at(-1));reads.push(item.id);
+   if(hold)await hold.promise;
+   if(fail)throw Object.assign(new Error('Temporary failure'),{status:503});
+   return {...item,status};
+  }
+  return {items:[]};
+ }},win);
+ const card=id=>doc.querySelector(`[data-approval-id="${id}"]`);
+ try{
+  doc.querySelector('.session-row').click();await waitFor(()=>card('missing-22'));
+  listed=[sibling];win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>reads.length===10);
+  win.dispatchEvent(new win.Event('focus'));await tick();await tick();
+  assert.equal(reads.length,10,'overlapping refreshes do not launch or duplicate another in-flight batch');
+  hold.resolve();hold=null;await tick();await tick();
+  for(let round=0;round<3;round++){
+   const before=reads.length;win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>reads.length>before);await tick();
+   assert.ok(reads.length-before<=10,'one refresh does bounded exact work');
+  }
+  assert.equal(new Set(reads).size,23,'failed oldest cards cannot starve later missing cards');
+  for(const item of placeholders)assert.equal(card(item.id).querySelector('h3').textContent,'Approval details unavailable',
+   'transient errors never terminalize a missing live placeholder');
+  fail=false;status='resolved_external';
+  for(let round=0;round<4;round++){win.dispatchEvent(new win.Event('focus'));await tick();await tick();}
+  for(const item of placeholders){
+   assert.equal(card(item.id).querySelector('h3').textContent,'No longer pending',
+    'exact external resolution retires a placeholder without a terminal SSE');
+   assert.equal(card(item.id).querySelector('button'),null);
+   assert.ok([...card(item.id).querySelectorAll('p')].filter(node=>!node.hidden)
+    .every(node=>!/native client|No decision was sent/.test(node.textContent)));
+  }
+  assert.ok(card('a').querySelector('button.primary'),'a still-listed pending sibling stays actionable');
+ }finally{app.destroy();win.close();}
+});
+
+for(const outcome of ['details_unavailable','pending','sending','unknown','resolved','resolved_external','cancelled','expired','unavailable',404])
+test(`omitted placeholder uses exact detail truthfully (${outcome})`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const live={...approvalItem(),status:'pending',run_session_id:'old-alias'};
+ const placeholder={...live,status:'details_unavailable',details_unavailable:true,expires_at:null,
+  executable:false,choices:[],error:'Review in the native client'};
+ let listed=[placeholder];
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Canonical chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0};
+  if(p==='/approvals')return {items:listed};
+  if(p==='/approvals/a'){
+   if(outcome===404)throw Object.assign(new Error('Unavailable'),{status:404});
+   return outcome==='details_unavailable'?placeholder:{...live,status:outcome};
+  }
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
+  listed=[];win.dispatchEvent(new win.Event('focus'));
+  await waitFor(()=>calls.includes('/approvals/a'));await tick();
+  const card=doc.querySelector('[data-approval-id="a"]');
+  const labels={details_unavailable:'Approval details unavailable',pending:'Approval required',sending:'Decision pending',
+   unknown:'Decision status unknown',resolved:'Resolved',resolved_external:'No longer pending',cancelled:'Cancelled',
+   expired:'Expired',unavailable:'Approval unavailable',404:'Approval unavailable'};
+  assert.equal(card.querySelector('h3').textContent,labels[outcome]);
+  assert.equal(card.querySelectorAll('button').length,outcome==='pending'?2:0);
+  if(!['pending','details_unavailable'].includes(outcome)){
+   assert.ok([...card.querySelectorAll('p')].filter(node=>!node.hidden)
+    .every(node=>!/native client|No decision was sent/.test(node.textContent)));
+  }
+  assert.equal(calls.filter(p=>p.endsWith('/decision') || p.startsWith('/auth/verify')).length,0);
+ }finally{app.destroy();win.close();}
+});
+
+for(const mismatch of [{id:'foreign'},{run_id:'foreign-run'},{request_id:'foreign-request'},
+ {session_id:'foreign-chat'},{run_session_id:'foreign-original-session'}])
+test(`omitted exact detail rejects mismatched ${Object.keys(mismatch)[0]}`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document;
+ const placeholder={...approvalItem(),status:'details_unavailable',details_unavailable:true,
+  executable:false,choices:[],expires_at:null};
+ let listed=[placeholder],reads=0;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0};
+  if(p==='/approvals')return {items:listed};
+  if(p==='/approvals/a'){reads++;return {...approvalItem(),status:'pending',...mismatch};}
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
+  listed=[];win.dispatchEvent(new win.Event('focus'));await waitFor(()=>reads===1);await tick();
+  const card=doc.querySelector('[data-approval-id="a"]');
+  assert.equal(card.querySelector('h3').textContent,'Approval details unavailable');
+  assert.equal(card.querySelector('button'),null,'foreign identity cannot supply decision controls');
+ }finally{app.destroy();win.close();}
+});
+
+for(const newer of ['list','event','identity','route','owner','decision'])
+test(`late omitted detail cannot override newer ${newer}`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const live={...approvalItem(),status:'pending'};
+ let listed=[live],owner='owner';
+ const detail=deferred(),ack=deferred();
+ win.EventSource=class{
+  constructor(){this.listeners={};win.activeStream=this;}
+  addEventListener(name,fn){this.listeners[name]=fn;}
+  emit(name,data){this.listeners[name]?.({data:JSON.stringify(data)});}
+  close(){}
+ };
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,run:{id:'r',session_id:'s',status:'waiting_for_approval'}};
+  if(p==='/approvals')return {items:listed};
+  if(p==='/approvals/a')return detail.promise;
+  if(p==='/auth/verify/options')return {challenge_id:'fixture',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {verified:true};
+  if(p==='/approvals/a/decision')return ack.promise;
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  doc.querySelector('.session-row').click();await waitFor(()=>card()?.querySelector('button.primary') && win.activeStream);
+  listed=[];win.dispatchEvent(new win.Event('focus'));await waitFor(()=>calls.includes('/approvals/a'));
+  if(newer==='list' || newer==='identity'){
+   listed=[newer==='identity'?{...live,request_id:'replacement'}:live];
+   win.dispatchEvent(new win.Event('focus'));await tick();await tick();
+  }else if(newer==='event'){
+   listed=[{...live,title:'New action'}];win.activeStream.emit('approval',listed[0]);await tick();await tick();
+  }else if(newer==='route'){
+   doc.querySelector('[data-view="chats"]').click();await tick();
+  }else if(newer==='owner'){
+   owner='other-owner';await app.start();
+  }else{
+   card().querySelector('button.primary').click();await waitFor(()=>calls.includes('/approvals/a/decision'));
+  }
+  detail.resolve({...live,status:'resolved_external'});await tick();await tick();
+  if(['route','owner'].includes(newer))assert.equal(card(),null);
+  else if(newer==='decision'){
+   assert.equal(card().querySelector('h3').textContent,'Decision pending');
+   ack.resolve({status:'resolved'});await waitFor(()=>card().querySelector('h3').textContent==='Resolved');
+  }else{
+   assert.equal(card().querySelector('h3').textContent,'Approval required');
+   assert.equal(card().querySelectorAll('button').length,2);
+  }
  }finally{app.destroy();win.close();}
 });
 
