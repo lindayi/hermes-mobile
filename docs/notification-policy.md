@@ -104,6 +104,12 @@ authority revision, run generation, owner and route. It may show unavailable onl
 for that definitive rejection, not a dispatched or uncertain decision. Generic
 network failures do not retire the card. Only fresh exact pending authority restores
 decision controls; revalidation never retries a decision or passkey ceremony.
+The notification target's initial GET, list-triggered refresh and exact recheck
+use the same decision-authority rule, including handled and replacement paths.
+Use the actual shared read's origin revision, not its consumer's start time.
+A pre-rejection initial 404 cannot retire the card or block later fresh pending
+recovery. A stale initial unavailable response cannot clear a dispatched decision
+or discard its successful POST acknowledgement.
 
 An omitted notification-target approval whose initial exact-detail read times
 out or is invalidated by an unknown-run transition keeps a truthful Retry status

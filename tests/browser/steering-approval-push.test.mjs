@@ -2070,6 +2070,70 @@ test(`exact ${detailOutcome} after omitted decision re-entry (${runSession}, ${o
  }finally{decision.resolve({status:'resolved'});afterRejection.resolve(unavailable);app.destroy();win.close();}
 });
 
+for(const runSession of ['s','old-alias'])for(const outcome of ['held',503,403,404,409])
+for(const detailOutcome of [403,404,409].includes(outcome)?[404,'unavailable']:['unavailable'])
+for(const freshList of outcome===409 && detailOutcome===404?[false,true]:[false])
+test(`held initial approval GET preserves decision authority (${runSession}, ${outcome}, ${detailOutcome}, fresh list ${freshList})`,async()=>{
+ const initial=deferred(),list=deferred(),decision=deferred(),calls=[],
+  dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),
+  win=dom.window,doc=win.document;
+ const pending={...approvalItem(),status:'pending',run_session_id:runSession},
+  unavailable={...pending,status:'unavailable',executable:false,choices:[]};
+ let posts=0,passkeys=0,reads=0;
+ win.PublicKeyCredential=class {};
+ win.navigator.credentials={get:async()=>{passkeys++;return fakeCredential();}};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:runSession,
+   run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,
+   run:{id:'r',session_id:runSession,status:'waiting_for_approval'}};
+  if(p==='/approvals')return posts?{items:freshList?[pending]:[],complete:true}:list.promise;
+  if(p==='/approvals/a')return ++reads===1?initial.promise:pending;
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision'){posts++;return decision.promise;}
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  await waitFor(()=>reads===1);
+  list.resolve({items:[pending],complete:true});
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  card().querySelector('button.primary').click();await waitFor(()=>posts===1);
+  if(outcome!=='held'){
+   decision.reject(Object.assign(new Error('Synthetic decision response'),{status:outcome}));
+   await waitFor(()=>card()?.querySelector('h3').textContent===
+    (outcome===503?'Decision status unknown':freshList?'Approval required':'Approval details unavailable')
+    && (!freshList || card().querySelectorAll('button:enabled').length===2));
+  }
+  assert.equal(reads,1,'rejection refresh shares the held INITIAL GET, not a new authority read');
+  assert.equal(calls.find(call=>call.p==='/approvals/a').o.signal.aborted,false,
+   'this race is released before the independent ten-second abort test');
+  if(detailOutcome===404)
+   initial.reject(Object.assign(new Error('Pre-rejection not found'),{status:404}));
+  else initial.resolve(unavailable);
+  await tick();await tick();
+  assert.equal(card().querySelector('h3').textContent,outcome==='held'?'Decision pending'
+   :outcome===503?'Decision status unknown':freshList?'Approval required':'Approval details unavailable',
+  'a pre-decision initial GET cannot retire dispatched, uncertain, or rejected authority');
+  assert.equal(card().querySelectorAll('button:enabled').length,freshList?2:0);
+  if(outcome==='held'){
+   decision.resolve({status:'resolved'});
+   await waitFor(()=>card()?.querySelector('h3').textContent==='Resolved',
+    'the explicit successful POST acknowledgement must still be accepted');
+  }else if(outcome!==503){
+   win.dispatchEvent(new win.Event('focus'));
+   await waitFor(()=>card()?.querySelector('h3').textContent==='Approval required');
+   assert.equal(card().querySelectorAll('button:enabled').length,2,
+    'a later fresh exact pending read restores controls after definitive rejection');
+  }
+  assert.equal(posts,1);assert.equal(passkeys,1);
+ }finally{initial.resolve(unavailable);list.resolve({items:[pending]});decision.resolve({status:'resolved'});app.destroy();win.close();}
+});
+
 for(const runSession of ['s','old-alias'])
 for(const detailOutcome of ['unavailable',404])
 for(const fence of detailOutcome===404?['authority','route','owner']:['authority','id','run_id','request_id','session_id','run_session_id','route','owner'])

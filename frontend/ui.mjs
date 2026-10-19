@@ -1196,6 +1196,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       && !actionState.pending && !actionState.uncertain
       && decision.owner===owner && decision.canonicalSessionId===session.id
       && sameApprovalIdentity(decision.identity,detail);
+    const acceptsApprovalDetail=(decision,actionState,detail,authorityRevision)=>{
+      if(!decision)return true;
+      if(decision.owner!==owner || decision.canonicalSessionId!==session.id
+          || decision.state!==actionState || !sameApprovalIdentity(decision.identity,detail))return false;
+      if(finalApprovalStatuses.has(detail.status))return true;
+      if(decision.retryAuthorityRevision>authorityRevision)return false;
+      if(decision.needsFreshAuthority)
+        return freshRejectedApprovalAuthority(decision,actionState,detail,authorityRevision);
+      return detail.status!=='unavailable' || !(decision.dispatched || actionState?.uncertain);
+    };
     const sameApprovalData=(left,right)=>!!left && approvalDataFields.every(field=>
       JSON.stringify(left[field])===JSON.stringify(right[field]));
     const retainedApprovalDecision=item=>{
@@ -1569,10 +1579,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             approvalItems.set(key,detail);approvalPending.set(key,detail);approvalFinals.delete(key);
             renderApprovals();return;
           }
-          if(detail.status==='unavailable' && decision
-              && (decision.dispatched || decision.needsFreshAuthority || actionState?.uncertain)
-              && !freshRejectedAuthority)return;
-          if(detail.status==='details_unavailable' && decision?.needsFreshAuthority && !freshRejectedAuthority)return;
+          if(!acceptsApprovalDetail(decision,actionState,detail,read.authorityRevision))return;
           let status=freshRejectedAuthority && ['unavailable','details_unavailable'].includes(detail.status)?detail.status
             :actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
             ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
@@ -1900,6 +1907,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         focusApprovalTarget();
       };
       let detailRead=null;
+      const acceptsTargetDetail=item=>{
+        const key=approvalKey(item);
+        return acceptsApprovalDetail(approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+          approvalActionStates.get(key),item,detailRead?.authorityRevision ?? -Infinity);
+      };
+      const preserveTargetDecision=async item=>{
+        approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+        renderApprovals();focusApprovalTarget();
+        await restoreApprovalTargetHistory(approvalItems.get(approvalKey(item)) || item);
+      };
       try{
         let item=[...approvalItems.values()].find(matches),detailRevision=null,detailListRevision=null;
         if(!item){
@@ -1917,10 +1934,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!currentTargetRead())return;
         if(matches(item)){
           const key=approvalKey(item);
+          if(!acceptsTargetDetail(item)){await preserveTargetDecision(item);return;}
           let existing=approvalItems.get(key);
           if(handledApprovals.has(key)){
             const retained=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
-            if(retained?.dispatched || retained?.needsFreshAuthority){
+            if((retained?.dispatched || retained?.needsFreshAuthority)
+                && !finalApprovalStatuses.has(item.status)
+                && !freshRejectedApprovalAuthority(retained,approvalActionStates.get(key),item,
+                  detailRead?.authorityRevision ?? -Infinity)){
               approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
               renderApprovals();focusApprovalTarget();
               await restoreApprovalTargetHistory(existing || item);return;
@@ -1992,6 +2013,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               focusApprovalTarget();return;
             }
           }
+          if(!acceptsTargetDetail(item)){await preserveTargetDecision(item);return;}
           existing=approvalItems.get(key);
           const actionState=approvalActionStates.get(key),
             freshFinal=finalApprovalStatuses.has(item.status),
@@ -2011,6 +2033,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           }else if(!statusOverridden && !unchanged && item.status==='pending'
               && !actionState?.pending && !actionState?.uncertain){
             approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+          }
+          if(item.status==='unavailable'){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(freshRejectedApprovalAuthority(decision,actionState,item,detailRead?.authorityRevision ?? -Infinity))
+              decision.rejectedUnavailable=true;
           }
           if(freshFinal || item.status==='unavailable')
             settleApprovalDecision(owner,session.id,item,nextStatus);
@@ -2051,8 +2078,13 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const item=approvalPending.get(key),actionState=approvalActionStates.get(key);
           if(item && matches(item) && approvalItems.get(key)===item && !handledApprovals.has(key)
               && !finalApprovalStatuses.has(approvalFinals.get(key))
-              && !actionState?.decisionStarted && !actionState?.uncertain){
+              && !actionState?.decisionStarted && !actionState?.uncertain
+              && acceptsTargetDetail({...item,status:'unavailable'})){
             const finalItem={...item,status:'unavailable',executable:false,choices:[]};
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(freshRejectedApprovalAuthority(decision,actionState,item,detailRead?.authorityRevision ?? -Infinity))
+              decision.rejectedUnavailable=true;
+            settleApprovalDecision(owner,session.id,item,'unavailable');
             if(actionState)approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
             approvalRevision++;approvalPending.delete(key);approvalItems.set(key,finalItem);
             rememberHandledApproval(key,finalItem,'unavailable');

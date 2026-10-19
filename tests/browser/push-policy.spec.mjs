@@ -1447,6 +1447,66 @@ test('generated ordinary chat accepts the actual null-session approval placehold
  assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,afterOwner);
 }));
 
+for(const runSession of ['session-one','old-alias'])for(const outcome of ['held',503,403,404,409])
+for(const detailOutcome of [403,404,409].includes(outcome)?[404,'unavailable']:['unavailable'])
+for(const freshList of outcome===409 && detailOutcome===404?[false,true]:[false])
+test(`generated held initial approval GET preserves decision authority (${runSession}, ${outcome}, ${detailOutcome}, fresh list ${freshList})`,{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
+ const pending=approvalRecord({run_session_id:runSession}),detailPath='/approvals/approval-1';
+ let releaseList,releaseDetail,releaseDecision;
+ control.notificationTarget={...approvalTarget,run_session_id:runSession};
+ control.approvals=[pending];
+ control.approvalDetail={...pending,status:'unavailable',executable:false,choices:[]};
+ control.approvalHold=new Promise(resolve=>{releaseList=resolve;});
+ control.approvalDetailHold=new Promise(resolve=>{releaseDetail=resolve;});
+ control.decisionHold=new Promise(resolve=>{releaseDecision=resolve;});
+ const requested=page.waitForRequest(request=>new URL(request.url()).pathname.endsWith(detailPath));
+ await mount(page,'?notification=notice-target');await requested;
+ control.approvalHold=null;releaseList();
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.getByRole('button',{name:'Approve once',exact:true}).waitFor();
+ assert.equal(calls.filter(call=>call.p===detailPath).length,1,'positive INITIAL GET handler admission');
+ await holdPasskey(page);
+ await card.getByRole('button',{name:'Approve once',exact:true}).click();
+ await page.waitForFunction(()=>window.passkeyRequest?.started);
+ const posted=page.waitForRequest(request=>new URL(request.url()).pathname.endsWith('/approval-1/decision'));
+ await page.evaluate(()=>finishPasskey());await posted;
+ control.approvals=freshList?[pending]:[];
+ if(outcome!=='held'){
+  const decided=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approval-1/decision'));
+  control.decisionStatus=outcome;releaseDecision();
+  await (await decided).finished();
+  await card.getByRole('heading',{name:outcome===503?'Decision status unknown'
+   :freshList?'Approval required':'Approval details unavailable',exact:true}).waitFor();
+  if(freshList)await page.waitForFunction(()=>
+   document.querySelectorAll('[data-approval-id="approval-1"] button:enabled').length===2);
+ }
+ assert.equal(calls.filter(call=>call.p===detailPath).length,1,'refresh still shares the pre-decision initial GET');
+ if(detailOutcome===404)control.approvalDetailStatus=404;
+ const staleResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith(detailPath));
+ control.approvalDetailHold=null;releaseDetail();
+ const response=await staleResponse;
+ assert.equal(response.status(),detailOutcome===404?404:200,'the initial GET returns before its abort deadline');
+ await response.finished();
+ await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+ assert.equal(await card.getByRole('heading').innerText(),outcome==='held'?'Decision pending'
+  :outcome===503?'Decision status unknown':freshList?'Approval required':'Approval details unavailable',
+ 'the held initial GET must preserve newer decision authority');
+ assert.equal(await card.locator('button:enabled').count(),freshList?2:0);
+ if(outcome==='held'){
+  releaseDecision();
+  await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+ }else if(outcome!==503){
+  control.approvalDetailStatus=200;control.approvalDetail=pending;
+  await page.evaluate(()=>dispatchEvent(new Event('focus')));
+  await card.getByRole('heading',{name:'Approval required',exact:true}).waitFor();
+  assert.equal(await card.locator('button:enabled').count(),2);
+ }
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+ assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,1);
+ assert.equal(calls.filter(call=>call.p==='/auth/verify/finish').length,1);
+ await page.evaluate(()=>app.destroy());
+}));
+
 test('held approval details cannot replace an ambiguous decision with sending',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{
  const pending=approvalRecord(),sending=approvalRecord({status:'sending',executable:false,choices:[]});
  control.notificationTarget=approvalTarget;control.approvals=[pending];control.approvalDetail=sending;
