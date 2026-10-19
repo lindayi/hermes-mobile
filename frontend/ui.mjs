@@ -1361,12 +1361,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       approvalHistoryLoading=Promise.resolve().then(async()=>{
         const previousOffset=oldestOffset,
           target=notificationTarget?.kind==='approval'
-            ?unplacedApprovalItems().find(item=>item.id===notificationTarget.approval_id):null;
+            ?unplacedApprovalItems().find(item=>item.id===notificationTarget.approval_id):null,
+          retryFocused=approvalHistoryNotice?.contains(doc.activeElement);
         approvalHistoryOutcome='loading';showApprovalHistory();
         if(target){
           const baseline=approvalTargetReaderBaseline;
           approvalHistoryReader={focus:doc.activeElement,top:messages.scrollTop,
-            moved:!baseline || doc.activeElement!==baseline.focus || messages.scrollTop!==baseline.top};
+            moved:!baseline || (!retryFocused
+              && (doc.activeElement!==baseline.focus || messages.scrollTop!==baseline.top))};
         }
         try{
           while(current() && unplacedApprovalItems().length && oldestOffset>0 && approvalHistoryPages<100){
