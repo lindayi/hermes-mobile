@@ -77,6 +77,30 @@ def test_completed_persisted_turn_becomes_authoritative_native_history(chat, lat
     assert body['total'] == (7 if later_turn else 5)
 
 
+def test_persisted_text_turns_keep_run_anchors_across_history_pages(chat):
+    app, client, user, _ = chat
+    old = admit(chat, 'Old notification request', key='old-notification')
+    persist(chat, [('user', 'Old notification request', None), ('assistant', 'Old result', None)])
+    app.state.journal.finish(user['id'], old['id'], 'completed', output='Old result')
+    middle = []
+    for index in range(65):
+        middle.extend((('user', f'Unrelated request {index}', None),
+                       ('assistant', f'Unrelated result {index}', None)))
+    persist(chat, middle)
+    newer = admit(chat, 'New active request', key='new-active')
+    persist(chat, [('user', 'New active request', None)])
+
+    latest_page = client.get(BASE + '/sessions/wa-1/messages?latest=true&limit=100&turn_boundary=true').json()
+    assert latest_page['run']['id'] == newer['id']
+    assert not any(item.get('run_id') == old['id'] for item in latest_page['items'])
+    assert latest_page['total'] > 100
+    old_page = client.get(BASE + '/sessions/wa-1/messages?limit=100&offset=0&turn_boundary=true').json()
+    old_input = next(item for item in old_page['items'] if item['content'] == 'Old notification request')
+    assert old_input['run_id'] == old['id']
+    unrelated = next(item for item in old_page['items'] if item['content'] == 'Unrelated request 0')
+    assert 'run_id' not in unrelated
+
+
 def test_repeated_identical_turns_are_not_globally_deduplicated(chat):
     app, _, user, _ = chat
     first = admit(chat, text='Again')

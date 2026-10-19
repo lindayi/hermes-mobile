@@ -317,6 +317,13 @@ _ISSUE98_PHOTO_POLICY_FIXTURE = {
     'backend/runs.py': 'be188d9897ff925fc55677881b380bba5f97f3c5d6b3ae3d6e7faca72c3d8464',
 }
 
+_PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
+    'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
+    'backend/notifications.py': 'a56b13b0c78a9dc067a7cc252753a7c3b822df5cc9fc2aa8f2321859be08726e',
+    'backend/native_catalog.py': 'f6b54791ba24637b193ff247b34c9992764e6ba27dd4abd368eb61c83de15f69',
+    'backend/orchestration.py': 'f9869561d6dc64b29ac4ecbdde6c7cad6a757595eab9c5c1c9e3afe3fd89f545',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
@@ -337,7 +344,8 @@ def _source_files():
             | _PR105_OWNER_ABANDONMENT_FIXTURE
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
-            | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE)
+            | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
+            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
 
 
 def _source_ci():
@@ -815,6 +823,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE85_PHOTO_FIXTURE)
     pending |= set(_ISSUE98_PHOTO_POLICY_FIXTURE)
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
+    pending |= set(_PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -889,6 +898,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         if path in _PENDING_ISSUE67_WORKFLOW_FIXTURE
     } == _PENDING_ISSUE67_WORKFLOW_FIXTURE
     assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+    } == _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+    for path, digest in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE.items():
+        source = Path(__file__).resolve().parents[1] / path
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+    assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
     } == _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
     assert {
@@ -909,11 +924,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     } == {
         path: digest for path, digest in (
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
-            | _ISSUE98_PHOTO_POLICY_FIXTURE
+            | _ISSUE98_PHOTO_POLICY_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
-                         | _ISSUE98_PHOTO_POLICY_FIXTURE).items():
+                         | _ISSUE98_PHOTO_POLICY_FIXTURE
+                         | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {

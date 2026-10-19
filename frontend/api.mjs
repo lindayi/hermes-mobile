@@ -6,16 +6,19 @@ export function createAPI(fetcher = globalThis.fetch.bind(globalThis)) {
   let csrf = '';
   return {
     clear() { csrf = ''; },
-    async request(path, {method = 'GET', body, rawBody, headers:extraHeaders, signal} = {}) {
+    async request(path, {method = 'GET', body, rawBody, headers:extraHeaders, signal, query} = {}) {
       if (!path.startsWith('/') || path.startsWith('//') || /[\\\r\n]/.test(path) || path.split(/[/?]/).includes('..')) throw new APIError('Invalid API path.');
       if (body !== undefined && rawBody !== undefined) throw new APIError('Invalid API request body.');
+      if (query !== undefined && (!query || typeof query !== 'object' || Array.isArray(query)
+          || Object.values(query).some(value => typeof value !== 'string'))) throw new APIError('Invalid API query.');
       const headers = {Accept: 'application/json'};
       if (body !== undefined) headers['Content-Type'] = 'application/json';
       Object.assign(headers, extraHeaders || {});
       if (method !== 'GET' && csrf) headers['X-CSRF-Token'] = csrf;
+      const search = query === undefined ? '' : new URLSearchParams(query).toString();
       let response;
       try {
-        response = await fetcher(`${BASE}app-api${path}`, {
+        response = await fetcher(`${BASE}app-api${path}${search ? `${path.includes('?') ? '&' : '?'}${search}` : ''}`, {
           method, headers, credentials:'same-origin', cache:'no-store', signal,
           ...(body !== undefined ? {body:JSON.stringify(body)} : {}),
           ...(rawBody !== undefined ? {body:rawBody} : {}),

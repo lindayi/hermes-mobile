@@ -194,3 +194,8 @@ details[open]>summary .disclosure-icon{transform:rotate(90deg)}
  overscroll-behavior:contain;
 }
 .technical-strip{--disclosure-surface:var(--bg)}
+.approval-card{overflow-wrap:anywhere}
+.approval-card h3{margin:0 0 10px}
+.approval-card .review-payload{max-height:35dvh;overflow:auto}
+.approval-card .review-payload:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+.approval-card .actions button{flex:1 1 120px;white-space:normal}

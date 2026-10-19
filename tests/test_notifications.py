@@ -143,7 +143,7 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(service.flush()['sent'], 0)
         self.assertEqual(len(sent), 1)
         payload = json.loads(sent[0]['data'])
-        self.assertEqual(payload['url'], '/hermes/?inbox=' + item['id'])
+        self.assertEqual(payload['url'], '/hermes/?notification=' + item['id'])
         self.assertNotIn('Secret', sent[0]['data'])
         self.assertEqual(payload['title'], 'Hermes')
         self.assertEqual(payload['body'], 'You have a new notification.')

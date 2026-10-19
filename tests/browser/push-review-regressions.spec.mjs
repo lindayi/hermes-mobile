@@ -192,7 +192,7 @@ test('generated worker rejects all Unicode Cf and scheme-shaped links in either 
  for(const value of unsafe)for(const field of ['title','body']){
   const shown=await push({title:'Request complete',body:'Your document is ready for review.',inbox_id:'notice-safe',[field]:value});
   assert.equal(shown.title,'Hermes',`${field}: ${JSON.stringify(value)}`);assert.equal(shown.body,'Open Hermes to read your update.');
-  assert.equal(shown.actions,undefined);assert.equal(shown.image,undefined);assert.equal(shown.data.url,f.url+'?inbox=notice-safe');
+  assert.equal(shown.actions,undefined);assert.equal(shown.image,undefined);assert.equal(shown.data.url,f.url+'?notification=notice-safe');
  }
  for(const body of ['Your document is ready for review.','Result: completed successfully.','Révision terminée — 文档已准备好。']){
   const shown=await push({title:'Request complete',body,inbox_id:'notice-safe'});assert.equal(shown.title,'Request complete');assert.equal(shown.body,body);

@@ -78,7 +78,7 @@ def test_privacy_fixture_is_explicit_and_rechecked_on_retry(tmp_path):
     assert len(calls) == 2
     assert calls[1]['title'] == 'Hermes'
     assert calls[1]['body'] == 'You have a new notification.'
-    assert calls[1]['url'] == '/hermes/?inbox=' + item['id']
+    assert calls[1]['url'] == '/hermes/?notification=' + item['id']
     assert 'Report ready' not in json.dumps(calls[1])
     assert 'Three tasks completed' not in json.dumps(calls[1])
     assert service.list_inbox(user['id'])[0]['body'] == 'Three tasks completed'

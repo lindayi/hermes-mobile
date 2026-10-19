@@ -37,14 +37,85 @@ export function formatMessageTime(value, {locale, timeZone} = {}) {
 export async function mountApp(doc, api, win = doc.defaultView) {
   const root = doc.getElementById('app');
   const state = {user:null,view:'chats',session:null,query:'',searchOpen:false,offset:0,kind:'chats'};
-  let content, nav, routeVersion = 0, destroyed=false;
+  let content, nav, routeVersion = 0, authGeneration=0, destroyed=false;
   let stream = null, cancelTracking=null, headerState=null;
   let stopDisclosureReachability=null;
-  let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null;
+  let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null,
+    approvalHistoryAnchors=null;
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
-  const handledApprovals=new Set();
+  const handledApprovals=new Set(),handledApprovalDetails=new Map(),locallyExpiredApprovals=new Set(),mountedLocallyExpiredApprovals=new Set();
+  const maxHandledApprovals=100;
+  const approvalDecisionStates=new Map(),maxApprovalDecisionStates=1000;
+  let approvalDecisionAuthorityRevision=0;
+  const finalApprovalStatuses=new Set(['resolved','resolved_external','cancelled','expired']);
+  const approvalStatusRank={pending:0,sending:1,unknown:2};
+  const preferredApprovalStatus=(fresh,cached,cachedIsLocalExpiry=false)=>{
+    if(finalApprovalStatuses.has(fresh))return fresh;
+    if(finalApprovalStatuses.has(cached)
+        && !(cached==='expired' && cachedIsLocalExpiry && ['sending','unknown'].includes(fresh)))return cached;
+    return (approvalStatusRank[cached] ?? 0)>(approvalStatusRank[fresh] ?? 0)?cached:fresh;
+  };
   const approvalKey=item=>`${state.user?.id}:${item.run_id}:${item.id || item.request_id}`;
-  function leaveConversation(){stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;headerState?.destroy();headerState=null;root.querySelector('[data-rename-dialog]')?.remove();}
+  const approvalDecisionKey=(owner,sessionId,item)=>JSON.stringify([owner,sessionId,item.run_session_id,
+    item.run_id,item.request_id,item.id]);
+  const approvalDecisionIdentity=(owner,sessionId,item)=>({
+    owner,canonicalSessionId:sessionId,id:item.id,session_id:item.session_id,
+    run_session_id:item.run_session_id,run_id:item.run_id,request_id:item.request_id
+  });
+  const approvalDispatchedResult=(record,status,error)=>approvalState?.decision(record,status,error);
+  const retainApprovalDecision=(key,record)=>{
+    if(approvalDecisionStates.get(key)===record){
+      approvalDecisionStates.delete(key);approvalDecisionStates.set(key,record);return true;
+    }
+    while(approvalDecisionStates.size>=maxApprovalDecisionStates){
+      const evictable=[...approvalDecisionStates].find(([oldKey,old])=>
+        oldKey!==key && !old.dispatched && !old.needsFreshAuthority);
+      if(!evictable)return false;
+      approvalDecisionStates.delete(evictable[0]);
+    }
+    approvalDecisionStates.set(key,record);return true;
+  };
+  const hasApprovalDecisionCapacity=key=>approvalDecisionStates.size<maxApprovalDecisionStates
+    || [...approvalDecisionStates].some(([oldKey,old])=>
+      oldKey!==key && !old.dispatched && !old.needsFreshAuthority);
+  const settleApprovalDecision=(owner,sessionId,item,status)=>{
+    const record=approvalDecisionStates.get(approvalDecisionKey(owner,sessionId,item));
+    if(!record)return;
+    record.dispatched=false;record.needsFreshAuthority=false;record.status=status;
+    record.state.pending=false;record.state.decisionStarted=false;record.state.dispatched=false;
+    record.state.uncertain=false;record.state.needsFreshAuthority=false;record.state.error='';
+  };
+  const markApprovalDecisionUncertain=(owner,sessionId,item)=>{
+    const record=approvalDecisionStates.get(approvalDecisionKey(owner,sessionId,item));
+    if(!record)return;
+    record.dispatched=true;record.needsFreshAuthority=false;record.status='unknown';
+    record.state.pending=false;record.state.decisionStarted=false;record.state.dispatched=true;
+    record.state.uncertain=true;record.state.needsFreshAuthority=false;
+  };
+  const approvalDetailsUnavailable=item=>item?.status==='details_unavailable' || item?.details_unavailable===true;
+  const locallyExpiredApproval=key=>locallyExpiredApprovals.has(key)||mountedLocallyExpiredApprovals.has(key);
+  const rememberHandledApproval=(key,item,status,locallyExpired=false)=>{
+    handledApprovals.delete(key);
+    handledApprovals.add(key);
+    if(item)handledApprovalDetails.set(key,{...item,status,executable:false,choices:[]});
+    if(locallyExpired){locallyExpiredApprovals.add(key);mountedLocallyExpiredApprovals.add(key);}
+    else{locallyExpiredApprovals.delete(key);mountedLocallyExpiredApprovals.delete(key);}
+    while(handledApprovals.size>maxHandledApprovals){
+      const oldest=handledApprovals.values().next().value;
+      handledApprovals.delete(oldest);handledApprovalDetails.delete(oldest);locallyExpiredApprovals.delete(oldest);
+    }
+  };
+  function leaveConversation(){
+    stopDisclosureReachability?.();stopDisclosureReachability=null;stopPushPresence?.();stopPushPresence=null;
+    currentModelSync=null;closeEditor?.(false);stopExtras?.();stopExtras=null;approvalState=null;
+    for(const [key,record] of approvalDecisionStates)if(record.owner===state.user?.id
+        && !record.dispatched && !record.needsFreshAuthority && !record.rejectedUnavailable){
+      record.state.pending=false;record.state.decisionStarted=false;
+      approvalDecisionStates.delete(key);
+    }
+    mountedLocallyExpiredApprovals.clear();headerState?.destroy();headerState=null;
+    root.querySelector('[data-rename-dialog]')?.remove();
+  }
   function disconnect(){const cancel=cancelTracking;cancelTracking=null;cancel?.();stream?.close();stream=null;}
   const drafts = new Map();
   const attempts = new Map();
@@ -54,6 +125,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   const storage = {get(key,persistent=false) { try { return (persistent ? win.localStorage : win.sessionStorage).getItem(key); } catch { return null; } }, set(key,value,persistent=false) {try { const store=persistent ? win.localStorage : win.sessionStorage;value == null ? store.removeItem(key) : store.setItem(key,value); } catch { /* private browsing may disable storage */ }}};
   const key = name => `hermes:${state.user?.id}:${name}`;
   const photoURL=(sessionId,id)=>`${BASE}app-api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}`;
+  const validNotificationId=value=>typeof value==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+  const transientReadFailure=error=>error?.status==null || error.status===0
+    || error.status===408 || error.status===429 || error.status>=500 && error.status<600;
   const h = (tag, attrs = {}, ...children) => {
     const el = doc.createElement(tag);
     for (const [key,value] of Object.entries(attrs)) {
@@ -149,10 +223,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       inform(errorMessage(error),true);
     }
   }
-  function expiredSession() {disconnect();leaveConversation();releasePresenceIdentity();routeVersion++;state.user=null;drafts.clear();attempts.clear();api.clear();showAuth();inform('Your session expired. Sign in with your passkey to continue.',true);}
+  function expiredSession() {authGeneration++;disconnect();leaveConversation();releasePresenceIdentity();routeVersion++;state.user=null;drafts.clear();attempts.clear();api.clear();showAuth();inform('Your session expired. Sign in with your passkey to continue.',true);}
   async function signOut(remote=true) {
     if(remote)await api.request('/auth/logout',{method:'POST',body:{}});
-    disconnect();leaveConversation();releasePresenceIdentity();drafts.clear();attempts.clear();
+    authGeneration++;disconnect();leaveConversation();releasePresenceIdentity();drafts.clear();attempts.clear();
     try {for(const name of Object.keys(win.sessionStorage))if(name.startsWith(`hermes:${state.user?.id}:`))win.sessionStorage.removeItem(name);}catch{}
     try {for(const name of Object.keys(win.localStorage))if(name.startsWith(`hermes:${state.user?.id}:`))win.localStorage.removeItem(name);}catch{}
     api.clear();state.user=null;showAuth();inform('Signed out. Local drafts on this device were cleared.');
@@ -430,12 +504,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const pendingApproval=item=>approvals.status==='fulfilled' && (approvals.value.items || []).find(a=>a.id===item.approval_id && a.run_id===item.run_id && a.request_id===item.request_id);
     const approvalCard=item=>[...section.querySelectorAll('[data-approval-id]')].find(el=>el.dataset.approvalId===item.approval_id);
     if(approvals.status==='fulfilled')for(const item of approvals.value.items || []) {
-      const actionText=typeof item.action==='string' ? item.action : JSON.stringify(item.action || item.payload || item);
+      if(item.inbox_visible===false || (item.session_id && item.inbox_visible!==true))continue;
+      const actionText=typeof item.command==='string' ? item.command
+        : typeof item.action==='string' ? item.action : 'Action details are unavailable.';
       section.append(h('article',{class:'card approval inbox-approval','data-approval-id':item.id,tabindex:'-1'},h('details',{},
         h('summary',{class:'inbox-summary inbox-approval-summary'},disclosure(),h('span',{class:'inbox-summary-text'},h('span',{class:'eyebrow'},'NEEDS YOUR REVIEW'),h('h2',{},item.title || 'Action requested'),h('span',{class:'caption'},'Expires: ',date(item.expires_at)))),
-        h('div',{class:'inbox-body'},h('pre',{class:'review-payload'},actionText),h('p',{},'Target: ',typeof item.target==='string' ? item.target : JSON.stringify(item.target || 'See action details')),
-        h('div',{class:'actions'},button('Approve once',e=>inboxAction(e.currentTarget,async()=>{await ceremony('verify');if(!current())return;await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'once'}});if(!current())return;handledApprovals.add(approvalKey(item));await navigate('inbox');}),'primary'),
-        button('Deny',e=>inboxAction(e.currentTarget,async()=>{await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'deny'}});if(!current())return;handledApprovals.add(approvalKey(item));await navigate('inbox');}),'secondary'))))));
+        h('div',{class:'inbox-body'},h('pre',{class:'review-payload'},actionText),h('p',{},'Target: ',typeof item.target==='string' ? item.target : 'See action details'),
+        h('div',{class:'actions'},button('Approve once',e=>inboxAction(e.currentTarget,async()=>{await ceremony('verify');if(!current())return;await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'once'}});if(!current())return;rememberHandledApproval(approvalKey(item),item,'resolved');await navigate('inbox');}),'primary'),
+        button('Deny',e=>inboxAction(e.currentTarget,async()=>{await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,{method:'POST',body:{decision:'deny'}});if(!current())return;rememberHandledApproval(approvalKey(item),item,'resolved');await navigate('inbox');}),'secondary'))))));
     } else section.append(h('p',{class:'inline-error'},'Approvals unavailable: ',errorMessage(approvals.reason)));
     if(deliveries.status==='fulfilled') {
       for(const delivery of deliveries.value.items || []) {
@@ -472,7 +548,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(!deliveries.value.items?.length)section.append(empty('No updates',''));
     } else section.append(h('p',{class:'inline-error'},'Inbox unavailable: ',errorMessage(deliveries.reason)));
     content.replaceChildren(h('div',{class:'page-heading inbox-heading'},h('div',{},h('h1',{},'Inbox')),h('div',{class:'actions'},button(icon('refresh'),()=>navigate('inbox'),'quiet icon-button',{'aria-label':'Refresh',title:'Refresh'}),bulk,clear)),bulkStatus,section);
-    const target=new URL(win.location.href).searchParams.get('inbox');
+    const params=new URL(win.location.href).searchParams;
+    const target=params.get('notification') || params.get('inbox');
     if(target){const item=deliveries.status==='fulfilled' && deliveries.value.items?.find(item=>item.id===target);const card=item?.approval_id && pendingApproval(item)?approvalCard(item):[...section.querySelectorAll('[data-inbox-id]')].find(el=>el.dataset.inboxId===target);card?.scrollIntoView?.({block:'center'});if(card?.matches('.approval'))card.focus();}
   }
   async function chats(version) {
@@ -775,9 +852,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(live){live=false;send(false);}
     };
   }
-  async function openSession(session) {
+  async function openSession(session, notificationTarget=null) {
     if(deletions.get(deletionKey(state.user?.id,session.id))==='deleted'){inform('This conversation was deleted. Its stored history is no longer available.');return;}
     disconnect();leaveConversation();
+    approvalHistoryAnchors=null;
     const version = ++routeVersion,owner=state.user?.id;
     const current=()=>!destroyed && version===routeVersion && owner===state.user?.id;
     const resolveTitle=!Object.hasOwn(session,'title');
@@ -798,7 +876,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(!current())return;
         if(error.status===401){expiredSession();return;}
         const heading=header.querySelector('h1');heading.textContent=heading.title='Conversation unavailable';
-        content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id}));},'secondary'));
+        content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
         return;
       }
     }
@@ -814,7 +892,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const initial=connection.token();
     let result;
     try {result=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?latest=true&turn_boundary=true`);}
-    catch(error){if(!current())return;connection.failure(initial);throw error;}
+    catch(error){
+      if(!current())return;
+      if(error.status===401){expiredSession();return;}
+      connection.failure(initial);
+      content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),
+        button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
+      return;
+    }
     if (!current()) return;
     connection.snapshot(result,initial);
     const messages = h('div',{class:'messages','aria-label':'Conversation'});
@@ -843,7 +928,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       messages.removeEventListener('keydown',markInitialScrollIntent);
       messages.removeEventListener('scroll',noteInitialScroll);
     };
-    const shouldFollowInitialRestore=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString() && (!initialRestorePending || !initialScrollAway);
+    const shouldFollowInitialRestore=()=>(!notificationTarget || !initialRestorePending)
+      && messages.scrollHeight-messages.scrollTop-messages.clientHeight<100
+      && !win.getSelection()?.toString() && (!initialRestorePending || !initialScrollAway);
     stopDisclosureReachability=observeDisclosureReachability(messages,current);
     const resultIds=new Set();
     let reflowBackground=()=>({changed:false,tail:false});
@@ -880,15 +967,28 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       return rendered;
     }
     messages.append(...renderPage(result.items));
-    let oldestOffset=result.offset ?? 0;
+    let oldestOffset=result.offset ?? 0,loadingOlder=null;
     const turnHint=h('p',{class:'caption turn-continuation',hidden:!result.turn_boundary?.truncated},'This turn continues earlier. Load older messages to see the rest.');
     messages.prepend(turnHint);
-    if(oldestOffset > 0){
-      const more=button('Load older messages',e=>action(e.currentTarget,async()=>{
-        const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
+    let more,renderApprovals=()=>{},approvalHistoryReader=null;
+    const loadOlder=()=>{
+      if(loadingOlder)return loadingOlder;
+      if(!current() || oldestOffset<=0)return Promise.resolve(false);
+      const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
+      const request=(async()=>{
         const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
-        if(version !== routeVersion)return;
+        if(!current())return false;
+        if(approvalHistoryReader){
+          const moved=doc.activeElement!==approvalHistoryReader.focus
+            || messages.scrollTop!==approvalHistoryReader.top;
+          approvalHistoryReader.moved ||= moved;
+          if(notificationTarget?.kind==='approval')approvalTargetReaderMoved ||= moved;
+        }
         const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
+        const viewport=messages.getBoundingClientRect(),readerAnchor=[...messages.children].find(node=>{
+          const rect=node.getBoundingClientRect();
+          return rect.bottom>viewport.top && rect.top<viewport.bottom && !node.hidden;
+        }),readerTop=readerAnchor?.getBoundingClientRect().top;
         const fragment=doc.createDocumentFragment();
         const olderNodes=renderPage(page.items),earliest=turnHint.nextElementSibling;
         const seam=olderNodes.at(-1);
@@ -898,14 +998,117 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         }
         fragment.append(...olderNodes);
         turnHint.after(fragment);
+        approvalHistoryAnchors=null;
         turnHint.hidden=!page.turn_boundary?.truncated;
         oldestOffset=page.offset ?? offset;
         reflowBackground();
-        if(!page.items?.length || oldestOffset === 0)more.remove();
-        messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
-      }),'secondary');messages.prepend(more);
+        renderApprovals();
+        if(!page.items?.length || oldestOffset===0)more?.remove();
+        messages.scrollTop=readerAnchor?.isConnected
+          ?messages.scrollTop+readerAnchor.getBoundingClientRect().top-readerTop
+          :previousTop+messages.scrollHeight-previousHeight;
+        if(approvalHistoryReader){
+          approvalHistoryReader.focus=doc.activeElement;approvalHistoryReader.top=messages.scrollTop;
+        }
+        return Boolean(page.items?.length);
+      })();
+      const pending=request.finally(()=>{if(loadingOlder===pending)loadingOlder=null;});
+      loadingOlder=pending;
+      return pending;
+    };
+    if(oldestOffset > 0){
+      more=button('Load older messages',e=>action(e.currentTarget,loadOlder),'secondary');
+      messages.prepend(more);
     }
     if (!result.items?.length) messages.append(empty('New chat',''));
+    let notificationTargetNode=null,notificationTargetRun=null,notificationTargetRead=null,notificationTargetNotice=null;
+    const showRequestTargetNotice=retryable=>{
+      notificationTargetNotice?.remove();
+      const unavailable=h('section',{class:'clarification-card notification-unavailable',role:'status'},
+        h('h3',{},retryable?'Request details could not be loaded':'Request unavailable'),
+        h('p',{},retryable?'This request could not be loaded right now. Your chat history is unchanged.'
+          :'This request is no longer available in this chat.'));
+      if(retryable){
+        let retry;
+        retry=button('Retry request details',()=>{
+          if(!current() || !retry.isConnected || retry.disabled || notificationTargetRead)return;
+          retry.disabled=true;
+          void restoreRequestTarget();
+        },'secondary',{disabled:true});
+        unavailable.append(retry);
+      }
+      messages.append(unavailable);notificationTargetNotice=unavailable;
+      unavailable.scrollIntoView?.({block:'center'});
+    };
+    const restoreRequestTarget=()=>{
+      if(notificationTargetRead)return notificationTargetRead;
+      const pending=(async()=>{
+        let run=notificationTargetRun;
+        if(!run){
+          try{run=await api.request(`/runs/${encodeURIComponent(notificationTarget.run_id)}`);}
+          catch(error){
+            if(!current())return;
+            if(error.status===401){expiredSession();return;}
+            showRequestTargetNotice(transientReadFailure(error));return;
+          }
+          if(!current())return;
+          if(run?.id!==notificationTarget.run_id || run.session_id!==notificationTarget.run_session_id
+              || notificationTarget.session_id!==session.id
+              || typeof run.input!=='string' || !run.input.trim()){
+            showRequestTargetNotice(false);return;
+          }
+          notificationTargetRun=run;
+        }
+        const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
+          .find(node=>node.dataset.historyRun===run.id && node.dataset.historySession===session.id);
+        let anchor=findAnchor(),pages=0;
+        while(!anchor && oldestOffset>0 && pages++<100){
+          let loaded;
+          try{loaded=await loadOlder();}
+          catch(error){
+            if(!current())return;
+            if(error.status===401){expiredSession();return;}
+            showRequestTargetNotice(transientReadFailure(error));return;
+          }
+          if(!current())return;
+          if(!loaded)break;
+          anchor=findAnchor();
+        }
+        if(!current() || notificationTargetNode?.isConnected)return;
+        notificationTargetNotice?.remove();notificationTargetNotice=null;
+        const target=h('article',{class:'message notification-target','data-notification-run':run.id,
+          'data-history-run':run.id,'data-history-session':session.id,tabindex:'-1'},
+        h('div',{class:'message-author'},run.status==='failed'?'Request needs attention'
+          :run.status==='completed'?'Request finished':'Request outcome unavailable',
+          messageTime(run.updated_at || run.created_at)),
+        h('p',{class:'notification-request-input'},run.input),
+        h('strong',{},run.status==='completed'?'Result':'Status'),
+        run.status==='completed' && typeof run.output==='string' && run.output.trim()
+          ? renderMarkdown(doc,run.output)
+          : h('p',{class:'notification-request-result'},run.status==='failed'
+            ? 'The request failed. Review its conversation for details.'
+            : `The request status is ${typeof run.status==='string'?run.status:'unavailable'}.`));
+        messages.querySelector('.empty')?.remove();
+        if(anchor)anchor.after(target);else messages.append(target);
+        notificationTargetNode=target;
+        if(current() && messages.isConnected && target.isConnected){
+          target.scrollIntoView?.({block:'center'});target.focus();
+        }
+      })();
+      notificationTargetRead=pending;
+      const release=()=>{
+        if(notificationTargetRead!==pending)return;
+        notificationTargetRead=null;
+        const retry=notificationTargetNotice?.querySelector('button');
+        if(retry)retry.disabled=false;
+      };
+      void pending.then(release,release);
+      return pending;
+    };
+    if(notificationTarget?.kind==='request'){
+      await restoreRequestTarget();
+      if(!current())return;
+    }
     const draftKey=key(`draft:${session.id}`);
     const textarea = h('textarea',{name:'message',rows:2,placeholder:'Message Hermes…','aria-label':'Message Hermes',maxlength:32000});
     textarea.value=drafts.get(session.id) ?? storage.get(draftKey) ?? '';
@@ -981,12 +1184,1046 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     });
     const accepted=result.run || result.last_run;
     const approvalNotice=h('div',{class:'approval-notice',role:'status','aria-live':'polite',hidden:true});
-    let approvalRevision=0, approvalPending=new Map(), genericApproval=false, currentApprovalRun=accepted?.id;
-    const renderApprovals=()=>{const count=approvalPending.size;approvalNotice.hidden=!count && !genericApproval;approvalNotice.textContent=count?`${count} action${count===1?'':'s'} needs your review. Open Inbox to see the exact request.`:genericApproval?'An action needs your review. Open Inbox to see the exact request.':'';};
-    const reconcileApprovals=async()=>{const revision=++approvalRevision;try{const data=await api.request('/approvals');if(version!==routeVersion || revision!==approvalRevision || !Array.isArray(data.items))return;const next=new Map(data.items.filter(item=>(item.run_id===currentApprovalRun || item.session_id===session.id) && !handledApprovals.has(approvalKey(item))).map(item=>[approvalKey(item),item]));for(const [key] of approvalPending)if(!next.has(key))handledApprovals.add(key);approvalPending=next;genericApproval=false;renderApprovals();if(next.size)connection.run('waiting_for_approval');}catch(error){if(version===routeVersion && error.status===401)expiredSession();}};
-    approvalState={reconcile:reconcileApprovals,run(id){currentApprovalRun=id;},event(item,runId){if(version!==routeVersion || handledApprovals.has(approvalKey({...item,run_id:runId})))return false;approvalRevision++;if(item.id || item.request_id){const value={...item,run_id:runId};approvalPending.set(approvalKey(value),value);}else genericApproval=true;renderApprovals();return true;},finish(runId){approvalRevision++;for(const [key,item] of approvalPending)if(item.run_id===runId){handledApprovals.add(key);approvalPending.delete(key);}genericApproval=false;renderApprovals();}};
-    win.addEventListener('focus',reconcileApprovals);stopExtras=()=>{approvalRevision++;win.removeEventListener('focus',reconcileApprovals);};
+    const approvalCards=new Map(),approvalItems=new Map(),approvalFinals=new Map(),approvalCardViews=new Map(),approvalActionStates=new Map(),approvalDetailReads=new Map(),
+      approvalDetailEpochs=new Map();
+    let approvalDetailEpoch=0;
+    let approvalRevision=0,approvalListRevision=0,approvalPending=new Map(),genericApproval=false,
+      currentApprovalRun=accepted?.id || notificationTarget?.run_id,
+      currentApprovalRunSession=accepted?.session_id || notificationTarget?.run_session_id || session.id,
+      approvalTargetPlaceholder=null,
+      approvalTargetTimer=null,approvalTargetFocusedCard=false,approvalTargetPlaceholderFocused=false,
+      approvalTargetReadGeneration=0;
+    const approvalExpiryTimers=new Map();
+    let approvalDetailBatchOffset=0,missingApprovalDetailOffset=0,missingApprovalDetailsRefreshing=false,
+      approvalListIncomplete=false;
+    const approvalDataFields=[
+      'id','run_id','run_session_id','request_id','session_id','status','title','command','action',
+      'target','expires_at','executable','choices','error','details_unavailable'
+    ];
+    const sameApprovalIdentity=(left,right)=>left?.id===right?.id && left.run_id===right.run_id
+      && left.request_id===right.request_id && left.session_id===right.session_id
+      && left.run_session_id===right.run_session_id;
+    const freshRejectedApprovalAuthority=(decision,actionState,detail,authorityRevision)=>
+      actionState?.needsFreshAuthority && decision?.needsFreshAuthority
+      && decision.retryAuthorityRevision<=authorityRevision
+      && decision.status==='rejected' && decision.state===actionState
+      && !decision.dispatched && !actionState.dispatched && !actionState.decisionStarted
+      && !actionState.pending && !actionState.uncertain
+      && decision.owner===owner && decision.canonicalSessionId===session.id
+      && sameApprovalIdentity(decision.identity,detail);
+    const acceptsApprovalDetail=(decision,actionState,detail,authorityRevision)=>{
+      if(!decision)return true;
+      if(decision.owner!==owner || decision.canonicalSessionId!==session.id
+          || decision.state!==actionState || !sameApprovalIdentity(decision.identity,detail))return false;
+      if(finalApprovalStatuses.has(detail.status))return true;
+      if(decision.retryAuthorityRevision>authorityRevision)return false;
+      if(decision.needsFreshAuthority)
+        return freshRejectedApprovalAuthority(decision,actionState,detail,authorityRevision);
+      return detail.status!=='unavailable' || !(decision.dispatched || actionState?.uncertain);
+    };
+    const sameApprovalData=(left,right)=>!!left && approvalDataFields.every(field=>
+      JSON.stringify(left[field])===JSON.stringify(right[field]));
+    const retainedApprovalDecision=item=>{
+      const record=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+      return record?.owner===owner && record.canonicalSessionId===session.id
+        && sameApprovalIdentity(record.identity,item);
+    };
+    const approvalDetailGeneration=runId=>approvalDetailEpochs.get(runId) || 0;
+    const invalidateApprovalDetails=runId=>{
+      approvalDetailEpochs.set(runId,++approvalDetailEpoch);
+      if(approvalDetailEpochs.size>1000)for(const oldRunId of approvalDetailEpochs.keys()){
+        if(oldRunId!==runId && ![...approvalDetailReads.values()].some(read=>read.runId===oldRunId))
+          approvalDetailEpochs.delete(oldRunId);
+        if(approvalDetailEpochs.size<=1000)break;
+      }
+      for(const [key,read] of approvalDetailReads){
+        if(read.runId!==runId)continue;
+        if(approvalDetailReads.get(key)===read)approvalDetailReads.delete(key);
+        read.cancel();
+      }
+    };
+    for(const record of approvalDecisionStates.values()){
+      const identity=record.identity;
+      if(record.owner!==owner || record.canonicalSessionId!==session.id
+          || !(record.dispatched || record.needsFreshAuthority || record.rejectedUnavailable)
+          || !identity || !['id','run_id','request_id','run_session_id'].every(field=>
+            typeof identity[field]==='string' && identity[field])
+          || (identity.session_id!==session.id && identity.session_id!==null))continue;
+      const status=record.rejectedUnavailable?'unavailable'
+        :record.status==='unknown'?'unknown':record.needsFreshAuthority?'details_unavailable':'pending',
+        item={...identity,status,executable:status==='pending',choices:status==='pending'?['once','deny']:[]},key=approvalKey(item);
+      approvalItems.set(key,item);
+      if(status==='pending'){approvalPending.set(key,item);approvalFinals.delete(key);}
+      else approvalFinals.set(key,status);
+      approvalActionStates.set(key,record.state);
+    }
+    const clearApprovalTargetTimer=()=>{
+      if(approvalTargetTimer)win.clearTimeout(approvalTargetTimer);
+      approvalTargetTimer=null;
+    };
+    const readApprovalDetail=(approvalId,runId)=>{
+      const generation=approvalDetailGeneration(runId),key=JSON.stringify([runId,approvalId,generation]);
+      const existing=approvalDetailReads.get(key);
+      if(existing)return existing;
+      const controller=new win.AbortController();
+      const deadline=win.setTimeout(()=>controller.abort(),10000);
+      const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal})
+        .finally(()=>win.clearTimeout(deadline));
+      const read={pending,runId,generation,authorityRevision:approvalDecisionAuthorityRevision,cancelled:false,
+        valid:()=>!read.cancelled && !controller.signal.aborted
+          && approvalDetailGeneration(runId)===generation,
+        cancel:()=>{read.cancelled=true;win.clearTimeout(deadline);controller.abort();}};
+      approvalDetailReads.set(key,read);
+      pending.then(
+        ()=>{if(approvalDetailReads.get(key)===read)approvalDetailReads.delete(key);},
+        ()=>{if(approvalDetailReads.get(key)===read)approvalDetailReads.delete(key);}
+      );
+      return read;
+    };
+    const scheduleApprovalTargetTimer=()=>{
+      clearApprovalTargetTimer();
+      approvalTargetTimer=win.setTimeout(()=>{
+        if(current() && approvalTargetPlaceholder?.isConnected){
+          approvalTargetPlaceholder.querySelector('h3').textContent='Approval status is taking longer to load';
+          approvalTargetPlaceholder.querySelector('p').textContent='You can continue using this chat while the status is checked.';
+        }
+      },10000);
+    };
+    const approvalExpired=item=>Number.isFinite(item?.expires_at) && item.expires_at*1000<=Date.now();
+    const clearApprovalExpiry=key=>{
+      const entry=approvalExpiryTimers.get(key);
+      if(entry)win.clearTimeout(entry.timer);
+      approvalExpiryTimers.delete(key);
+    };
+    const expireApproval=(key,item,card)=>{
+      if(!current() || owner!==state.user?.id || state.session?.id!==session.id
+          || approvalCards.get(key)!==card || !card.isConnected
+          || approvalItems.get(key)!==item || approvalPending.get(key)!==item)return;
+      const actionState=approvalActionStates.get(key);
+      if(actionState?.decisionStarted || actionState?.uncertain){clearApprovalExpiry(key);return;}
+      if(!approvalExpired(item)){scheduleApprovalExpiry(key,item,card);return;}
+      if(actionState){actionState.pending=false;actionState.decisionStarted=false;actionState.error='';}
+      const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+      if(decision && !decision.dispatched && !decision.needsFreshAuthority)
+        approvalDecisionStates.delete(decision.key);
+      const finalItem={...item,status:'expired',executable:false,choices:[]};
+      approvalPending.delete(key);approvalItems.set(key,finalItem);
+      rememberHandledApproval(key,finalItem,'expired',true);approvalFinals.set(key,'expired');
+      clearApprovalExpiry(key);approvalRevision++;renderApprovals(key);
+    };
+    const scheduleApprovalExpiry=(key,item,card)=>{
+      const existing=approvalExpiryTimers.get(key);
+      if(existing?.item===item)return;
+      clearApprovalExpiry(key);
+      if(!Number.isFinite(item?.expires_at))return;
+      const delay=Math.max(1,Math.ceil(item.expires_at*1000-Date.now()));
+      const entry={item,timer:null};
+      entry.timer=win.setTimeout(()=>{
+        if(approvalExpiryTimers.get(key)!==entry)return;
+        approvalExpiryTimers.delete(key);
+        expireApproval(key,item,card);
+      },Math.min(delay,2147483647));
+      approvalExpiryTimers.set(key,entry);
+    };
+    const approvalHistoryKey=(runId,sessionId)=>JSON.stringify([runId,sessionId]);
+    const historyAnchors=()=>{
+      if(!approvalHistoryAnchors){
+        approvalHistoryAnchors=new Map();
+        for(const node of messages.querySelectorAll('[data-history-run]')){
+          if(node.matches('.approval-card'))continue;
+          const key=approvalHistoryKey(node.dataset.historyRun,node.dataset.historySession);
+          if(!approvalHistoryAnchors.has(key))approvalHistoryAnchors.set(key,node);
+        }
+      }
+      return approvalHistoryAnchors;
+    };
+    let approvalHistoryLoading=null,approvalHistoryOutcome='',approvalHistoryPages=0,
+      unplacedApprovals=null,approvalHistoryNotice=null,
+      approvalTargetHistoryReady=notificationTarget?.kind!=='approval',approvalTargetReaderBaseline=null,
+      approvalTargetReaderMoved=false,approvalTargetFocusInProgress=false;
+    const approvalAnchor=item=>historyAnchors().get(approvalHistoryKey(item.run_id,session.id));
+    const unplacedApprovalItems=()=>[...approvalCards.keys()].map(key=>approvalItems.get(key))
+      .filter(item=>item && !approvalAnchor(item)?.isConnected);
+    const showApprovalHistory=()=>{
+      if(!unplacedApprovals)return;
+      if(!unplacedApprovalItems().length){
+        unplacedApprovals.remove();return;
+      }
+      const labels={loading:'Loading earlier approval requests',error:'Approval history unavailable',
+        missing:'Approval request not found in saved history',limited:'Earlier approval history limit reached'};
+      approvalHistoryNotice.querySelector('h3').textContent=labels[approvalHistoryOutcome]
+        || 'Locating earlier approval requests';
+      approvalHistoryNotice.querySelector('p').textContent=
+        'These cards are not placed in the request timeline. Their approval status is unchanged.';
+      approvalHistoryNotice.querySelector('button').hidden=!['error','limited'].includes(approvalHistoryOutcome);
+    };
+    const recoverApprovalHistory=()=>{
+      if(approvalHistoryLoading)return approvalHistoryLoading;
+      if(!current() || !unplacedApprovalItems().length
+          || ['error','missing','limited'].includes(approvalHistoryOutcome))return Promise.resolve();
+      // One bounded walk serves all cards in this chat, not one walk per approval.
+      approvalHistoryLoading=Promise.resolve().then(async()=>{
+        const previousOffset=oldestOffset,
+          target=notificationTarget?.kind==='approval'
+            ?unplacedApprovalItems().find(item=>item.id===notificationTarget.approval_id):null,
+          retryFocused=approvalHistoryNotice?.contains(doc.activeElement);
+        approvalHistoryOutcome='loading';showApprovalHistory();
+        if(target){
+          const baseline=approvalTargetReaderBaseline;
+          approvalHistoryReader={focus:doc.activeElement,top:messages.scrollTop,
+            moved:!baseline || (!retryFocused
+              && (doc.activeElement!==baseline.focus || messages.scrollTop!==baseline.top))};
+        }
+        try{
+          while(current() && unplacedApprovalItems().length && oldestOffset>0 && approvalHistoryPages<100){
+            const previousOffset=oldestOffset;
+            approvalHistoryPages++;
+            const loaded=await loadOlder();
+            if(!current())return;
+            if(!loaded || oldestOffset>=previousOffset){approvalHistoryOutcome='missing';break;}
+          }
+          if(!current())return;
+          if(!approvalHistoryOutcome || approvalHistoryOutcome==='loading')
+            approvalHistoryOutcome=unplacedApprovalItems().length
+              ?oldestOffset>0?'limited':'missing':'';
+        }catch(error){
+          if(!current())return;
+          if(error.status===401){expiredSession();return;}
+          approvalHistoryOutcome='error';
+        }finally{
+          approvalHistoryLoading=null;
+          if(current()){
+            showApprovalHistory();
+            if(oldestOffset<previousOffset && target && approvalAnchor(target)?.isConnected
+                && !approvalHistoryReader?.moved){
+              approvalTargetFocusedCard=false;focusApprovalTarget();
+            }
+          }
+          approvalHistoryReader=null;
+        }
+      });
+      return approvalHistoryLoading;
+    };
+    const placeApprovalCard=(card,item)=>{
+      let index=historyAnchors(),key=approvalHistoryKey(item.run_id,session.id),anchor=index.get(key);
+      if(anchor && !anchor.isConnected){
+        approvalHistoryAnchors=null;index=historyAnchors();anchor=index.get(key);
+      }
+      if(anchor?.matches('.live-message')){
+        if(card.parentNode!==anchor || card!==anchor.lastElementChild)anchor.append(card);
+      }else if(anchor){
+        if(card.parentNode!==anchor.parentNode || card.previousElementSibling!==anchor)anchor.after(card);
+      }else{
+        if(!unplacedApprovals){
+          approvalHistoryNotice=h('div',{},h('h3'),h('p'),
+            button('Retry approval history',()=>{
+              if(!current() || approvalHistoryLoading)return;
+              approvalHistoryOutcome='';approvalHistoryPages=0;
+              if(notificationTarget?.kind==='approval'){
+                approvalTargetReaderMoved=false;
+                approvalTargetReaderBaseline={focus:doc.activeElement,top:messages.scrollTop};
+              }
+              void recoverApprovalHistory();
+            },'secondary'));
+          unplacedApprovals=h('section',{class:'approval-history-unplaced',role:'region',
+            'aria-label':'Approvals outside loaded history'},approvalHistoryNotice);
+        }
+        if(!unplacedApprovals.isConnected)messages.append(unplacedApprovals);
+        if(card.parentNode!==unplacedApprovals)unplacedApprovals.append(card);
+        showApprovalHistory();
+        if(approvalTargetHistoryReady)void recoverApprovalHistory();
+      }
+      showApprovalHistory();
+    };
+    const renderApprovalCard=(item,status)=>{
+      const key=approvalKey(item);
+      let card=approvalCards.get(key);
+      if(!card){
+        card=h('section',{class:'card approval approval-card','data-approval-id':item.id,
+          'data-history-run':item.run_id,'data-history-session':session.id,tabindex:'-1',
+          'aria-labelledby':`approval-title-${item.id}`});
+        approvalCards.set(key,card);
+      }
+      let actionState=approvalActionStates.get(key);
+      const decisionKey=approvalDecisionKey(owner,session.id,item),
+        retainedDecision=approvalDecisionStates.get(decisionKey);
+      if(actionState?.retentionBlocked && hasApprovalDecisionCapacity(decisionKey)){
+        actionState.retentionBlocked=false;actionState.error='';
+      }
+      if(!actionState && retainedDecision?.owner===owner && retainedDecision.canonicalSessionId===session.id
+          && sameApprovalIdentity(retainedDecision.identity,item))actionState=retainedDecision.state;
+      if(!actionState){actionState={pending:false,decisionStarted:false,uncertain:false,error:''};approvalActionStates.set(key,actionState);}
+      else approvalActionStates.set(key,actionState);
+      let view=approvalCardViews.get(key);
+      if(!view || view.item!==item){
+        if(actionState.pending && actionState.decisionStarted && view && !sameApprovalIdentity(view.item,item))
+          actionState={pending:false,decisionStarted:false,uncertain:true,
+            error:'Approval identity changed while a decision was in progress. Check its current status before deciding again.'};
+        else if((!actionState.pending || !actionState.decisionStarted) && !actionState.uncertain
+            && !actionState.needsFreshAuthority && retainedDecision?.status!=='rejected')
+          actionState={pending:false,decisionStarted:false,uncertain:false,error:''};
+        approvalActionStates.set(key,actionState);
+        const heading=h('h3',{id:`approval-title-${item.id}`});
+        const title=h('p',{},typeof item.title==='string'?item.title:'');title.hidden=!title.textContent.trim();
+        const commandText=typeof item.command==='string'?item.command:typeof item.action==='string'?item.action:'';
+        const command=h('pre',{class:'review-payload',role:'region',tabindex:'0','aria-label':'Approval action details'},commandText);command.hidden=!commandText;
+        const targetText=typeof item.target==='string'?item.target:'';
+        const target=h('p',{},targetText?['Target: ',targetText]:[]);target.hidden=!targetText;
+        const error=h('p',{class:'inline-error',role:'alert'});
+        const itemError=h('p',{class:'caption'},typeof item.error==='string'?item.error:'');
+        itemError.hidden=typeof item.error!=='string' || !item.error;
+        const expires=h('p',{class:'caption'},Number.isFinite(item.expires_at)?['Expires: ',date(item.expires_at)]:[]);
+        expires.hidden=!Number.isFinite(item.expires_at) || status!=='pending';
+        const detailsUnavailable=h('p',{class:'caption'},'No decision was sent. Review this action in the native client.');
+        detailsUnavailable.hidden=item.details_unavailable!==true;
+        const decisions=h('div',{class:'actions'});
+        const canDecide=status==='pending' && !approvalExpired(item) && item.executable===true && Array.isArray(item.choices)
+          && item.choices.includes('once') && item.choices.includes('deny');
+        const decide=async choice=>{
+          const sameApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && approvalCards.get(key)===card && card.isConnected && approvalPending.get(key)===item
+            && approvalItems.get(key)===item && approvalActionStates.get(key)===actionState;
+          const sameCurrentApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && approvalCards.get(key)===card && card.isConnected
+            && sameApprovalIdentity(item,approvalItems.get(key))
+            && approvalActionStates.get(key)===actionState;
+          const sameUnsubmittedApproval=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && approvalCards.get(key)===card && card.isConnected
+            && approvalActionStates.get(key)===actionState
+            && !decisionStarted && !actionState.decisionStarted;
+          const sameDispatchedApproval=record=>approvalDecisionStates.get(record.key)===record
+            && record.owner===owner && record.canonicalSessionId===session.id
+            && sameApprovalIdentity(record.identity,item) && record.state===actionState && record.dispatched;
+          if(!sameApproval() || actionState.pending || actionState.uncertain)return;
+          if(approvalExpired(item)){expireApproval(key,item,card);return;}
+          if(actionState.needsFreshAuthority)return;
+          let decisionRecord=approvalDecisionStates.get(decisionKey);
+          if(decisionRecord?.dispatched || decisionRecord?.needsFreshAuthority)return;
+          if(!decisionRecord || decisionRecord.state!==actionState){
+            const identity=approvalDecisionIdentity(owner,session.id,item);
+            decisionRecord={...identity,identity,key:decisionKey,state:actionState,
+              dispatched:false,needsFreshAuthority:false};
+            if(!retainApprovalDecision(decisionKey,decisionRecord)){
+              actionState.retentionBlocked=true;
+              actionState.error='Too many unresolved approval decisions are active. Resolve one before deciding again.';
+              renderApprovals();return;
+            }
+          }
+          const hadFocus=card.contains(doc.activeElement);
+          actionState.pending=true;actionState.error='';actionState.retentionBlocked=false;
+          decisionRecord.status='verifying';renderApprovals();
+          if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
+          let decisionStarted=false,decisionAuthGeneration=null,decisionRouteVersion=null;
+          try{
+            await ceremony('verify');
+            if(!sameApproval()){
+              if(sameUnsubmittedApproval()){
+                actionState.pending=false;actionState.error='';renderApprovals();
+              }
+              return;
+            }
+            if(approvalExpired(item)){expireApproval(key,item,card);return;}
+            decisionStarted=true;actionState.decisionStarted=true;actionState.dispatched=true;
+            decisionRecord.dispatched=true;
+            decisionAuthGeneration=authGeneration;decisionRouteVersion=routeVersion;
+            await api.request(`/approvals/${encodeURIComponent(item.id)}/decision`,
+              {method:'POST',body:{decision:choice}});
+            if(!sameDispatchedApproval(decisionRecord))return;
+            actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+            actionState.uncertain=false;actionState.needsFreshAuthority=false;actionState.error='';
+            decisionRecord.dispatched=false;decisionRecord.needsFreshAuthority=false;
+            decisionRecord.status='resolved';
+            const resolved={...item,status:'resolved',executable:false,choices:[]};
+            rememberHandledApproval(key,resolved,'resolved');
+            approvalDispatchedResult(decisionRecord,'resolved');
+          }catch(error){
+            if(decisionStarted ? !sameDispatchedApproval(decisionRecord) : !sameUnsubmittedApproval())return;
+            if(!decisionStarted){
+              actionState.pending=false;actionState.error=errorMessage(error);
+              if(error.status===401){expiredSession();return;}
+              renderApprovals();return;
+            }
+            if(error.status===403){
+              actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+              actionState.needsFreshAuthority=true;
+              actionState.error='Passkey verification expired. Verify again before deciding.';
+            }else if(decisionStarted && [404,409].includes(error.status)){
+              actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+              actionState.needsFreshAuthority=true;
+              actionState.error='This approval changed or is no longer pending. Review its current state before deciding.';
+            }else{
+              actionState.pending=false;actionState.decisionStarted=false;actionState.error=errorMessage(error);
+            }
+            if(decisionStarted && [403,404,409].includes(error.status)){
+              decisionRecord.dispatched=false;decisionRecord.needsFreshAuthority=true;
+              decisionRecord.status='rejected';
+              decisionRecord.retryAuthorityRevision=++approvalDecisionAuthorityRevision;
+              approvalDispatchedResult(decisionRecord,'rejected',actionState.error);
+            }else if(decisionStarted){
+              actionState.uncertain=true;
+              actionState.dispatched=true;decisionRecord.dispatched=true;
+              const unresolved={...(approvalItems.get(key) || item),status:'unknown',executable:false,choices:[]};
+              decisionRecord.status='unknown';
+              rememberHandledApproval(key,unresolved,'unknown');
+              approvalDispatchedResult(decisionRecord,'unknown');
+            }
+            if(error.status===401){
+              if(decisionAuthGeneration===authGeneration && state.user?.id===owner
+                  && routeVersion===decisionRouteVersion)expiredSession();
+              return;
+            }
+            if(!decisionStarted && sameCurrentApproval())renderApprovals();
+          }
+        };
+        let approve=null,deny=null;
+        if(canDecide){
+          approve=button('Approve once',()=>void decide('once'),'primary');
+          deny=button('Deny',()=>void decide('deny'),'secondary');
+          decisions.append(approve,deny);
+        }
+        view={item,heading,title,command,target,error,itemError,expires,detailsUnavailable,decisions,approve,deny,canDecide};
+        approvalCardViews.set(key,view);
+        card.replaceChildren(heading,title,command,target,error,itemError,expires,detailsUnavailable,decisions);
+      }
+      const labels={pending:'Approval required',expired:'Expired',resolved:'Resolved',
+        resolved_external:'No longer pending',cancelled:'Cancelled',unknown:'Decision status unknown',
+        sending:'Decision pending',unavailable:'Approval unavailable',details_unavailable:'Approval details unavailable'};
+      const effectiveStatus=actionState.pending?'sending':actionState.uncertain?'unknown'
+        :actionState.needsFreshAuthority && ['pending','sending'].includes(status)?'details_unavailable'
+        :status==='pending' && approvalExpired(item)?'expired':status;
+      view.heading.textContent=labels[effectiveStatus] || 'Approval unavailable';
+      view.error.textContent=actionState.error;view.error.hidden=!actionState.error;
+      view.itemError.hidden=typeof item.error!=='string' || !item.error;
+      view.expires.hidden=!Number.isFinite(item.expires_at) || effectiveStatus!=='pending';
+      view.detailsUnavailable.hidden=item.details_unavailable!==true && effectiveStatus!=='details_unavailable';
+      view.detailsUnavailable.textContent=actionState.needsFreshAuthority
+        ?'Approval status needs to be checked again. No decision is in flight.'
+        :'No decision was sent. Review this action in the native client.';
+      const canDecide=view.canDecide && !approvalExpired(item) && !actionState.needsFreshAuthority
+        && !actionState.retentionBlocked
+        && (effectiveStatus==='pending' || actionState.pending) && !actionState.uncertain;
+      view.decisions.hidden=!canDecide;
+      for(const control of [view.approve,view.deny])if(control)
+        control.disabled=actionState.pending || actionState.uncertain || actionState.needsFreshAuthority;
+      if(!canDecide && !actionState.pending && !actionState.needsFreshAuthority
+          && !actionState.retentionBlocked
+          && view.decisions.childNodes.length)view.decisions.replaceChildren();
+      const focused=card.contains(doc.activeElement)?doc.activeElement:null;
+      placeApprovalCard(card,item);
+      if(status==='pending')scheduleApprovalExpiry(key,item,card);
+      else clearApprovalExpiry(key);
+      if(focused?.isConnected && doc.activeElement!==focused)focused.focus({preventScroll:true});
+      if(notificationTarget?.kind==='approval' && item.id===notificationTarget.approval_id){
+        clearApprovalTargetTimer();
+        removeApprovalTargetPlaceholder();
+        if(content.contains(messages))focusApprovalTarget();
+      }
+      return card;
+    };
+    renderApprovals=onlyKey=>{
+      const count=approvalPending.size;
+      const summary=count?`${count} approval${count===1?'':'s'} require your review.`
+        :genericApproval?'An approval needs your review. Open this chat to check its current state.':'';
+      approvalNotice.hidden=!count && !genericApproval && !approvalListIncomplete;
+      approvalNotice.textContent=approvalListIncomplete
+        ?`${summary ? `${summary} ` : ''}More than 1,000 approvals are waiting in this chat; some are not shown.`
+        :summary;
+      if(onlyKey!==undefined){
+        const item=approvalItems.get(onlyKey);
+        if(item && (item.session_id===session.id || item.run_id===currentApprovalRun
+            || retainedApprovalDecision(item)))
+          renderApprovalCard(item,approvalPending.has(onlyKey)?'pending':approvalFinals.get(onlyKey) || 'unavailable');
+        return;
+      }
+      for(const [key,item] of approvalItems){
+        if(item.session_id!==session.id && item.run_id!==currentApprovalRun
+            && !retainedApprovalDecision(item))continue;
+        renderApprovalCard(item,approvalPending.has(key)?'pending':approvalFinals.get(key) || 'unavailable');
+      }
+    };
+    const refreshTransitionalApprovalDetails=async()=>{
+      const eligible=[...approvalItems].filter(([key,item])=>{
+        const actionState=approvalActionStates.get(key);
+        const status=actionState?.uncertain?'unknown'
+          :actionState?.decisionStarted || actionState?.dispatched?'sending'
+            :approvalFinals.get(key) || item.status;
+        return item.id && (actionState?.needsFreshAuthority || ['sending','unknown','expired'].includes(status))
+          && (item.session_id===session.id || item.run_id===currentApprovalRun
+            || retainedApprovalDecision(item));
+      });
+      const start=eligible.length?approvalDetailBatchOffset%eligible.length:0;
+      const targets=eligible.slice(start,start+10);
+      if(targets.length<Math.min(10,eligible.length))targets.push(...eligible.slice(0,Math.min(10,eligible.length)-targets.length));
+      if(eligible.length)approvalDetailBatchOffset=(start+targets.length)%eligible.length;
+      await Promise.all(targets.map(async([key,item])=>{
+        const read=readApprovalDetail(item.id,item.run_id);
+        try{
+          let detail;
+          try{detail=await read.pending;}
+          catch(error){
+            const actionState=approvalActionStates.get(key),
+              decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(error.status!==404 || !read.valid() || !current() || owner!==state.user?.id
+                || state.session?.id!==session.id || approvalItems.get(key)!==item
+                || !freshRejectedApprovalAuthority(decision,actionState,item,read.authorityRevision))throw error;
+            detail={...item,status:'unavailable',executable:false,choices:[],details_unavailable:false,error:''};
+          }
+          if(!read.valid())return;
+          if(!current() || owner!==state.user?.id || state.session?.id!==session.id
+              || approvalItems.get(key)!==item || !detail || !sameApprovalIdentity(item,detail)
+              || typeof detail.status!=='string')return;
+          const actionState=approvalActionStates.get(key),
+            currentStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status,
+            decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+            freshRejectedAuthority=freshRejectedApprovalAuthority(decision,actionState,detail,read.authorityRevision);
+          if(detail.status==='pending' && freshRejectedAuthority){
+            decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;
+            approvalItems.set(key,detail);approvalPending.set(key,detail);approvalFinals.delete(key);
+            renderApprovals();return;
+          }
+          if(!acceptsApprovalDetail(decision,actionState,detail,read.authorityRevision))return;
+          let status=freshRejectedAuthority && ['unavailable','details_unavailable'].includes(detail.status)?detail.status
+            :actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
+            ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
+          if(status===currentStatus && !finalApprovalStatuses.has(detail.status))return;
+          const next={...(status===detail.status?detail:item),status,executable:false,choices:[]};
+          approvalItems.set(key,next);approvalPending.delete(key);
+          if(status!=='details_unavailable')rememberHandledApproval(key,next,status);
+          approvalFinals.set(key,status);clearApprovalExpiry(key);
+          if(detail.status==='unavailable' && freshRejectedAuthority)decision.rejectedUnavailable=true;
+          if(finalApprovalStatuses.has(detail.status) || detail.status==='unavailable')
+            settleApprovalDecision(owner,session.id,item,status);
+          else if(status==='unknown')markApprovalDecisionUncertain(owner,session.id,item);
+          if(finalApprovalStatuses.has(detail.status) && actionState){
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+          }
+          renderApprovals();
+        }catch(error){if(read.valid() && current() && error.status===401)expiredSession();}
+      }));
+    };
+    const refreshMissingApprovalDetails=async(listedKeys,revision,listRevision)=>{
+      if(missingApprovalDetailsRefreshing)return;
+      const decisionAuthorityRevision=approvalDecisionAuthorityRevision;
+      const eligible=[...approvalItems].filter(([key,item])=>{
+        const actionState=approvalActionStates.get(key);
+        return item.id && !listedKeys.has(key) && !handledApprovals.has(key)
+          && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')
+          && (item.session_id===session.id || item.run_id===currentApprovalRun
+            || retainedApprovalDecision(item))
+          && !actionState?.decisionStarted && !actionState?.uncertain && !actionState?.needsFreshAuthority;
+      });
+      if(!eligible.length)return;
+      const start=missingApprovalDetailOffset%eligible.length,
+        count=Math.min(10,eligible.length),
+        targets=Array.from({length:count},(_,index)=>eligible[(start+index)%eligible.length]);
+      missingApprovalDetailOffset=(start+count)%eligible.length;
+      missingApprovalDetailsRefreshing=true;
+      try{
+        await Promise.all(targets.map(async([key,item])=>{
+          const actionState=approvalActionStates.get(key),wasPending=!!actionState?.pending;
+          const sameRead=()=>current() && owner===state.user?.id && state.session?.id===session.id
+            && revision===approvalRevision && listRevision===approvalListRevision
+            && approvalItems.get(key)===item && !handledApprovals.has(key)
+            && approvalActionStates.get(key)===actionState
+            && !!actionState?.pending===wasPending && !actionState?.decisionStarted && !actionState?.uncertain;
+          const read=readApprovalDetail(item.id,item.run_id);
+          let detail;
+          try{detail=await read.pending;}
+          catch(error){
+           if(!read.valid() || !sameRead())return;
+           if(error.status===401){expiredSession();return;}
+           if(error.status!==404)return;
+           if(actionState?.needsFreshAuthority)return;
+           detail={...item,status:'unavailable'};
+          }
+          if(!read.valid() || !sameRead() || !detail || !sameApprovalIdentity(item,detail)
+              || !['pending','details_unavailable','sending','unknown','unavailable',...finalApprovalStatuses].includes(detail.status))return;
+          const status=detail.status==='pending' && approvalExpired(detail)?'expired':detail.status,
+            live=status==='pending' || status==='details_unavailable',
+            next=live?detail:{...detail,status,executable:false,choices:[],details_unavailable:false,
+              error:approvalDetailsUnavailable(detail) || approvalDetailsUnavailable(item)?'':detail.error};
+          const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+          if(status==='unavailable' && decision
+              && (decision.dispatched || decision.needsFreshAuthority || actionState?.uncertain)){
+            if(!freshRejectedApprovalAuthority(decision,actionState,detail,
+                Math.min(decisionAuthorityRevision,read.authorityRevision)))return;
+            decision.rejectedUnavailable=true;
+            settleApprovalDecision(owner,session.id,item,status);
+          }
+          if(live && actionState?.pending)return;
+          let authorityChanged=false;
+          if(status==='pending' && actionState?.needsFreshAuthority){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(decision?.needsFreshAuthority
+                && decision.retryAuthorityRevision<=Math.min(decisionAuthorityRevision,read.authorityRevision)
+                && decision.owner===owner && decision.canonicalSessionId===session.id
+                && sameApprovalIdentity(decision.identity,detail)){
+              decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;
+              authorityChanged=true;
+            }
+          }
+          if(sameApprovalData(item,next)){
+            if(authorityChanged)renderApprovals();
+            return;
+          }
+          if(actionState?.pending){actionState.pending=false;actionState.error='';}
+          approvalItems.set(key,next);
+          if(status==='pending'){
+            approvalPending.set(key,next);approvalFinals.delete(key);
+          }else{
+            approvalPending.delete(key);approvalFinals.set(key,status);clearApprovalExpiry(key);
+            if(!live)rememberHandledApproval(key,next,status,status==='expired' && detail.status==='pending');
+          }
+          renderApprovals();
+        }));
+      }finally{missingApprovalDetailsRefreshing=false;}
+    };
+    const reconcileApprovals=async()=>{
+      const decisionAuthorityRevision=approvalDecisionAuthorityRevision;
+      const revision=++approvalRevision;
+      void refreshTransitionalApprovalDetails();
+      try{
+        const data=await api.request('/approvals',{query:{session_id:session.id}});
+        if(!current() || revision!==approvalRevision || !Array.isArray(data?.items)
+            || !data.items.every(item=>item && ['id','run_id'].every(field=>
+              typeof item[field]==='string' && item[field])))return;
+        approvalListRevision++;
+        approvalListIncomplete=data.complete===false;
+        const items=data.items.filter(item=>{
+          const key=approvalKey(item),actionState=approvalActionStates.get(key);
+          const upgradesPlaceholder=approvalFinals.get(key)==='details_unavailable'
+            && item.status==='pending' && sameApprovalIdentity(approvalItems.get(key),item)
+            && !actionState?.pending && !actionState?.uncertain;
+          return (item.run_id===currentApprovalRun || item.session_id===session.id)
+            && !handledApprovals.has(key) && (!approvalFinals.has(key) || upgradesPlaceholder);
+        });
+        const activeItems=[];
+        for(const item of items){
+          if(approvalDetailsUnavailable(item)){
+            const key=approvalKey(item);
+            approvalItems.set(key,item);approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
+            continue;
+          }
+          if(item.status==='pending'){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(decision?.needsFreshAuthority && decision.owner===owner
+                && decision.canonicalSessionId===session.id
+                && sameApprovalIdentity(decision.identity,item)
+                && decision.retryAuthorityRevision<=decisionAuthorityRevision){
+              decision.needsFreshAuthority=false;
+            }
+          }
+          if(!approvalExpired(item)){activeItems.push(item);continue;}
+          const key=approvalKey(item),actionState=approvalActionStates.get(key);
+          if(actionState?.decisionStarted || actionState?.uncertain){
+            activeItems.push(approvalPending.get(key) || item);
+            continue;
+          }
+          const finalStatus=finalApprovalStatuses.has(item.status)?item.status:'expired',
+            finalItem={...item,status:finalStatus,executable:false,choices:[]};
+          approvalItems.set(key,finalItem);approvalFinals.set(key,finalStatus);
+          rememberHandledApproval(key,finalItem,finalStatus,!finalApprovalStatuses.has(item.status));clearApprovalExpiry(key);
+        }
+        const next=new Map(activeItems.map(item=>{
+          const key=approvalKey(item),previous=approvalPending.get(key) || approvalItems.get(key);
+          const unchanged=sameApprovalData(previous,item);
+          const actionState=approvalActionStates.get(key),
+            decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+            preservesRejected=actionState?.needsFreshAuthority && decision?.state===actionState
+              && sameApprovalIdentity(decision.identity,item);
+          const sameIdentity=sameApprovalIdentity(previous,item);
+          if(previous && !unchanged && !(sameIdentity && actionState?.pending && actionState.decisionStarted)
+              && !actionState?.uncertain && !preservesRejected)
+            approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+          return [key,unchanged?previous:item];
+        }));
+        for(const item of activeItems){
+         const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+         if(decision && !decision.needsFreshAuthority
+             && sameApprovalIdentity(decision.identity,item))decision.state.needsFreshAuthority=false;
+        }
+        const listedKeys=new Set(data.items.map(approvalKey));
+        for(const [key,item] of approvalPending)if(!next.has(key) && !listedKeys.has(key)
+            && !approvalFinals.has(key) && !handledApprovals.has(key))next.set(key,item);
+        approvalPending=next;
+        for(const [key,item] of next){approvalItems.set(key,item);approvalFinals.delete(key);}
+        genericApproval=false;renderApprovals();
+        void refreshMissingApprovalDetails(listedKeys,revision,approvalListRevision);
+        if(next.size)connection.run('waiting_for_approval');
+      }catch(error){if(current() && error.status===401)expiredSession();}
+    };
+    approvalState={
+      reconcile:reconcileApprovals,
+      run(id,runSessionId){currentApprovalRun=id;currentApprovalRunSession=runSessionId || session.id;renderApprovals();},
+      decision(record,status,error){
+        if(!current() || !record || record.owner!==owner || record.canonicalSessionId!==session.id
+            || approvalDecisionStates.get(record.key)!==record)return false;
+        const key=approvalKey(record.identity),existing=approvalItems.get(key);
+        if(!existing || !sameApprovalIdentity(existing,record.identity))return false;
+        const actionState=record.state;
+        approvalActionStates.set(key,actionState);
+        if(status==='resolved'){
+          const finalItem={...existing,status:'resolved',executable:false,choices:[]};
+          approvalRevision++;approvalPending.delete(key);approvalItems.set(key,finalItem);
+          approvalFinals.set(key,'resolved');clearApprovalExpiry(key);
+        }else if(status==='unknown'){
+          const unresolved={...existing,status:'unknown',executable:false,choices:[]};
+          approvalRevision++;approvalItems.set(key,unresolved);approvalPending.delete(key);
+          approvalFinals.set(key,'unknown');
+        }else{
+          actionState.pending=false;actionState.decisionStarted=false;actionState.dispatched=false;
+          actionState.uncertain=false;actionState.needsFreshAuthority=true;actionState.error=error || '';
+          approvalRevision++;renderApprovals();void reconcileApprovals();return true;
+        }
+        renderApprovals();return true;
+      },
+      event(item,runId,runSessionId){
+        const sourceSessionId=runSessionId || currentApprovalRunSession;
+        if(typeof runId!=='string' || !runId || typeof sourceSessionId!=='string' || !sourceSessionId
+            || (Object.hasOwn(item,'run_id') && item.run_id!==runId)
+            || (item.run_session_id!=null && item.run_session_id!==sourceSessionId)
+            || (item.session_id!=null && item.session_id!==sourceSessionId))return false;
+        let value={...item,run_id:runId,
+          run_session_id:item.run_session_id || item.session_id || sourceSessionId,session_id:session.id},
+          key=approvalKey(value);
+        const priorStatus=approvalFinals.get(key);
+        if(version!==routeVersion || handledApprovals.has(key)
+            || (approvalFinals.has(key) && !(priorStatus==='details_unavailable' && item.status==='pending')))return false;
+        if(priorStatus==='details_unavailable')approvalFinals.delete(key);
+        const previous=approvalItems.get(key);
+        if(sameApprovalData(previous,value))value=previous;
+        approvalRevision++;
+        if(value.id || value.request_id){
+          approvalItems.set(key,value);
+          if(approvalDetailsUnavailable(value)){
+            approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
+          }else{approvalPending.set(key,value);approvalFinals.delete(key);}
+        }
+        else genericApproval=true;
+        renderApprovals();return true;
+      },
+      finish(runId,status){
+        if(status==='unknown'){
+          invalidateApprovalDetails(runId);
+          approvalRevision++;
+          for(const [key,item] of approvalItems)if(item.run_id===runId
+              && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+              actionState=decision?.state || approvalActionStates.get(key);
+            if(decision?.dispatched || actionState?.dispatched || actionState?.uncertain)continue;
+            if(actionState){actionState.pending=false;actionState.decisionStarted=false;}
+            if(decision && !decision.needsFreshAuthority)approvalDecisionStates.delete(decision.key);
+            const unavailable={...item,status:'details_unavailable',expires_at:null,executable:false,
+              choices:[],details_unavailable:true,error:'Approval details are temporarily unavailable.'};
+            approvalPending.delete(key);approvalItems.set(key,unavailable);
+            approvalFinals.set(key,'details_unavailable');
+          }
+          renderApprovals();return;
+        }
+        approvalRevision++;
+        for(const [key,item] of approvalItems)if(item.run_id===runId
+            && (approvalPending.has(key) || approvalFinals.get(key)==='details_unavailable')){
+          const actionState=approvalActionStates.get(key),
+            finalStatus=actionState?.decisionStarted?'sending':actionState?.uncertain?'unknown':'unavailable';
+          const finalItem={...item,status:finalStatus,executable:false,choices:[],
+            ...(approvalDetailsUnavailable(item)?{details_unavailable:false,error:''}:{})};
+          rememberHandledApproval(key,finalItem,finalStatus);
+          approvalPending.delete(key);approvalItems.set(key,finalItem);approvalFinals.set(key,finalStatus);
+          if(actionState?.pending && !actionState.decisionStarted && !actionState.uncertain){
+            actionState.pending=false;
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(decision && !decision.dispatched && !decision.needsFreshAuthority)
+              approvalDecisionStates.delete(decision.key);
+          }
+        }
+        genericApproval=false;renderApprovals();
+      }
+    };
+    const observeApprovalTargetReader=()=>{
+      if(approvalTargetFocusInProgress || approvalHistoryReader || approvalTargetReaderMoved
+          || !approvalTargetReaderBaseline)return;
+      if(doc.activeElement!==approvalTargetReaderBaseline.focus
+          || messages.scrollTop!==approvalTargetReaderBaseline.top)approvalTargetReaderMoved=true;
+    };
+    doc.addEventListener('focusin',observeApprovalTargetReader);
+    messages.addEventListener('scroll',observeApprovalTargetReader,{passive:true});
+    const removeApprovalTargetPlaceholder=()=>{
+      if(!approvalTargetPlaceholder)return;
+      observeApprovalTargetReader();
+      approvalTargetPlaceholder.remove();approvalTargetPlaceholder=null;
+    };
+    const focusApprovalTarget=()=>{
+      if(!current())return;
+      const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===notificationTarget?.approval_id);
+      if(card){
+        if(approvalTargetFocusedCard)return;
+        approvalTargetFocusedCard=true;
+        if(approvalTargetReaderMoved)return;
+        approvalTargetFocusInProgress=true;
+        try{
+          card.scrollIntoView?.({block:'center'});card.focus();
+          approvalTargetReaderBaseline={focus:card,top:messages.scrollTop};
+        }finally{approvalTargetFocusInProgress=false;}
+      }else if(approvalTargetPlaceholder && !approvalTargetPlaceholderFocused){
+        approvalTargetPlaceholderFocused=true;
+        approvalTargetFocusInProgress=true;
+        try{
+          approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();
+          approvalTargetReaderBaseline={focus:approvalTargetPlaceholder,top:messages.scrollTop};
+        }finally{approvalTargetFocusInProgress=false;}
+      }
+    };
+    const restoreApprovalTargetHistory=async item=>{
+      const key=approvalKey(item),sameTarget=()=>current()
+        && sameApprovalIdentity(approvalItems.get(key),item);
+      if(!sameTarget())return;
+      approvalTargetHistoryReady=true;
+      await recoverApprovalHistory();
+      if(!sameTarget())return;
+      renderApprovals();focusApprovalTarget();
+    };
+    const resolveApprovalTarget=async target=>{
+      const targetReadGeneration=++approvalTargetReadGeneration,
+        currentTargetRead=()=>current() && approvalTargetReadGeneration===targetReadGeneration;
+      const matches=item=>item?.id===target.approval_id && item.run_id===target.run_id
+        && item.request_id===target.request_id && item.session_id===session.id
+        && item.run_session_id===target.run_session_id && typeof item.status==='string';
+      const retryTarget=(heading='Approval status changed',
+        message='The approval changed while its status was loading. Check its current state again.')=>{
+        if(!approvalTargetPlaceholder)return;
+        approvalTargetPlaceholder.setAttribute('role','region');
+        approvalTargetPlaceholder.setAttribute('aria-label','Approval status');
+        approvalTargetPlaceholder.replaceChildren(h('h3',{},heading),h('p',{},message),
+          button('Retry status',event=>{
+            if(!current() || !event.currentTarget.isConnected || !approvalTargetPlaceholder?.isConnected)return;
+            approvalTargetFocusedCard=false;approvalTargetReaderMoved=false;approvalTargetReaderBaseline=null;
+            approvalTargetPlaceholderFocused=false;
+            approvalTargetPlaceholder.setAttribute('role','status');
+            approvalTargetPlaceholder.removeAttribute('aria-label');
+            approvalTargetPlaceholder.replaceChildren(h('h3',{},'Checking approval status'),
+              h('p',{},'This chat is ready. Approval details are loading.'));
+            scheduleApprovalTargetTimer();
+            focusApprovalTarget();
+            void resolveApprovalTarget(target);
+          },'secondary'));
+        focusApprovalTarget();
+      };
+      let detailRead=null;
+      const acceptsTargetDetail=item=>{
+        const key=approvalKey(item);
+        return acceptsApprovalDetail(approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
+          approvalActionStates.get(key),item,detailRead?.authorityRevision ?? -Infinity);
+      };
+      const preserveTargetDecision=async item=>{
+        removeApprovalTargetPlaceholder();
+        renderApprovals();focusApprovalTarget();
+        await restoreApprovalTargetHistory(approvalItems.get(approvalKey(item)) || item);
+      };
+      try{
+        let item=[...approvalItems.values()].find(matches),detailRevision=null,detailListRevision=null;
+        if(!item){
+          detailRevision=approvalRevision;
+          detailListRevision=approvalListRevision;
+          detailRead=readApprovalDetail(target.approval_id,target.run_id);
+          item=await detailRead.pending;
+          if(!currentTargetRead())return;
+          if(!detailRead.valid()){
+            retryTarget('Approval status check interrupted',
+              'This chat is ready. Approval status could not be confirmed.');
+            return;
+          }
+        }
+        if(!currentTargetRead())return;
+        if(matches(item)){
+          const key=approvalKey(item);
+          if(!acceptsTargetDetail(item)){await preserveTargetDecision(item);return;}
+          let existing=approvalItems.get(key);
+          if(handledApprovals.has(key)){
+            const retained=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if((retained?.dispatched || retained?.needsFreshAuthority)
+                && !finalApprovalStatuses.has(item.status)
+                && !freshRejectedApprovalAuthority(retained,approvalActionStates.get(key),item,
+                  detailRead?.authorityRevision ?? -Infinity)){
+              removeApprovalTargetPlaceholder();
+              renderApprovals();focusApprovalTarget();
+              await restoreApprovalTargetHistory(existing || item);return;
+            }
+            const cached=handledApprovalDetails.get(key);
+            const cachedItem=cached && sameApprovalIdentity(cached,item)?cached:null;
+            const finalStatus=finalApprovalStatuses.has(item.status)?item.status
+              :cachedItem?.status==='unavailable'?'unavailable'
+                :preferredApprovalStatus(item.status,cachedItem?.status,locallyExpiredApproval(key));
+            const finalItem={...(finalStatus===item.status?item:cachedItem || item),status:finalStatus,executable:false,choices:[]};
+            const actionState=approvalActionStates.get(key);
+            if(finalApprovalStatuses.has(item.status) || finalStatus==='unavailable')
+              settleApprovalDecision(owner,session.id,item,finalStatus);
+            else if(finalStatus==='unknown')markApprovalDecisionUncertain(owner,session.id,item);
+            if(finalApprovalStatuses.has(item.status) && actionState){
+              actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+            }
+            approvalItems.set(key,finalItem);approvalPending.delete(key);
+            approvalFinals.set(key,finalStatus);
+            rememberHandledApproval(key,finalItem,finalStatus,
+              locallyExpiredApproval(key) && finalStatus==='expired' && !finalApprovalStatuses.has(item.status));
+            clearApprovalExpiry(key);
+            removeApprovalTargetPlaceholder();
+            renderApprovals();focusApprovalTarget();
+            await restoreApprovalTargetHistory(finalItem);return;
+          }
+          const listChanged=detailListRevision!==null && detailListRevision!==approvalListRevision;
+          if(detailRevision!==null && (detailRevision!==approvalRevision || listChanged) && item.status==='pending'){
+            const latest=approvalItems.get(key);
+            if(approvalPending.has(key) && matches(latest))item=latest;
+            else if(existing && matches(existing)){
+              removeApprovalTargetPlaceholder();
+              renderApprovals();focusApprovalTarget();
+              await restoreApprovalTargetHistory(existing);return;
+            }else if(listChanged){
+              for(let recheck=0;recheck<2;recheck++){
+                const revalidatedListRevision=approvalListRevision,revalidatedRevision=approvalRevision,
+                  revalidatedItem=approvalItems.get(key),revalidatedPending=approvalPending.get(key),
+                  revalidatedHandled=handledApprovals.has(key),revalidatedDetails=handledApprovalDetails.get(key);
+                const latestRead=detailRead=readApprovalDetail(target.approval_id,target.run_id),
+                  latestDetail=await latestRead.pending;
+                if(!currentTargetRead() || !latestRead.valid())return;
+                const actionState=approvalActionStates.get(key);
+                if(revalidatedItem!==approvalItems.get(key) || revalidatedPending!==approvalPending.get(key)
+                    || revalidatedHandled!==handledApprovals.has(key) || revalidatedDetails!==handledApprovalDetails.get(key)
+                    || actionState?.pending || actionState?.decisionStarted || actionState?.uncertain){
+                  renderApprovals();focusApprovalTarget();return;
+                }
+                if(revalidatedRevision!==approvalRevision || revalidatedListRevision!==approvalListRevision){
+                  if(recheck===0)continue;
+                  retryTarget();return;
+                }
+                if(!matches(latestDetail)){
+                  if(approvalTargetPlaceholder){
+                    approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';
+                    approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+                  }
+                  clearApprovalTargetTimer();focusApprovalTarget();return;
+                }
+                item=latestDetail;detailRevision=approvalRevision;detailListRevision=approvalListRevision;
+                break;
+              }
+            }else{
+              approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
+              if(approvalTargetPlaceholder){
+                approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+                clearApprovalTargetTimer();
+              }
+              focusApprovalTarget();return;
+            }
+          }
+          if(!acceptsTargetDetail(item)){await preserveTargetDecision(item);return;}
+          existing=approvalItems.get(key);
+          const actionState=approvalActionStates.get(key),
+            freshFinal=finalApprovalStatuses.has(item.status),
+            previousStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || existing?.status,
+            nextStatus=actionState?.uncertain && !freshFinal?'unknown'
+              :freshFinal?item.status
+                :approvalFinals.get(key)==='unavailable' || existing?.status==='unavailable'
+                  ?'unavailable':preferredApprovalStatus(item.status,previousStatus,locallyExpiredApproval(key));
+          const unchanged=sameApprovalData(existing,item),statusOverridden=nextStatus!==item.status;
+          if(statusOverridden)item={...(existing || item),status:nextStatus,executable:false,choices:[]};
+          else if(unchanged)item=existing;
+          if(freshFinal && actionState){
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+          }else if(!statusOverridden && !unchanged && !actionState?.uncertain
+              && item.status!=='pending' && actionState && !actionState.decisionStarted){
+            actionState.pending=false;actionState.decisionStarted=false;actionState.uncertain=false;actionState.error='';
+          }else if(!statusOverridden && !unchanged && item.status==='pending'
+              && !actionState?.pending && !actionState?.uncertain){
+            approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+          }
+          if(item.status==='unavailable'){
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(freshRejectedApprovalAuthority(decision,actionState,item,detailRead?.authorityRevision ?? -Infinity))
+              decision.rejectedUnavailable=true;
+          }
+          if(freshFinal || item.status==='unavailable')
+            settleApprovalDecision(owner,session.id,item,nextStatus);
+          else if(nextStatus==='unknown')markApprovalDecisionUncertain(owner,session.id,item);
+          approvalItems.set(key,item);
+          if(item.status==='pending'){
+            approvalPending.set(key,item);approvalFinals.delete(key);
+          }else if(item.status==='details_unavailable'){
+            approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
+          }else{
+            approvalPending.delete(key);
+            rememberHandledApproval(key,item,item.status,
+              locallyExpiredApproval(key) && item.status==='expired' && !freshFinal);
+            approvalFinals.set(key,item.status);
+          }
+          removeApprovalTargetPlaceholder();
+          renderApprovals();focusApprovalTarget();
+          await restoreApprovalTargetHistory(item);
+        }else{
+          approvalTargetPlaceholder?.querySelector('h3') && (approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable');
+          if(approvalTargetPlaceholder){
+            approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+            clearApprovalTargetTimer();
+          }
+          focusApprovalTarget();
+        }
+      }catch(error){
+        if(!currentTargetRead())return;
+        if(error.status===401){expiredSession();return;}
+        if(error.name==='AbortError' || (detailRead && !detailRead.valid())){
+          retryTarget('Approval status check interrupted',
+            'This chat is ready. Approval status could not be confirmed.');
+          return;
+        }
+        const unavailable=[404,409,410].includes(error.status);
+        if(unavailable){
+          const key=approvalKey({...target,id:target.approval_id});
+          const item=approvalPending.get(key),actionState=approvalActionStates.get(key);
+          if(item && matches(item) && approvalItems.get(key)===item && !handledApprovals.has(key)
+              && !finalApprovalStatuses.has(approvalFinals.get(key))
+              && !actionState?.decisionStarted && !actionState?.uncertain
+              && acceptsTargetDetail({...item,status:'unavailable'})){
+            const finalItem={...item,status:'unavailable',executable:false,choices:[]};
+            const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+            if(freshRejectedApprovalAuthority(decision,actionState,item,detailRead?.authorityRevision ?? -Infinity))
+              decision.rejectedUnavailable=true;
+            settleApprovalDecision(owner,session.id,item,'unavailable');
+            if(actionState)approvalActionStates.set(key,{pending:false,decisionStarted:false,uncertain:false,error:''});
+            approvalRevision++;approvalPending.delete(key);approvalItems.set(key,finalItem);
+            rememberHandledApproval(key,finalItem,'unavailable');
+            approvalFinals.set(key,'unavailable');clearApprovalExpiry(key);renderApprovals();
+          }
+        }
+        if(approvalTargetPlaceholder){
+          if(unavailable){
+            approvalTargetPlaceholder.querySelector('h3').textContent='Approval unavailable';
+            approvalTargetPlaceholder.querySelector('p').textContent='This approval is no longer pending in this chat.';
+          }else retryTarget('Approval status unavailable','This chat is ready. Approval status could not be confirmed.');
+        }
+        clearApprovalTargetTimer();
+        focusApprovalTarget();
+      }
+    };
+    win.addEventListener('focus',reconcileApprovals);
+    stopExtras=()=>{
+      approvalRevision++;win.removeEventListener('focus',reconcileApprovals);
+      doc.removeEventListener('focusin',observeApprovalTargetReader);
+      messages.removeEventListener('scroll',observeApprovalTargetReader);
+      clearApprovalTargetTimer();
+      for(const read of approvalDetailReads.values())read.cancel();
+      approvalDetailReads.clear();
+      for(const {timer} of approvalExpiryTimers.values())win.clearTimeout(timer);
+      approvalExpiryTimers.clear();
+    };
     void reconcileApprovals();
+    if(notificationTarget?.kind==='approval'){
+      const target=notificationTarget;
+      approvalTargetPlaceholder=h('section',{class:'card approval approval-card notification-unavailable',
+        role:'status',tabindex:'-1'},h('h3',{},'Checking approval status'),
+        h('p',{},'This chat is ready. Approval details are loading.'));
+      messages.append(approvalTargetPlaceholder);
+      scheduleApprovalTargetTimer();
+      void resolveApprovalTarget(target);
+    }
     let pending=attempts.get(session.id);
     try {pending ||= JSON.parse(storage.get(key(`attempt:${session.id}`)));}catch{}
     if(pending && !Array.isArray(pending.attachment_ids) && pending.upload_pending!==true){
@@ -1195,6 +2432,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         syncModelLock();
       }
       if(version!==routeVersion)return;
+      approvalHistoryAnchors=null;
       messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id,attachments:run.attachments}),...renderReminders(run));
       for(const photo of submittedPhotos){const position=selectedPhotos.indexOf(photo);if(position>=0){releasePreview(photo);selectedPhotos.splice(position,1);}}
       pendingPhotoSubmission=null;renderPhotoSelection();
@@ -1239,6 +2477,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       technical.replaceChildren(...(technical.hidden?[]:[h('summary',{class:'technical-summary'},summary.join(' · ') || 'Session lifetime usage'),...details.map(text=>h('p',{},text))]));
     };
     content.replaceChildren(header,approvalNotice,messages,technical,composer);
+    if(notificationTarget?.kind==='approval')focusApprovalTarget();
     stopPushPresence=watchPushPresence(session,version);
     const backgroundCards=new Map();
     let backgroundItems=new Map();
@@ -1382,12 +2621,19 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     content.classList.add('conversation');
     const priorExtras=stopExtras;stopExtras=()=>{stopInitialRestoreWatch();priorExtras?.();};
     messages.scrollTop=messages.scrollHeight;
+    if(notificationTargetNode){
+      notificationTargetNode.scrollIntoView?.({block:'center'});notificationTargetNode.focus();
+    }else if(notificationTarget?.kind==='approval'){
+      const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===notificationTarget.approval_id);
+      card?.scrollIntoView?.({block:'center'});card?.focus();
+    }
     if(!result.run && result.last_run)composerAction.attach(result.last_run);
     if(Object.hasOwn(result,'run')) {
       if(result.run) {
         messages.querySelector('.empty')?.remove();
+        approvalHistoryAnchors=null;
         messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id,attachments:result.run.attachments}),...renderReminders(result.run));
-        messages.scrollTop=messages.scrollHeight;
+        if(!notificationTarget)messages.scrollTop=messages.scrollHeight;
         await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       } else if(result.last_run?.status==='unknown') {
         composerAction.set('unknown');
@@ -1405,10 +2651,11 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   async function trackRun(run,messages,composerAction,replay=null,initialRestore={}) {
     disconnect();
     const version=routeVersion,connection=headerState;
+    const viewedSessionId=state.session.id;
     const sessionId=run.session_id || state.session.id;
     const atTail=()=>messages.scrollHeight-messages.scrollTop-messages.clientHeight<100 && !win.getSelection()?.toString();
     const followTail=()=>initialRestore.follow?.() ?? atTail();
-    approvalState?.run(run.id);
+    approvalState?.run(run.id,sessionId);
     composerAction.attach?.(run);
     storage.set(key(`run:${sessionId}`),run.id,true);
     const status=h('span',{role:'status','aria-hidden':'true'},run.status || 'submitted');
@@ -1538,7 +2785,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               || currentClarificationQuestion!==item.question_id)return;
           const answerRevision=++clarificationRevision;
           const sameRoute=()=>version===routeVersion && state.user?.id===clarificationOwner
-            && state.session?.id===sessionId && run.id===article.dataset.historyRun
+            && state.session?.id===viewedSessionId && run.id===article.dataset.historyRun
             && article.isConnected;
           const answerStillCurrent=()=>sameRoute()
             && clarificationRevision===answerRevision && !stopPending
@@ -1645,7 +2892,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       try{
         const result=await api.request(`/runs/${encodeURIComponent(run.id)}/clarifications`);
         if(version!==routeVersion || state.user?.id!==clarificationOwner
-            || state.session?.id!==sessionId || run.id!==article.dataset.historyRun
+            || state.session?.id!==viewedSessionId || run.id!==article.dataset.historyRun
             || !article.isConnected || stopPending || clarificationRevision!==revision
             || sequence!==clarificationReconcileSequence
             || !Array.isArray(result?.items))return null;
@@ -1686,7 +2933,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         return {...result,status};
       }catch(error){
         if(version!==routeVersion || state.user?.id!==clarificationOwner
-            || state.session?.id!==sessionId || !article.isConnected
+            || state.session?.id!==viewedSessionId || !article.isConnected
             || clarificationRevision!==revision
             || sequence!==clarificationReconcileSequence)return null;
         clarificationUnavailable=true;
@@ -1706,7 +2953,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     composerAction.activity?.(article.querySelector('.live-activity-heading'),node=>{const atBottom=followTail();flushPublic();output.before(node);splitTools=true;if(atBottom)messages.scrollTop=messages.scrollHeight;});
     const wasAtBottom=followTail();
-    messages.append(article);
+    approvalHistoryAnchors=null;messages.append(article);
     if(wasAtBottom)messages.scrollTop=messages.scrollHeight;
     let seeding=true;
     const renderTool=data=>{
@@ -1787,7 +3034,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(current.error)inform(typeof current.error==='string' ? current.error : 'The run failed.',true);
       if(finalStates.has(current.status)) {
         article.dataset.historyFinal='true';
-        approvalState?.finish(run.id);
+        approvalState?.finish(run.id,current.status);
         void composerAction.refresh?.();
         for(const item of pendingTools.splice(0)){
           const next=toolPreview({name:item.name,summary:item.summary,status:'unknown'});
@@ -1804,7 +3051,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     const reconciledClarifications=await reconcileClarifications();
     if(version!==routeVersion || state.user?.id!==clarificationOwner
-        || state.session?.id!==sessionId || run.id!==article.dataset.historyRun
+        || state.session?.id!==viewedSessionId || run.id!==article.dataset.historyRun
         || !article.isConnected){
       initialRestore.finish?.();
       return;
@@ -1843,6 +3090,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         // Fresh terminal reads still reconcile offline; newer events defer them to the next poll.
         const currentRevision=token===connection?.token();
         if(connection?.success(token))connection.run(current.status);
+        if(currentRevision && ['queued','running','waiting_for_approval','waiting_for_clarification','stopping'].includes(current.status))
+          void approvalState?.reconcile();
         if(currentRevision && (finalStates.has(current.status) || current.status==='stopping')) {recovered();apply(current);}
       } catch(error) {
         if(!disposed && version===routeVersion) {
@@ -1876,13 +3125,16 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(event.lastEventId)renderedIds.add(event.lastEventId);
       }catch{inform('A live update could not be read. Reopen the conversation to check the saved result.',true);}
     });
-    on('status',apply);
+    on('status',data=>{
+      apply(data);
+      if(data.status==='waiting_for_approval')void approvalState?.reconcile();
+    });
     on('steering',data=>{composerAction.receive?.(data);void composerAction.refresh?.();});
     on('steer',data=>{composerAction.receive?.(data);void composerAction.refresh?.();});
     on('commentary',renderCommentary);
     on('delta',renderDelta);
     on('tool',renderTool);
-    on('approval',data=>{if(!approvalState?.event(data,run.id))return;apply({status:'waiting_for_approval'});connection?.run('waiting_for_approval');status.textContent='Waiting for approval';if(data.id || data.request_id)void approvalState.reconcile();});
+    on('approval',data=>{if(!approvalState?.event(data,run.id,sessionId))return;apply({status:'waiting_for_approval'});connection?.run('waiting_for_approval');status.textContent='Waiting for approval';if(data.id || data.request_id)void approvalState.reconcile();});
     on('clarification',data=>{
       if(data.run_id!==run.id || data.session_id!==sessionId
           || !Number.isFinite(data.updated_at))return;
@@ -2134,7 +3386,78 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   async function start() {
     if(destroyed)return;
     disconnect();leaveConversation();releasePresenceIdentity();const version=++routeVersion;
-    try { const data = await api.request('/auth/me');if(destroyed || version!==routeVersion)return;await preparePresenceIdentity(data,()=>!destroyed && version===routeVersion);if(destroyed || version!==routeVersion)return; if(state.user?.id!==data.user.id){state.kind='chats';state.query='';state.searchOpen=false;state.offset=0;state.session=null;drafts.clear();attempts.clear();}state.user = data.user; shell(); await navigate(new URL(win.location.href).searchParams.has('inbox') ? 'inbox' : 'chats'); }
+    try {
+      const data=await api.request('/auth/me');
+      if(destroyed || version!==routeVersion)return;
+      await preparePresenceIdentity(data,()=>!destroyed && version===routeVersion);
+      if(destroyed || version!==routeVersion)return;
+      if(state.user?.id!==data.user.id){authGeneration++;state.kind='chats';state.query='';state.searchOpen=false;state.offset=0;state.session=null;drafts.clear();attempts.clear();}
+      state.user=data.user;shell();
+      const params=new URL(win.location.href).searchParams;
+      const notification=params.get('notification') || params.get('inbox');
+      if(notification && validNotificationId(notification)){
+        const targetParam=params.get('notification')?'notification':'inbox',owner=state.user.id;
+        const fallbackView=params.has('inbox')?'inbox':'chats';
+        const targetCurrent=()=>{
+          if(destroyed || version!==routeVersion || owner!==state.user?.id)return false;
+          const currentParams=new URL(win.location.href).searchParams;
+          return targetParam==='notification'
+            ? currentParams.get('notification')===notification
+            : !currentParams.get('notification') && currentParams.get('inbox')===notification;
+        };
+        let notificationRead=null;
+        const showNotificationRetry=()=>{
+          let retry;
+          retry=button('Retry notification',()=>{
+            if(!targetCurrent() || !retry.isConnected || retry.disabled || notificationRead)return;
+            retry.disabled=true;
+            void readNotificationTarget();
+          },'secondary',{disabled:true});
+          content.replaceChildren(h('section',{class:'card stack notification-target-retry',role:'status'},
+            h('h1',{},'Notification could not be opened'),
+            h('p',{},'Hermes could not load this notification. No approval or request was sent.'),
+            retry));
+        };
+        const readNotificationTarget=()=>{
+          if(notificationRead)return notificationRead;
+          const pending=(async()=>{
+            let target;
+            try{target=await api.request(`/inbox/${encodeURIComponent(notification)}/target`);}
+            catch(error){
+              if(!targetCurrent())return;
+              if(error.status===401){expiredSession();return;}
+              if(transientReadFailure(error)){showNotificationRetry();return;}
+              await navigate(fallbackView);
+              inform('This notification is no longer available.',true);
+              return;
+            }
+            if(!targetCurrent())return;
+            if(['request','approval'].includes(target?.kind)
+                && typeof target.session_id==='string' && target.session_id.length<=256
+                && typeof target.run_id==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(target.run_id)
+                && (target.kind!=='approval' || target.run_session_id===undefined
+                    || typeof target.run_session_id==='string')){
+              await openSession({id:target.session_id},{...target,notification_id:notification});
+              return;
+            }
+            await navigate('inbox');
+          })();
+          notificationRead=pending;
+          const release=()=>{
+            if(notificationRead!==pending)return;
+            notificationRead=null;
+            if(!targetCurrent())return;
+            const retry=content.querySelector('.notification-target-retry button');
+            if(retry)retry.disabled=false;
+          };
+          void pending.then(release,release);
+          return pending;
+        };
+        await readNotificationTarget();
+        return;
+      }
+      await navigate(params.has('inbox')?'inbox':'chats');
+    }
     catch(error) { if(destroyed || version!==routeVersion)return;state.user = null; showAuth(); if (error.status !== 401) inform(errorMessage(error),true); }
   }
   await start();

@@ -221,10 +221,10 @@ SOURCE_FINGERPRINTS = {
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
     'backend/model_controls.py': 'fee5b5b6130e73d5fdce0a79362c09f5ace7621e8b426b5fb1b574cd3cd2bbef',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
-    'backend/notifications.py': '7d1fe9e4e2569f9596df4ded464c2264cd9e404cef715e88652b790e3ec9887c',
+    'backend/notifications.py': 'a56b13b0c78a9dc067a7cc252753a7c3b822df5cc9fc2aa8f2321859be08726e',
     'backend/runs.py': 'be188d9897ff925fc55677881b380bba5f97f3c5d6b3ae3d6e7faca72c3d8464',
     # Accepted PR45 naming bytes in this assembly; no naming-source rewrite.
-    'backend/app.py': 'a78f48ce835121cd6b156881074fa25ff330c37f2b0f6ae264f2437404144069',
+    'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
     'backend/auth.py': '411529a1d53bdcd01eae4bf5e35c44d3d5099e4dc9e77eb9dbbe67df6433f335',  # gitleaks:allow
     'backend/auth_store.py': '8827856de744de03648924b0ff83011bdb70417781620724acd84078181c193e',  # gitleaks:allow
     'backend/background_delivery.py': '2da2bdd89d27f18beee0e0099d1bb39b325a9f70dcba099d55ceb3dea2e88629',
@@ -234,10 +234,10 @@ SOURCE_FINGERPRINTS = {
     'backend/delivery.py': 'c241a5bf745011a7a7820313da6db688a5446703ae42c8a97c77f96ce05ff18f',
     'backend/hermes_client.py': 'd669f59f7bf3fb2cc5cc671081937fb7328f9b53d50995f966333ae413823116',
     'backend/jobs.py': 'fd9c4a2ac2c2f292c4616fd7dd04281b4c6a5753e9c432756345d85d175eee5e',
-    'backend/native_catalog.py': '986c43c3b13885605053330adc52a7f7b25ac9608e81bd1e67839fd3f3cb9e49',
+    'backend/native_catalog.py': 'f6b54791ba24637b193ff247b34c9992764e6ba27dd4abd368eb61c83de15f69',
     'backend/notification_policy.py': '69c7c6807210dbf9300cd25c5ba14604be75730d06f41879074208d62655684d',
     'backend/operational_notifications.py': '9edbc496bb931a02096bf820d984a4032107e003924492e1120684a0f5cdad31',
-    'backend/orchestration.py': 'baa7959b56277348f2ac34f8c537509369520e9639c47b999b9c135f0cbfc4b8',
+    'backend/orchestration.py': 'f9869561d6dc64b29ac4ecbdde6c7cad6a757595eab9c5c1c9e3afe3fd89f545',
     'backend/photo_policy.py': 'a4a4524ef7786e8cae5a284024b84f6231b65465d9610b8e10545960a4e92a4e',
     'backend/profiles.py': '8bf7681b69f6273d6a6f86a9835cc7e2fc0bd6f31fdb59e7934bd8dbb7515f40',
     'backend/public_commentary.py': 'a52a81b0852fdcff13057bcd25ee39836abdc2d8ab658b90a9db7197ca0cf57a',

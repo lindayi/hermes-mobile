@@ -1,5 +1,5 @@
 // Version this cache whenever a public asset changes. Never store authenticated responses.
-const CACHE='hermes-public-v4';
+const CACHE='hermes-public-v5';
 const ASSETS=['/hermes/index.html','/hermes/styles.css','/hermes/app.js','/hermes/viewport.mjs','/hermes/disclosure-reachability.mjs','/hermes/api.mjs','/hermes/ui.mjs','/hermes/background-placement.mjs','/hermes/session-swipe.mjs','/hermes/tool-details.mjs','/hermes/model-controls.mjs','/hermes/markdown.mjs','/hermes/webauthn.mjs','/hermes/manifest.webmanifest','/hermes/icons/hermes.svg','/hermes/icons/icon-192.png','/hermes/icons/icon-512.png','/hermes/icons/apple-touch-icon.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS))));
 self.addEventListener('activate',event=>event.waitUntil((async()=>{
@@ -19,13 +19,16 @@ self.addEventListener('fetch',event=>{
   })());
 });
 function safeInboxId(value) {return typeof value==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;}
-function safeTarget(value) {
+function safeTarget(target) {
   const base=self.location.origin+'/hermes/';
   try {
-    const url=new URL(value || base,base);
+    const url=new URL(target || base,base);
     if(url.origin!==self.location.origin || url.pathname!=='/hermes/')return base;
-    const id=safeInboxId(url.searchParams.get('inbox'));
-    return id ? base+'?inbox='+encodeURIComponent(id) : base;
+    const targets=['notification','inbox'].flatMap(name=>
+      url.searchParams.getAll(name).map(value=>[name,value]));
+    if(targets.length!==1)return base;
+    const [name,idValue]=targets[0],id=safeInboxId(idValue);
+    return id ? base+'?'+name+'='+encodeURIComponent(id) : base;
   }catch{return base;}
 }
 self.addEventListener('push',event=>event.waitUntil((async()=>{
@@ -37,7 +40,7 @@ self.addEventListener('push',event=>event.waitUntil((async()=>{
   const id=safeInboxId(data?.inbox_id),base=self.location.origin+'/hermes/';
   const informative=id && plain(data?.title,100) && plain(data?.body,180);
   // One validated receipt identity owns both grouping and navigation, never payload URL.
-  await self.registration.showNotification(informative?data.title:'Hermes',{body:informative?data.body:'Open Hermes to read your update.',icon:'/hermes/icons/icon-192.png',badge:'/hermes/icons/icon-192.png',tag:id ? 'hermes-'+id : undefined,data:{url:id ? base+'?inbox='+encodeURIComponent(id) : base}});
+  await self.registration.showNotification(informative?data.title:'Hermes',{body:informative?data.body:'Open Hermes to read your update.',icon:'/hermes/icons/icon-192.png',badge:'/hermes/icons/icon-192.png',tag:id ? 'hermes-'+id : undefined,data:{url:id ? base+'?notification='+encodeURIComponent(id) : base}});
 })()));
 self.addEventListener('notificationclick',event=>event.waitUntil((async()=>{
   event.notification.close();const url=safeTarget(event.notification.data?.url);

@@ -490,6 +490,7 @@ class NativeCatalog:
         has_public_text = bool(snapshot and any(event['name'] in ('delta', 'commentary')
                                                for event in snapshot.get('replay_events', ())))
         synthetic = []
+        native_run_ids = {}
         native_attachments = {}
         conservative = False
         with closing(self._connect(profile)) as c:
@@ -533,6 +534,8 @@ class NativeCatalog:
                     first = _first_turn_row(iter(c.execute(query, args)), processes)
                     matched = matches_user(first, old, reminders)
                     complete = matched and isinstance(old['output'], str) and _completed_turn(iter(c.execute(query, args)), old, processes=processes, reminders=reminders)
+                if matched:
+                    native_run_ids[first['id']] = old['id']
                 if matched and old.get('attachment_ids'):
                     native_attachments[first['id']] = (old['id'], list(old['attachment_ids']))
                 if entry.get('replay_events'):
@@ -579,6 +582,7 @@ class NativeCatalog:
                                 and _completed_turn(iter(c.execute(query, args)), run,
                                                     snapshot.get('tool_events', ()), processes, reminders))
                     if complete:
+                        native_run_ids[first['id']] = run['id']
                         if run.get('attachment_ids'):
                             native_attachments[first['id']] = (run['id'], list(run['attachment_ids']))
                         overlay = None
@@ -598,6 +602,7 @@ class NativeCatalog:
                     matched = (matches_user(first, run, reminders)
                                and anchor['canonical_session_id'] == session_id)
                     if matched:
+                        native_run_ids[first['id']] = run['id']
                         if run.get('attachment_ids'):
                             native_attachments[first['id']] = (run['id'], list(run['attachment_ids']))
                         next_user = next((row['id'] for row in tail if _ordinary_user(row, processes)), None)
@@ -656,6 +661,8 @@ class NativeCatalog:
             items = []
             for row in rows:
                 item = dict(row)
+                if item['id'] in native_run_ids:
+                    item['run_id'] = native_run_ids[item['id']]
                 if item['id'] in native_attachments:
                     run_id, attachment_ids = native_attachments[item['id']]
                     item['run_id'] = run_id

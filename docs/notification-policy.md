@@ -43,9 +43,106 @@ The schema-bypassing silent release observer retains legacy compatibility: only
 an absent policy table omits the category clause; receipt filtering remains and
 SQL errors propagate. No schema is created by attention queries.
 
-Approvals, main-request completion/attention, scheduled updates and operational
-incidents keep their existing eligibility, ownership and push policy. Push
-preferences remain independent of both retention and this attention view.
+Main-request outcomes and session-bound execution approvals keep their existing
+eligibility, ownership, push preferences, presence suppression, deduplication,
+receipts and retry history, but are not attention-Inbox entries. The shared
+attention predicate excludes session-bound request notifications identified by
+their stored request event and session-bound approval rows identified by
+`approval_notifications`. Listing, pagination, read counts, mark-all-read and
+clear-read use the same predicate. These rows are not deleted or marked read by
+the projection. Scheduled updates, operational incidents and genuinely non-chat
+approvals remain visible in Inbox.
+
+Web Push carries the opaque stored notification ID, not a trusted destination.
+The service worker builds a same-origin `?notification=ID` URL from that ID and
+never uses a payload-supplied URL. After authentication, the API resolves an
+owned notification to its current chat and run/request identity, and verifies
+the run's session lineage before returning its source-session binding. Legacy
+delivered `?inbox=ID` links use the same lookup; non-chat notifications retain
+Inbox. Request targets load their exact authorized run and older history as needed.
+Approval targets focus the exact chat card and never decide an action. Opening a
+chat also reconciles pending session approvals, so push is not required to find
+them. The existing step-up, CSRF, owner/run/request binding, expiry and
+single-use decision endpoint remain the only decision path. Approval actions are
+rendered inline with their command/target and explicit controls, not copied into
+Inbox. If no chat is bound, retain the prior Inbox approval destination.
+Session-bound approvals are classified only after validating the owned run,
+approval, request and native session. Positively classified chat sessions stay out
+of Inbox; positively classified cron/test sessions retain their Inbox card and
+explicit decisions. Missing or ambiguous bindings remain unavailable, not an
+Inbox fallback based only on category or session ID.
+
+The pending-approval list and detail require positive current authority before
+returning action details or decision capabilities. Omit individually unverified
+list items and reject unverified details, including changed role/profile/status;
+an Inbox visibility flag is not an authorization denial. Keep positively proven
+non-chat approvals, never infer that exception from failed proof.
+
+Client exact-detail reads are deduplicated only within their run-authority
+generation. An unknown-run transition aborts and fences only that run's older
+reads; late or aborted results cannot restore controls. Same-owner chat re-entry
+may restore a retained dispatched or uncertain decision as a bounded,
+non-actionable card matched by the exact owner, canonical session, original run
+session, run, request and approval identity. This restoration is independent of
+the latest run snapshot: a newer run does not retire, rebind or authorize the
+older decision. Revalidate its status through authenticated exact detail,
+independent of pending-list enumeration; only fresh exact pending authority may
+restore controls after a definitive rejection. A delayed decision 401 may expire
+only the same account, authentication lifetime and route that dispatched it.
+Fresh exact unavailability may settle a retained definitive 403/404/409 rejection
+only when no decision is dispatched or uncertain and the read began at or after
+that rejection's authority revision. Keep its exact identity and original turn
+chronology on later refresh or re-entry, without restoring pending controls.
+Unavailability is not a final native execution outcome and cannot settle an
+in-flight or uncertain decision.
+Ordinary chat entry, pending-list discovery and retained-decision restoration
+share one older-history walk, with at most 100 pages per attempt. A loaded saved
+turn or the actual live run anchors a card; the latest run cannot stand in for an
+absent older request. Until its exact run anchor is found, keep the card in a
+labelled group outside the request timeline. Missing/deleted history and exhausted
+bounds do not resolve approvals. History errors retain discovery and offer an
+explicit read-only retry. History recovery preserves reader position and focus,
+and late responses cannot change another route or owner.
+Notification history recovery reveals a relocated target only while the reader
+still follows it. For an omitted target, that baseline starts at the focused
+loading placeholder and is checked before the first card takes focus. A deliberate
+read-only retry starts a new baseline; later reader movement still prevents focus
+theft. Loading an older sibling must not refocus an already placed target. Composer
+focus, selection and reader position survive held history reads.
+Detail expiry uses the pending snapshot's read-time clock, not a later clock
+after authorization work; a concurrent pre-deadline decision claim must not be
+projected as final expiry. Decision-time expiry and atomic single-use claims
+remain unchanged.
+Retained rejections show non-actionable revalidation, never Decision pending merely
+because fresh authority is required. The unknown-run `details_unavailable` projection
+stays recoverable through bounded exact-detail refreshes, including after failed
+reads or repeated chat re-entry. An authenticated detail 404 has no body identity:
+bind it to the dispatched read and current retained identity, including the read's
+authority revision, run generation, owner and route. It may show unavailable only
+for that definitive rejection, not a dispatched or uncertain decision. Generic
+network failures do not retire the card. Only fresh exact pending authority restores
+decision controls; revalidation never retries a decision or passkey ceremony.
+The notification target's initial GET, list-triggered refresh and exact recheck
+use the same decision-authority rule, including handled and replacement paths.
+Use the actual shared read's origin revision, not its consumer's start time.
+A pre-rejection initial 404 cannot retire the card or block later fresh pending
+recovery. A stale initial unavailable response cannot clear a dispatched decision
+or discard its successful POST acknowledgement.
+
+An omitted notification-target approval whose initial exact-detail read times
+out or is invalidated by an unknown-run transition keeps a truthful Retry status
+action while its exact route and owner remain current. Retry performs only the
+authenticated exact-detail read. Aborted, timed-out and superseded responses
+cannot update the target; route or account teardown stays inert. Transient
+failures remain retryable and never become an authoritative unavailable state.
+
+The list uses request-scoped journal proof batches and one native classification
+per source session, then revalidates current authorization. Both list and detail
+synchronous database work run in the request threadpool, never on the async event
+loop; no authorization or classification cache survives the request.
+
+Push preferences remain independent of Inbox visibility and retention. Visibility
+changes do not alter outbox status, receipts, acknowledgements, or retry history.
 Regression gates cover HTTP delivery/ACK plus Activity, API list/count/cleanup,
 legacy reopen and newest-page saturation, category-only ingestion, title
 lookalikes, foreign provenance, legacy schema and failed-query safety. Prior

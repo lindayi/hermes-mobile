@@ -25,6 +25,12 @@ def insert_run(journal, rid, *, status='completed', updated=101, output='Public 
              'PRIVATE ERROR token=private', 'native-'+rid, updated-1, updated))
 
 
+def stored_items(notifications):
+    with notifications._db() as db:
+        return [dict(row) for row in db.execute(
+            'SELECT id,delivery_id,title,body,session_id FROM inbox ORDER BY created_at,id')]
+
+
 def test_public_completion_once_across_restart_without_old_history(tmp_path):
     now = [100.0]
     service, notifications, journal, users = setup_service(tmp_path, now)
@@ -36,7 +42,7 @@ def test_public_completion_once_across_restart_without_old_history(tmp_path):
     restarted = RequestNotificationService(notifications, journal, resolve_user=users.get,
         session_validator=lambda u,s: True, clock=lambda: now[0])
     restarted.tick()
-    items = notifications.list_inbox('u')
+    items = stored_items(notifications)
     assert len(items) == 1
     assert items[0]['body'] == 'The report is ready. Which format would you like?'
     with notifications._db() as db:
@@ -50,7 +56,7 @@ def test_failure_uses_generic_reason_not_partial_output_or_internal_error(tmp_pa
     insert_run(journal, 'failed', status='failed', output='PRIVATE partial tool result')
     now[0] = 102
     service.tick()
-    items = notifications.list_inbox('u')
+    items = stored_items(notifications)
     assert len(items) == 1
     assert items[0]['title'] == 'Request needs attention'
     assert items[0]['body'] == 'Your request could not finish. Open Hermes to review its status.'
@@ -63,10 +69,10 @@ def test_unknown_threshold_survives_restart_and_resolves_once(tmp_path):
     insert_run(journal, 'unknown', status='unknown', output='PRIVATE partial')
     now[0] = 220
     service.tick()
-    assert notifications.list_inbox('u') == []
+    assert stored_items(notifications) == []
     now[0] = 221
     service.tick()
-    items = notifications.list_inbox('u')
+    items = stored_items(notifications)
     assert len(items) == 1
     assert 'unresolved' in items[0]['body']
     assert 'PRIVATE' not in str(items)
@@ -74,12 +80,12 @@ def test_unknown_threshold_survives_restart_and_resolves_once(tmp_path):
     restarted = RequestNotificationService(notifications, journal, resolve_user=users.get,
         session_validator=lambda u,s: True, clock=lambda: now[0])
     restarted.tick()
-    assert len(notifications.list_inbox('u')) == 1
+    assert len(stored_items(notifications)) == 1
     journal.finish('u', 'unknown', 'completed', output='The answer is ready.')
     restarted.tick()
-    assert len(notifications.list_inbox('u')) == 2
+    assert len(stored_items(notifications)) == 2
     restarted.tick()
-    assert len(notifications.list_inbox('u')) == 2
+    assert len(stored_items(notifications)) == 2
 
 
 def test_bounded_scan_progresses_past_first_hundred_after_restart(tmp_path):
@@ -89,7 +95,7 @@ def test_bounded_scan_progresses_past_first_hundred_after_restart(tmp_path):
         insert_run(journal, str(i))
     now[0] = 102
     service.tick()
-    assert len(notifications.list_inbox('u', limit=200)) == 100
+    assert len(stored_items(notifications)) == 100
     from backend.request_notifications import RequestNotificationService
     restarted = RequestNotificationService(notifications, journal, resolve_user=users.get,
         session_validator=lambda u,s: True, clock=lambda: now[0])
@@ -112,7 +118,7 @@ def test_reconciliation_timestamp_churn_does_not_reset_unknown_duration(tmp_path
         session_validator=lambda u,s: True, clock=lambda: now[0])
     now[0] = 221
     service.tick()
-    assert len(notifications.list_inbox('u')) == 1
+    assert len(stored_items(notifications)) == 1
 
 
 def test_cancel_stop_intent_hidden_unready_and_rebound_runs_are_silent(tmp_path):
@@ -129,8 +135,8 @@ def test_cancel_stop_intent_hidden_unready_and_rebound_runs_are_silent(tmp_path)
                    ('u', 'default', 'deleted', 'operation', 'prepared', 100))
     now[0] = 102
     service.tick()
-    assert notifications.list_inbox('u') == []
+    assert stored_items(notifications) == []
     insert_run(journal, 'unready')
     users.clear()
     service.tick()
-    assert notifications.list_inbox('u') == []
+    assert stored_items(notifications) == []

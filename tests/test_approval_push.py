@@ -7,7 +7,7 @@ from tests.test_notifications import subscription
 
 def test_new_owned_approval_is_durable_bound_and_deduplicated(tmp_path):
     service = NotificationService(tmp_path/'push.sqlite', clock=lambda: 100)
-    service.approval_validator = lambda *identity: identity == ('alice', 'run', 'native', 'approval')
+    service.approval_validator = lambda *identity: identity[0] == 'alice'
     service.subscribe('alice', 'device', subscription())
     assert callable(getattr(service, 'ingest_approval', None)), 'Approval has no durable push ingestion path'
     first = service.ingest_approval('alice', 'run', 'native', 'approval', 'chat', 200)
@@ -20,7 +20,14 @@ def test_new_owned_approval_is_durable_bound_and_deduplicated(tmp_path):
     with service._db() as db:
         assert db.execute('SELECT count(*) FROM outbox').fetchone()[0] == 1
         assert db.execute('SELECT expires_at FROM outbox').fetchone()[0] == 200
-    assert NotificationService(tmp_path/'push.sqlite').list_inbox('alice') == [first]
+    assert NotificationService(tmp_path/'push.sqlite').list_inbox('alice') == []
+    service.approval_target_resolver = lambda owner, run, request, approval, session: (
+        {'kind': 'inbox'} if (owner, run, request, approval, session) ==
+        ('alice', 'run-other', 'native-other', 'approval-other', None) else None
+    )
+    non_chat = service.ingest_approval('alice', 'run-other', 'native-other', 'approval-other',
+        None, 200)
+    assert service.list_inbox('alice') == [non_chat]
     assert service.list_inbox('bob') == []
 
 
@@ -54,6 +61,6 @@ def test_resolved_approval_is_suppressed_but_cron_delivery_is_unchanged(tmp_path
     service.approval_validator = lambda *args: False
     result = service.flush()
     assert result['sent'] == 1, 'Resolved approval must not be pushed'
-    assert sent[0]['url'] == '/hermes/?inbox=' + cron['id']
+    assert sent[0]['url'] == '/hermes/?notification=' + cron['id']
     with service._db() as db:
         assert db.execute("SELECT count(*) FROM outbox WHERE status='suppressed'").fetchone()[0] == 1

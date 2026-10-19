@@ -13,7 +13,7 @@ def test_public_preview_is_informative_plain_bounded_and_inbox_linked(policy):
     assert payload['title'] == 'Meeting notes ready'
     assert payload['body'] == 'Three decisions are ready to review.'
     assert payload['inbox_id'] == item['id']
-    assert payload['url'] == '/hermes/?inbox='+item['id']
+    assert payload['url'] == '/hermes/?notification='+item['id']
     assert payload['tag'] == item['id']
     s.ingest('alice','long','Title '*50,'Public response. '*100,category='scheduled')
     assert s.flush()['sent'] == 2

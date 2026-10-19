@@ -4,6 +4,7 @@ import hmac
 import json
 import math
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,16 @@ def _attention_visible_sql(db):
         AND NOT EXISTS (SELECT 1 FROM background_receipts r
                         WHERE r.inbox_id=inbox.id AND r.user_id=inbox.user_id)
     '''
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='notification_policy'").fetchone():
+        predicate += '''AND NOT EXISTS (SELECT 1 FROM notification_policy p
+                         WHERE p.inbox_id=inbox.id AND p.category IN ('completion','attention')
+                         AND inbox.session_id IS NOT NULL AND inbox.delivery_id LIKE 'request:%')
+        '''
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='approval_notifications'").fetchone():
+        predicate += '''AND NOT EXISTS (SELECT 1 FROM approval_notifications a
+                         WHERE a.inbox_id=inbox.id
+                         AND inbox.id NOT IN (SELECT inbox_id FROM attention_approval_inbox))
+        '''
     # The silent release observer can use a pre-policy DB without initializing
     # schema. Only absent metadata is optional; database/query errors propagate.
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='notification_policy'").fetchone():
@@ -37,6 +48,8 @@ class NotificationService:
                  vapid_subject='https://lindayi.me', send_push=None, *,
                  clock=time.time, session_validator=None, approval_validator=None, presence_validator=None,
                  event_validator=None, presence_resolver=None, request_validator=None,
+                 request_target_resolver=None, approval_target_resolver=None,
+                 approval_targets_resolver=None,
                  device_claim_guard=None):
         self.db_path = str(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -54,6 +67,9 @@ class NotificationService:
         self.event_validator = event_validator
         self.presence_resolver = presence_resolver
         self.request_validator = request_validator
+        self.request_target_resolver = request_target_resolver
+        self.approval_target_resolver = approval_target_resolver
+        self.approval_targets_resolver = approval_targets_resolver
         self.device_claim_guard = device_claim_guard
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS inbox (
@@ -482,7 +498,7 @@ class NotificationService:
                     prefs = self._preferences(db, row['user_id'], row['device_id'])
                     preview = GENERIC_PREVIEW if prefs['hide_details'] else safe_preview(notice['title'], notice['body'])
                     payload = {**preview,
-                               'url': '/hermes/?inbox=' + row['inbox_id'], 'tag': row['inbox_id'],
+                               'url': '/hermes/?notification=' + row['inbox_id'], 'tag': row['inbox_id'],
                                'inbox_id': row['inbox_id']}
                     db.commit()
                 # After this committed claim, revocation cannot recall a payload.
@@ -518,10 +534,46 @@ class NotificationService:
                 result['sent'] += 1
         return result
 
+    def _inbox_approval_ids(self, user_id):
+        batch_resolver = getattr(self, 'approval_targets_resolver', None)
+        resolver = getattr(self, 'approval_target_resolver', None)
+        if not batch_resolver and not resolver:
+            return set()
+        with self._db() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='approval_notifications'").fetchone():
+                return set()
+            approvals = db.execute('''SELECT i.id,i.session_id,a.approval_id,a.run_id,a.request_id
+                FROM inbox i JOIN approval_notifications a ON a.inbox_id=i.id
+                WHERE i.user_id=? AND NOT EXISTS (
+                    SELECT 1 FROM dismissed_inbox d
+                    WHERE d.inbox_id=i.id AND d.user_id=i.user_id)''', (user_id,)).fetchall()
+        if batch_resolver:
+            bindings = batch_resolver(user_id, [dict(row) for row in approvals])
+            if not isinstance(bindings, dict):
+                raise RuntimeError('Approval visibility resolver returned an invalid result')
+            return {row['id'] for row in approvals
+                    if isinstance(bindings.get(row['id']), dict)
+                    and bindings[row['id']].get('kind') == 'inbox'}
+        visible = set()
+        for row in approvals:
+            binding = resolver(user_id, row['run_id'], row['request_id'],
+                               row['approval_id'], row['session_id'])
+            if isinstance(binding, dict) and binding.get('kind') == 'inbox':
+                visible.add(row['id'])
+        return visible
+
+    @staticmethod
+    def _set_attention_approvals(db, visible):
+        db.execute('CREATE TEMP TABLE attention_approval_inbox (inbox_id TEXT PRIMARY KEY) WITHOUT ROWID')
+        db.executemany('INSERT INTO attention_approval_inbox VALUES(?)',
+                       ((item_id,) for item_id in visible))
+
     def mark_all_read(self, user_id, *, _authorize=None):
         """Read owned attention rows across all pages; leave receipts/actions intact."""
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._set_attention_approvals(db, visible_approvals)
             # Match preference writes' lock order and fence revoked bearer
             # generations after waiting for the notification writer.
             with _authorize() if _authorize else nullcontext():
@@ -565,8 +617,10 @@ class NotificationService:
             (SELECT inbox_id FROM dismissed_inbox WHERE user_id=?)''', (user_id,))
 
     def clear_read(self, user_id):
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._set_attention_approvals(db, visible_approvals)
             dismissed = db.execute(f'''INSERT OR IGNORE INTO dismissed_inbox(inbox_id,user_id,dismissed_at)
                 SELECT id,user_id,? FROM inbox WHERE user_id=? AND read=1 AND {_attention_visible_sql(db)}''',
                 (self.clock(), user_id)).rowcount
@@ -574,13 +628,36 @@ class NotificationService:
             return dismissed
 
     def read_count(self, user_id):
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
+            self._set_attention_approvals(db, visible_approvals)
             return db.execute(f'''SELECT count(*) FROM inbox WHERE user_id=? AND read=1
                 AND {_attention_visible_sql(db)}''',
                 (user_id,)).fetchone()[0]
 
-    def list_inbox(self, user_id, limit=100, offset=0):
+    def inbox_page(self, user_id, limit=100, offset=0):
+        visible_approvals = self._inbox_approval_ids(user_id)
         with self._db() as db:
+            db.execute('BEGIN')
+            self._set_attention_approvals(db, visible_approvals)
+            visible = _attention_visible_sql(db)
+            items = [self._item(row) for row in db.execute(
+                f'''SELECT * FROM inbox WHERE user_id=? AND {visible}
+                ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?''',
+                (user_id, min(max(limit, 1), 200), max(offset, 0)))]
+            for item in items:
+                metadata = db.execute('SELECT approval_id,run_id,request_id,expires_at FROM approval_notifications WHERE inbox_id=?',
+                                      (item['id'],)).fetchone()
+                if metadata:
+                    item.update(dict(metadata))
+            read_count = db.execute(f'''SELECT count(*) FROM inbox WHERE user_id=? AND read=1
+                AND {visible}''', (user_id,)).fetchone()[0]
+            return {'items': items, 'read_count': read_count}
+
+    def list_inbox(self, user_id, limit=100, offset=0):
+        visible_approvals = self._inbox_approval_ids(user_id)
+        with self._db() as db:
+            self._set_attention_approvals(db, visible_approvals)
             items = [self._item(row) for row in db.execute(
                 f'''SELECT * FROM inbox WHERE user_id=? AND {_attention_visible_sql(db)}
                 ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?''',
@@ -590,6 +667,45 @@ class NotificationService:
                 if metadata:
                     item.update(dict(metadata))
             return items
+
+    def notification_target(self, user_id, item_id):
+        with self._db() as db:
+            row = db.execute('''SELECT i.id,i.delivery_id,i.session_id,p.category,
+                    a.approval_id,a.run_id,a.request_id
+                FROM inbox i
+                LEFT JOIN notification_policy p ON p.inbox_id=i.id
+                LEFT JOIN approval_notifications a ON a.inbox_id=i.id
+                WHERE i.id=? AND i.user_id=?''', (item_id, user_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, 'Inbox item not found')
+        if row['approval_id']:
+            resolver = self.approval_target_resolver
+            binding = resolver(user_id, row['run_id'], row['request_id'],
+                               row['approval_id'], row['session_id']) if resolver else None
+            if isinstance(binding, dict) and binding.get('kind') == 'inbox':
+                return {'kind': 'inbox'}
+            if (isinstance(binding, dict) and binding.get('kind') == 'chat'
+                    and isinstance(binding.get('session_id'), str)
+                    and isinstance(binding.get('run_session_id'), str)):
+                return {'kind': 'approval', 'session_id': binding['session_id'],
+                        'run_session_id': binding['run_session_id'],
+                        'run_id': row['run_id'], 'approval_id': row['approval_id'],
+                        'request_id': row['request_id']}
+            raise HTTPException(404, 'Notification target unavailable')
+        if (row['session_id'] and row['category'] in ('completion', 'attention')
+                and row['delivery_id'].startswith('request:')):
+            parts = row['delivery_id'].split(':')
+            if (len(parts) == 3 and parts[2] in ('terminal', 'unknown')
+                    and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', parts[1])):
+                resolver = self.request_target_resolver
+                binding = resolver(user_id, row['delivery_id'], row['session_id'], row['category']) if resolver else None
+                if (isinstance(binding, dict)
+                        and isinstance(binding.get('session_id'), str)
+                        and isinstance(binding.get('run_session_id'), str)):
+                    return {'kind': 'request', 'session_id': binding['session_id'],
+                            'run_id': parts[1], 'run_session_id': binding['run_session_id']}
+                raise HTTPException(404, 'Notification target unavailable')
+        return {'kind': 'inbox'}
 
 
 def build_notifications_router(service, auth_service):
@@ -621,8 +737,11 @@ def build_notifications_router(service, auth_service):
     @router.get('/inbox')
     def inbox(user=Depends(auth_service.require_user), limit: int = Query(100, ge=1, le=200),
               offset: int = Query(0, ge=0)):
-        return {'items': service.list_inbox(user['id'], limit, offset),
-                'read_count': service.read_count(user['id'])}
+        return service.inbox_page(user['id'], limit, offset)
+
+    @router.get('/inbox/{item_id}/target')
+    def notification_target(item_id: str, user=Depends(auth_service.require_user)):
+        return service.notification_target(user['id'], item_id)
 
     @router.post('/inbox/read-all')
     def mark_all_read(request: Request, user=Depends(auth_service.require_user)):

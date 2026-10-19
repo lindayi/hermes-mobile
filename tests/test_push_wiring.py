@@ -38,9 +38,12 @@ def test_lifecycle_persists_authoritative_completion_without_phone(tmp_path):
     app.state.request_notifications.tick = tick
     with client:
         assert seen.wait(3)
-        rows = app.state.notifications.list_inbox(user['id'])
+        with app.state.notifications._db() as db:
+            rows = db.execute('SELECT body,session_id FROM inbox WHERE user_id=?', (user['id'],)).fetchall()
         assert len(rows) == 1
         assert rows[0]['body'] == 'Public persisted final'
+        assert rows[0]['session_id'] == 'wa-1'
+        assert app.state.notifications.list_inbox(user['id']) == []
 
 
 def test_optional_producer_and_approval_errors_cannot_starve_push(tmp_path):
@@ -70,9 +73,17 @@ def test_completion_routes_to_current_compression_tip_and_alias_tombstone_fences
     run, _ = journal.submit(user['id'], 'default', 'wa-1', 'PRIVATE', 'compressed')
     journal.finish(user['id'], run['id'], 'completed', output='Public final')
     app.state.request_notifications.tick()
-    rows = app.state.notifications.list_inbox(user['id'])
+    with app.state.notifications._db() as db:
+        rows = db.execute('SELECT session_id FROM inbox WHERE user_id=?', (user['id'],)).fetchall()
     assert len(rows) == 1
     assert rows[0]['session_id'] == 'tip'
+    assert app.state.notifications.list_inbox(user['id']) == []
+    with app.state.notifications._db() as db:
+        notice_id = db.execute('SELECT id FROM inbox WHERE user_id=?', (user['id'],)).fetchone()[0]
+    assert client.get(BASE + f'/inbox/{notice_id}/target').json() == {
+        'kind': 'request', 'session_id': 'tip', 'run_id': run['id'],
+        'run_session_id': 'wa-1'
+    }
     assert app.state.notifications.presence_validator(user['id'], 'tip')
     # A live view may retain the original ID after compression.
     assert app.state.notifications.presence_validator(user['id'], 'wa-1')
@@ -107,9 +118,11 @@ def test_persisted_canonical_run_alias_routes_and_fences_absent_original(tmp_pat
         history_anchor=lambda: {'session_id': 'old-alias', 'canonical_session_id': 'wa-1', 'message_id': 1})
     journal.finish(user['id'], run['id'], 'completed', output='Public final')
     app.state.request_notifications.tick()
-    rows = app.state.notifications.list_inbox(user['id'])
+    with app.state.notifications._db() as db:
+        rows = db.execute('SELECT session_id FROM inbox WHERE user_id=?', (user['id'],)).fetchall()
     assert len(rows) == 1
     assert rows[0]['session_id'] == 'wa-1'
+    assert app.state.notifications.list_inbox(user['id']) == []
     with closing(journal.connect()) as db, db:
         db.execute('INSERT INTO session_deletions VALUES(?,?,?,?,?,?)',
                    (user['id'], 'default', 'old-alias', 'op', 'deleted', 100))
@@ -185,6 +198,33 @@ def test_unknown_retry_rechecks_exact_source_run_before_send(tmp_path):
             journal.finish(user['id'],run['id'],'cancelled')
         app.state.request_notifications.tick()
         assert notifications.flush()['sent'] == (1 if transition == 'completed' else 0)
+
+
+def test_unknown_notice_opens_current_run_outcome_but_stale_push_is_ineligible(tmp_path):
+    import time
+    app, client, user, home = setup_app(tmp_path)
+    notifications = app.state.notifications
+    journal = app.state.journal
+    run, _ = journal.submit(user['id'], 'default', 'wa-1', 'PRIVATE', 'unknown result')
+    journal.finish(user['id'], run['id'], 'unknown')
+    now = time.time() + 121
+    app.state.request_notifications.clock = lambda: now
+    app.state.request_notifications.tick()
+    with notifications._db() as db:
+        notice = db.execute('SELECT id,delivery_id,session_id FROM inbox WHERE user_id=?',
+                            (user['id'],)).fetchone()
+    assert notice['delivery_id'] == f"request:{run['id']}:unknown"
+
+    journal.finish(user['id'], run['id'], 'completed', output='Public final')
+
+    assert not notifications.request_validator(
+        user['id'], notice['delivery_id'], notice['session_id'], 'attention')
+    response = client.get(BASE + f"/inbox/{notice['id']}/target")
+    assert response.status_code == 200
+    assert response.json() == {
+        'kind': 'request', 'session_id': 'wa-1', 'run_id': run['id'],
+        'run_session_id': 'wa-1'
+    }
 
 
 def test_presence_and_final_send_validate_fresh_owned_eligible_session(tmp_path):

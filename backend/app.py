@@ -238,10 +238,10 @@ def create_app(settings=None, *, gateway_client=None):
             return None
         return user
 
-    def notification_session(user, session_id):
+    def notification_session_binding(user, session_id, current_user=None, *, include_aliases=False):
         from contextlib import closing
         from .session_visibility import classification_sql
-        current=notification_user(user['id'])
+        current=current_user or notification_user(user['id'])
         if not current or current['profile']!=user['profile'] or not isinstance(session_id,str):
             return None
         try:
@@ -281,15 +281,91 @@ def create_app(settings=None, *, gateway_client=None):
             with closing(catalog._connect(current['profile'])) as db:
                 columns={row[1] for row in db.execute('PRAGMA table_info(sessions)')}
                 expression,params=classification_sql(columns)
-                eligible=db.execute('SELECT 1 FROM sessions WHERE id=? AND ('+expression+")='chats'",
-                                    (tip,*params)).fetchone()
-            return tip if eligible else None
+                classification=db.execute('SELECT ('+expression+') FROM sessions WHERE id=?',
+                                           (*params,tip)).fetchone()
+            if not classification or classification[0]=='hidden':
+                return None
+            result={'session_id':tip,'classification':classification[0]}
+            if include_aliases:
+                result['session_ids']=sorted(chain)
+            return result
         except (KeyError,ValueError,PermissionError,sqlite3.Error):
             return None
+
+    def notification_session(user, session_id):
+        target=notification_session_binding(user,session_id)
+        return target['session_id'] if target and target['classification']=='chats' else None
 
     def resolve_presence(user_id,session_id):
         user=notification_user(user_id)
         return notification_session(user,session_id) if user else None
+
+    def approval_notification_binding(user_id,run_id,request_id,approval_id,session_id):
+        from contextlib import closing
+        user=notification_user(user_id)
+        if not user:
+            return None
+        with closing(journal.connect()) as db:
+            row=db.execute('''SELECT r.session_id FROM runs r JOIN orchestration_approvals a ON a.run_id=r.id
+                WHERE r.id=? AND r.user_id=? AND r.profile=? AND a.id=? AND a.request_id=?''',
+                (run_id,user_id,user['profile'],approval_id,request_id)).fetchone()
+        if not row or row['session_id']!=session_id:
+            return None
+        if row['session_id'] is None:
+            return {'kind':'inbox'}
+        target=notification_session_binding(user,row['session_id'])
+        if not target:
+            return None
+        if target['classification']=='chats':
+            return {'kind':'chat','session_id':target['session_id'],
+                    'run_session_id':row['session_id']}
+        if target['classification'] in ('cron','tests'):
+            return {'kind':'inbox'}
+        return None
+
+    def approval_notification_bindings(user_id, approvals, *, expected_user=None):
+        from contextlib import closing
+        if not approvals:
+            return {}
+        user=notification_user(user_id)
+        if (not user or expected_user is not None and
+                any(user[key]!=expected_user[key] for key in ('role','profile','status'))):
+            return {}
+        verified=[]
+        with closing(journal.connect()) as db:
+            for start in range(0,len(approvals),100):
+                batch=approvals[start:start+100]
+                values=','.join('(?,?,?,?,?)' for _ in batch)
+                params=[value for row in batch for value in
+                        (row['id'],row['run_id'],row['request_id'],row['approval_id'],row['session_id'])]
+                params.extend((user_id,user['profile']))
+                verified.extend(db.execute(f'''WITH requested(inbox_id,run_id,request_id,approval_id,session_id) AS
+                    (VALUES {values})
+                    SELECT requested.inbox_id,requested.session_id
+                    FROM requested JOIN runs r ON r.id=requested.run_id
+                    JOIN orchestration_approvals a ON a.run_id=requested.run_id
+                        AND a.id=requested.approval_id AND a.request_id=requested.request_id
+                    WHERE r.user_id=? AND r.profile=? AND r.session_id IS requested.session_id''',
+                    params).fetchall())
+        targets={}
+        bindings={}
+        for row in verified:
+            session_id=row['session_id']
+            if session_id is None:
+                bindings[row['inbox_id']]={'kind':'inbox'}
+                continue
+            if session_id not in targets:
+                targets[session_id]=notification_session_binding(user,session_id,current_user=user)
+            target=targets[session_id]
+            if target and target['classification']=='chats':
+                bindings[row['inbox_id']]={'kind':'chat','session_id':target['session_id'],
+                                           'run_session_id':session_id}
+            elif target and target['classification'] in ('cron','tests'):
+                bindings[row['inbox_id']]={'kind':'inbox'}
+        current=notification_user(user_id)
+        if not current or current['profile']!=user['profile'] or current['role']!=user['role']:
+            return {}
+        return bindings
 
     def valid_presence(user_id,session_id):
         return resolve_presence(user_id,session_id) is not None
@@ -300,34 +376,45 @@ def create_app(settings=None, *, gateway_client=None):
             return False
         if category in ('completion','attention'):
             return bool(session_id and notification_session(user,session_id) is not None)
+        if category=='approval' and session_id is not None:
+            return notification_session_binding(user,session_id) is not None
         if session_id is not None:
             return notification_session(user,session_id) is not None
         return category in ('operational','scheduled','test','approval')
 
-    def valid_request_notification(user_id,delivery_id,session_id,category):
+    def request_notification_binding(user_id,delivery_id,session_id,category,*,for_push=False):
         from contextlib import closing
         user=notification_user(user_id)
         if not user or not isinstance(delivery_id,str) or not delivery_id.startswith('request:'):
-            return False
+            return None
         parts=delivery_id.split(':')
         if len(parts)!=3 or parts[2] not in ('terminal','unknown'):
-            return False
+            return None
         with closing(journal.connect()) as db:
             row=db.execute('''SELECT r.user_id,r.profile,r.session_id,r.status FROM runs r
                 WHERE r.id=? AND r.user_id=? AND NOT EXISTS
                 (SELECT 1 FROM run_stop_intents WHERE run_id=r.id)''',(parts[1],user_id)).fetchone()
         if not row or row['profile']!=user['profile']:
-            return False
+            return None
         expected=('unknown' if parts[2]=='unknown' and category=='attention' else
                   'completed' if parts[2]=='terminal' and category=='completion' else
                   'failed' if parts[2]=='terminal' and category=='attention' else None)
-        if row['status']!=expected:
-            return False
+        if expected is None or (for_push and row['status']!=expected):
+            return None
         canonical=notification_session(user,row['session_id'])
-        return bool(canonical and canonical==notification_session(user,session_id))
+        if not canonical or canonical!=notification_session(user,session_id):
+            return None
+        return {'session_id':canonical,'run_session_id':row['session_id']}
+
+    def valid_request_notification(user_id,delivery_id,session_id,category):
+        return request_notification_binding(
+            user_id,delivery_id,session_id,category,for_push=True) is not None
 
     notifications.presence_validator=valid_presence
     notifications.request_validator=valid_request_notification
+    notifications.request_target_resolver=request_notification_binding
+    notifications.approval_target_resolver=approval_notification_binding
+    notifications.approval_targets_resolver=approval_notification_bindings
     notifications.presence_resolver=resolve_presence
     notifications.event_validator=valid_notification_event
     request_notifications=RequestNotificationService(notifications,journal,
@@ -402,6 +489,21 @@ def create_app(settings=None, *, gateway_client=None):
                     and owner['profile'] in catalog.profiles and binding.matches(owner))
 
     notifications.approval_validator=valid_approval
+
+    def approval_chat_binding(user,item):
+        bindings=approval_notification_bindings(user['id'],[{
+            'id':'detail','run_id':item['run_id'],'request_id':item['request_id'],
+            'approval_id':item['id'],'session_id':item.get('session_id')}],expected_user=user)
+        return approval_chat_view(item,bindings.get('detail'))
+
+    def approval_chat_view(item,binding):
+        if not binding:
+            raise KeyError(item['id'])
+        if binding['kind']=='chat':
+            return {**item,'session_id':binding['session_id'],
+                    'run_session_id':binding['run_session_id'],'inbox_visible':False}
+        return {**item,'inbox_visible':True}
+
     for runtime in runtimes.values():
         runtime.approval_notifier=notifications.ingest_approval
         runtime.approval_validator=valid_approval
@@ -874,8 +976,31 @@ def create_app(settings=None, *, gateway_client=None):
         return StreamingResponse(stream(),media_type='text/event-stream',headers={'X-Accel-Buffering':'no','Cache-Control':'no-store'})
 
     @app.get(BASE+'/approvals')
-    async def approvals(user=Depends(ready_user)):
-        return runtime_for(user).approvals(user)
+    def approvals(session_id:str|None=Query(default=None,max_length=200),user=Depends(ready_user)):
+        scoped=session_id is not None
+        if scoped:
+            binding=notification_session_binding(user,session_id,current_user=user,include_aliases=True)
+            if not binding or binding['classification']!='chats':
+                return {'items':[],'complete':True}
+            result=runtime_for(user).approvals(user,session_ids=binding['session_ids'])
+        else:
+            result=runtime_for(user).approvals(user)
+        requested=[{'id':str(index),'run_id':item['run_id'],'request_id':item['request_id'],
+                    'approval_id':item['id'],'session_id':item.get('session_id')}
+                   for index,item in enumerate(result['items'])]
+        bindings=approval_notification_bindings(user['id'],requested,expected_user=user)
+        response={'items':[approval_chat_view(item,bindings.get(str(index)))
+                           for index,item in enumerate(result['items']) if str(index) in bindings]}
+        if scoped:
+            response['complete']=result['complete']
+        return response
+
+    @app.get(BASE+'/approvals/{aid}')
+    def approval(aid:str,user=Depends(ready_user)):
+        try:
+            return approval_chat_binding(user,runtime_for(user).approval(user,aid))
+        except KeyError:
+            raise HTTPException(404,'Approval unavailable') from None
 
     @app.post(BASE+'/approvals/{aid}/decision')
     async def decide(aid:str,request:Request,user=Depends(ready_user)):
