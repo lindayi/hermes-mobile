@@ -9,7 +9,7 @@ from backend.app import create_app
 from backend.hermes_client import GatewayClient
 from test_steering import environment
 from test_notifications import subscription
-from test_auth import ORIGIN
+from test_auth import BASE, ORIGIN
 
 
 def test_multiple_intents_reconcile_before_run_is_restored(tmp_path):
@@ -20,13 +20,27 @@ def test_multiple_intents_reconcile_before_run_is_restored(tmp_path):
         runtime = app.state.orchestrator
         original = runtime.approval_notifier
         runtime.approval_notifier = None
+        approval_ids = {}
         for request_id in ('current', 'vanished'):
             runtime._approval(user, runtime.get(user, rid), {'event': 'approval.request',
                 'run_id': 'native-run', 'request_id': request_id})
+            approval_ids[request_id] = next(item['id'] for item in runtime.approvals(user)['items']
+                                            if item['request_id'] == request_id)
         app.state.journal.recover()
+        assert client.get(BASE+'/approvals').json()['items'] == []
+        for approval_id in approval_ids.values():
+            detail = client.get(BASE+f'/approvals/{approval_id}').json()
+            assert detail['status'] == 'details_unavailable'
+            assert detail['choices'] == [] and detail['executable'] is False
         runtime.approval_notifier = original
         client.portal.call(runtime.reconcile_approval_notifications)
         runtime.drain_approval_notifications()
+        current = client.get(BASE+f"/approvals/{approval_ids['current']}").json()
+        vanished = client.get(BASE+f"/approvals/{approval_ids['vanished']}").json()
+        assert current['status'] == 'pending' and current['choices'] == ['once', 'deny']
+        assert vanished['status'] == 'resolved_external'
+        assert vanished['choices'] == [] and vanished['executable'] is False
+        assert 'native client' not in vanished.get('error', '').lower()
         with app.state.notifications._db() as db:
             assert [row['request_id'] for row in db.execute(
                 '''SELECT a.request_id FROM approval_notifications a JOIN inbox i ON i.id=a.inbox_id
@@ -40,6 +54,7 @@ def test_lifespan_restart_reconciles_only_explicit_intents(tmp_path, gap, native
     with environment(tmp_path) as (app, client, user, rid, _):
         runtime = app.state.orchestrator
         service = app.state.notifications
+        auth_cookies = dict(client.cookies)
         with app.state.auth.store.transaction() as db:
             device = db.execute('SELECT id FROM sessions WHERE user_id=?', (user['id'],)).fetchone()[0]
         service.subscribe(user['id'], device, subscription())
@@ -80,6 +95,7 @@ def test_lifespan_restart_reconciles_only_explicit_intents(tmp_path, gap, native
     notify.vapid_private_key, notify.vapid_public_key = 'fake-private', 'fake-public'
     notify.send_push = lambda **kw: (sent.append(kw) or SimpleNamespace(status_code=201))
     with TestClient(restarted, base_url=ORIGIN) as client:
+        client.cookies.update(auth_cookies)
         # Wait for the actual startup worker, not a manually simulated recovery.
         deadline = time.monotonic()+3
         while time.monotonic() < deadline:
@@ -113,6 +129,14 @@ def test_lifespan_restart_reconciles_only_explicit_intents(tmp_path, gap, native
         else:
             assert not sent
             assert status == 'discarded'
+            if native == 'foreign':
+                with restarted.state.journal.connect() as db:
+                    approval_id = db.execute(
+                        'SELECT id FROM orchestration_approvals WHERE request_id=?', ('action',)
+                    ).fetchone()['id']
+                detail = client.get(BASE+f'/approvals/{approval_id}').json()
+                assert detail['status'] == 'unavailable'
+                assert detail['choices'] == [] and detail['executable'] is False
         with restarted.state.journal.connect() as db:
             assert db.execute('SELECT count(*) FROM approval_notification_intents').fetchone()[0] == 1
         assert all(r.method == 'GET' for r in calls)

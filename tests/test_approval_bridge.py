@@ -433,6 +433,54 @@ def test_terminal_run_exact_detail_retires_unavailable_placeholder_without_strea
         assert 'native client' not in detail.get('error','').lower()
 
 
+def test_unknown_run_detail_stays_recoverable_and_invalid_detail_is_unavailable(tmp_path):
+    with environment(tmp_path) as (app,client,user,rid,calls):
+        runtime=app.state.orchestrator
+        runtime.gateway.execution_ready=True
+        runtime.gateway.action_approvals_ready=True
+        runtime._approval(user,runtime.get(user,rid),{
+            'event':'approval.request','request_id':'recoverable-action','run_id':'native-run',
+            'command':'echo recoverable'})
+        approval_id=runtime.approvals(user)['items'][0]['id']
+        journal=app.state.journal
+
+        with journal.connect() as db, db:
+            db.execute("UPDATE runs SET status='unknown' WHERE id=?",(rid,))
+        detail=client.get(BASE+f'/approvals/{approval_id}').json()
+        assert detail['status']=='details_unavailable'
+        assert detail['choices']==[] and detail['executable'] is False
+
+        with journal.connect() as db, db:
+            db.execute("UPDATE runs SET status='waiting_for_approval' WHERE id=?",(rid,))
+        detail=client.get(BASE+f'/approvals/{approval_id}').json()
+        assert detail['status']=='pending'
+        assert detail['choices']==['once','deny'] and detail['executable'] is True
+
+        with journal.connect() as db, db:
+            db.execute("UPDATE orchestration_approvals SET status='invalid' WHERE id=?",(approval_id,))
+        detail=client.get(BASE+f'/approvals/{approval_id}').json()
+        assert detail['status']=='unavailable'
+        assert detail['choices']==[] and detail['executable'] is False
+        assert calls==[]
+
+
+def test_external_placeholder_detail_drops_obsolete_native_client_guidance(tmp_path):
+    with environment(tmp_path) as (app,client,user,rid,_):
+        runtime=app.state.orchestrator
+        journal=app.state.journal
+        journal.finish(user['id'],rid,'waiting_for_approval')
+        runtime._missing_approval(user,journal.get(user['id'],rid),'interrupted-action')
+        item=runtime.approvals(user)['items'][0]
+        with journal.connect() as db, db:
+            db.execute("UPDATE orchestration_approvals SET status='resolved_external' WHERE id=?",
+                       (item['id'],))
+
+        detail=client.get(BASE+f"/approvals/{item['id']}").json()
+        assert detail['status']=='resolved_external'
+        assert detail['choices']==[] and detail['executable'] is False
+        assert 'native client' not in detail.get('error','').lower()
+
+
 def test_session_approval_enumeration_precedes_global_cap_and_marks_truncation(tmp_path):
     from contextlib import closing
 

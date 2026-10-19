@@ -940,22 +940,34 @@ for(const sourceSession of ['session-one','old-alias'])test(`generated successfu
   await page.evaluate(()=>dispatchEvent(new Event('focus')));await response;
   await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
  };
- const listURL='**/app-api/approvals';
- for(const [status,body] of [[503,{detail:'Temporary failure'}],[200,null],[200,{items:null}],[200,{items:[null]}],[200,{items:[{}]}]]){
-  await page.route(listURL,route=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)}));
-  await refresh();await page.unroute(listURL);
+ const isApprovalListPath=url=>new URL(url).pathname==='/hermes/app-api/approvals';
+ const fulfillApprovalList=(handler)=>route=>{
+  if(route.request().method()!=='GET')return route.continue();
+  return handler(route);
+ };
+ let malformedRouteCalls=0;
+ for(const [index,[status,body]] of [[503,{detail:'Temporary failure'}],[200,null],[200,{items:null}],[200,{items:[null]}],[200,{items:[{}]}]].entries()){
+  await page.route(isApprovalListPath,fulfillApprovalList(route=>{
+   malformedRouteCalls++;
+   return route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
+  }));
+  await refresh();await page.unroute(isApprovalListPath);
+  assert.equal(malformedRouteCalls,index+1,'the malformed or held list response was injected');
   assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable');
  }
  let release;
  const held=new Promise(resolve=>release=resolve);
- await page.route(listURL,async route=>{
-  await held;await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({items:[present,pending]})});
- },{times:1});
+ let heldRouteCalls=0;
+ await page.route(isApprovalListPath,fulfillApprovalList(async route=>{
+   heldRouteCalls++;
+   await held;await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({items:[present,pending]})});
+ }),{times:1});
  const requested=page.waitForRequest(req=>new URL(req.url()).pathname.endsWith('/app-api/approvals'));
  await page.evaluate(()=>dispatchEvent(new Event('focus')));await requested;
  await refresh();
  const stale=page.waitForResponse(res=>new URL(res.url()).pathname.endsWith('/app-api/approvals'));
  release();await stale;await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
+ assert.equal(heldRouteCalls,1,'the held stale list response was intercepted');
  assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval details unavailable',
   'a superseded omission cannot retire a still-present placeholder');
  control.approvals=[present,pending];
@@ -1467,6 +1479,48 @@ test('generated approval detail batches rotate past transient failures and stay 
  await page.evaluate(()=>app.destroy());
 }));
 
+test('generated simultaneous expiry renders 1,000 approvals with bounded history scans',{timeout:60000},()=>fixture(async({page,control})=>{
+ await page.clock.install();
+ const count=1000,items=Array.from({length:count},(_,index)=>approvalRecord({
+  id:`expiry-${index}`,run_id:`expiry-run-${index}`,request_id:`expiry-request-${index}`,
+  session_id:'session-one',run_session_id:'session-one',expires_at:Date.now()/1000+2
+ }));
+ control.approvals=items;
+ control.realHistory={
+  latest:{items:items.map((item,index)=>({id:index+1,role:'user',content:`Request ${index}`,
+   run_id:item.run_id,session_id:'session-one'})),offset:0,total:count},
+  pages:{},runs:{}
+ };
+ await page.evaluate(()=>{
+  window.historyAnchorScans=0;
+  const query=Element.prototype.querySelectorAll;
+  Element.prototype.querySelectorAll=function(selector,...args){
+   if(selector==='[data-history-run]'&&this.classList?.contains('messages'))window.historyAnchorScans++;
+   return query.call(this,selector,...args);
+  };
+ });
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ await page.waitForFunction(expected=>document.querySelectorAll('.approval-card').length===expected,count);
+ assert.ok(await page.evaluate(()=>window.historyAnchorScans<=1),
+  'the mounted transcript is indexed once before expiry callbacks');
+ await page.clock.fastForward(2500);
+ await page.waitForFunction(expected=>[...document.querySelectorAll('.approval-card h3')]
+  .length===expected&&[...document.querySelectorAll('.approval-card h3')]
+  .every(node=>node.textContent==='Expired'),count);
+ assert.equal(await page.evaluate(()=>window.historyAnchorScans),1,
+  'expiring mounted cards does not rescan the unchanged history anchors');
+ assert.equal(await page.locator('.approval-card').count(),count);
+ assert.equal(await page.locator('.approval-card button').count(),0);
+ assert.equal(await page.evaluate(ids=>ids.every(id=>{
+  const anchor=document.querySelector(`[data-history-run="${id.replace('expiry-','expiry-run-')}"]`),
+   card=document.querySelector(`[data-approval-id="${id}"]`);
+  return anchor?.nextElementSibling===card;
+ }),['expiry-0','expiry-499','expiry-999']),true,'representative cards retain request chronology');
+ await page.getByRole('button',{name:'Chats',exact:true}).click();
+ await page.getByRole('button',{name:'First conversation',exact:true}).waitFor();
+ await page.evaluate(()=>app.destroy());
+}));
+
 test('generated held approval detail aborts and releases fair reconciliation',{timeout:30000},()=>fixture(async({page,control,calls})=>{
 await page.clock.install();
 const items=Array.from({length:12},(_,index)=>approvalRecord({
@@ -1490,6 +1544,17 @@ const firstBatch=items.slice(0,10).map(item=>page.waitForRequest(request=>
 const firstList=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
 await page.evaluate(()=>dispatchEvent(new Event('focus')));
 await Promise.all([firstList,...firstBatch]);
+const waitForAdmission=async(path,count)=>{
+ const deadline=Date.now()+5000;
+ while(calls.filter(call=>call.p===path&&call.method==='GET').length<count&&Date.now()<deadline)
+  await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.filter(call=>call.p===path&&call.method==='GET').length,count,
+  `the fixture server admitted ${count} GETs for ${path}`);
+};
+await waitForAdmission(`/approvals/${items[0].id}`,1);
+const failed=page.waitForEvent('requestfailed',{predicate:request=>
+ new URL(request.url()).pathname.endsWith(`/approvals/${items[0].id}`)
+ && request.method()==='GET'});
 await page.clock.fastForward(10000);
 await page.waitForTimeout(40);
 control.approvalDetailHold=null;
@@ -1497,11 +1562,17 @@ const later=page.waitForRequest(request=>
  new URL(request.url()).pathname.endsWith(`/approvals/${items[10].id}`));
 const retry=page.waitForRequest(request=>
  new URL(request.url()).pathname.endsWith(`/approvals/${items[0].id}`));
+const retryResponse=page.waitForResponse(response=>
+ new URL(response.url()).pathname.endsWith(`/approvals/${items[0].id}`)
+ && response.request().method()==='GET');
 const nextList=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
 await page.evaluate(()=>dispatchEvent(new Event('focus')));
-await Promise.all([nextList,later,retry]);
+await Promise.all([nextList,later,retry,retryResponse]);
+const aborted=await failed;
+assert.match(aborted.failure().errorText,/abort|cancel/i,'the ten-second deadline aborts the held exact GET');
+await waitForAdmission(`/approvals/${items[0].id}`,2);
 assert.equal(calls.filter(call=>call.p===`/approvals/${items[0].id}`).length,2,
- 'a timed-out exact read is removed from the in-flight cache and retried');
+ 'the retry is admitted by the fixture server after the aborted first read');
 assert.ok(calls.some(call=>call.p===`/approvals/${items[10].id}`),
  'later cards progress after a held request exceeds its abort deadline');
 assert.equal(await page.locator('.approval-card').count(),13);

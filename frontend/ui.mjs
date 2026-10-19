@@ -40,7 +40,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   let content, nav, routeVersion = 0, destroyed=false;
   let stream = null, cancelTracking=null, headerState=null;
   let stopDisclosureReachability=null;
-  let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null;
+  let closeEditor=null, stopExtras=null, approvalState=null, currentModelSync=null, stopPushPresence=null,
+    approvalHistoryAnchors=null;
   let pushIdentity={client_id:win.crypto.randomUUID(),sequence:0},pushIdentityKey=null,releasePushIdentity=null,pushRequest=null;
   const handledApprovals=new Set(),handledApprovalDetails=new Map(),locallyExpiredApprovals=new Set(),mountedLocallyExpiredApprovals=new Set();
   const maxHandledApprovals=100;
@@ -806,6 +807,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
   async function openSession(session, notificationTarget=null) {
     if(deletions.get(deletionKey(state.user?.id,session.id))==='deleted'){inform('This conversation was deleted. Its stored history is no longer available.');return;}
     disconnect();leaveConversation();
+    approvalHistoryAnchors=null;
     const version = ++routeVersion,owner=state.user?.id;
     const current=()=>!destroyed && version===routeVersion && owner===state.user?.id;
     const resolveTitle=!Object.hasOwn(session,'title');
@@ -938,6 +940,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         }
         fragment.append(...olderNodes);
         turnHint.after(fragment);
+        approvalHistoryAnchors=null;
         turnHint.hidden=!page.turn_boundary?.truncated;
         oldestOffset=page.offset ?? offset;
         reflowBackground();
@@ -1181,7 +1184,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const finalItem={...item,status:'expired',executable:false,choices:[]};
       approvalPending.delete(key);approvalItems.set(key,finalItem);
       rememberHandledApproval(key,finalItem,'expired',true);approvalFinals.set(key,'expired');
-      clearApprovalExpiry(key);approvalRevision++;renderApprovals();
+      clearApprovalExpiry(key);approvalRevision++;renderApprovals(key);
     };
     const scheduleApprovalExpiry=(key,item,card)=>{
       const existing=approvalExpiryTimers.get(key);
@@ -1197,10 +1200,23 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       },Math.min(delay,2147483647));
       approvalExpiryTimers.set(key,entry);
     };
+    const approvalHistoryKey=(runId,sessionId)=>JSON.stringify([runId,sessionId]);
+    const historyAnchors=()=>{
+      if(!approvalHistoryAnchors){
+        approvalHistoryAnchors=new Map();
+        for(const node of messages.querySelectorAll('[data-history-run]')){
+          if(node.matches('.approval-card'))continue;
+          const key=approvalHistoryKey(node.dataset.historyRun,node.dataset.historySession);
+          if(!approvalHistoryAnchors.has(key))approvalHistoryAnchors.set(key,node);
+        }
+      }
+      return approvalHistoryAnchors;
+    };
     const placeApprovalCard=(card,item)=>{
-      const anchor=[...messages.querySelectorAll('[data-history-run]')].find(node=>
-        node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
-        && !node.matches('.approval-card'));
+      let index=historyAnchors(),key=approvalHistoryKey(item.run_id,session.id),anchor=index.get(key);
+      if(anchor && !anchor.isConnected){
+        approvalHistoryAnchors=null;index=historyAnchors();anchor=index.get(key);
+      }
       if(anchor?.matches('.live-message')){
         if(card.parentNode!==anchor || card!==anchor.lastElementChild)anchor.append(card);
       }else if(anchor){
@@ -1337,7 +1353,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       return card;
     };
-    renderApprovals=()=>{
+    renderApprovals=onlyKey=>{
       const count=approvalPending.size;
       const summary=count?`${count} approval${count===1?'':'s'} require your review.`
         :genericApproval?'An approval needs your review. Open this chat to check its current state.':'';
@@ -1345,6 +1361,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       approvalNotice.textContent=approvalListIncomplete
         ?`${summary ? `${summary} ` : ''}More than 1,000 approvals are waiting in this chat; some are not shown.`
         :summary;
+      if(onlyKey!==undefined){
+        const item=approvalItems.get(onlyKey);
+        if(item && (item.session_id===session.id || item.run_id===currentApprovalRun))
+          renderApprovalCard(item,approvalPending.has(onlyKey)?'pending':approvalFinals.get(onlyKey) || 'unavailable');
+        return;
+      }
       for(const [key,item] of approvalItems){
         if(item.session_id!==session.id && item.run_id!==currentApprovalRun)continue;
         renderApprovalCard(item,approvalPending.has(key)?'pending':approvalFinals.get(key) || 'unavailable');
@@ -1700,6 +1722,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           approvalItems.set(key,item);
           if(item.status==='pending'){
             approvalPending.set(key,item);approvalFinals.delete(key);
+          }else if(item.status==='details_unavailable'){
+            approvalPending.delete(key);approvalFinals.set(key,'details_unavailable');
           }else{
             approvalPending.delete(key);
             rememberHandledApproval(key,item,item.status,
@@ -1970,6 +1994,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         syncModelLock();
       }
       if(version!==routeVersion)return;
+      approvalHistoryAnchors=null;
       messages.querySelector('.empty')?.remove();messages.append(renderMessage({role:'user',content:input,timestamp:run.created_at,run_id:run.id,session_id:session.id,attachments:run.attachments}),...renderReminders(run));
       for(const photo of submittedPhotos){const position=selectedPhotos.indexOf(photo);if(position>=0){releasePreview(photo);selectedPhotos.splice(position,1);}}
       pendingPhotoSubmission=null;renderPhotoSelection();
@@ -2168,6 +2193,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     if(Object.hasOwn(result,'run')) {
       if(result.run) {
         messages.querySelector('.empty')?.remove();
+        approvalHistoryAnchors=null;
         messages.append(renderMessage({role:'user',content:result.run.input,timestamp:result.run.created_at,run_id:result.run.id,session_id:session.id,attachments:result.run.attachments}),...renderReminders(result.run));
         if(!notificationTarget)messages.scrollTop=messages.scrollHeight;
         await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
@@ -2489,7 +2515,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     composerAction.activity?.(article.querySelector('.live-activity-heading'),node=>{const atBottom=followTail();flushPublic();output.before(node);splitTools=true;if(atBottom)messages.scrollTop=messages.scrollHeight;});
     const wasAtBottom=followTail();
-    messages.append(article);
+    approvalHistoryAnchors=null;messages.append(article);
     if(wasAtBottom)messages.scrollTop=messages.scrollHeight;
     let seeding=true;
     const renderTool=data=>{

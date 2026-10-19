@@ -917,7 +917,8 @@ class Orchestrator:
         if action.get('details_unavailable') is True:
             return dict(id=row['id'], run_id=row['run_id'], request_id=row['request_id'],
                         session_id=session_id, status=status, expires_at=None, choices=[], executable=False,
-                        error='Native approval details are unavailable after interruption; review in the native client')
+                        error=('Native approval details are unavailable after interruption; review in the native client'
+                               if status == 'details_unavailable' else ''))
         return dict(action, id=row['id'], run_id=row['run_id'], request_id=row['request_id'],
                     session_id=session_id, status=status, expires_at=row['expires_at'], choices=['once', 'deny'], executable=ready,
                     error=None if ready else 'Native API cannot atomically bind decisions to this action')
@@ -964,9 +965,13 @@ class Orchestrator:
             raise KeyError(approval_id)
         self.get(user, row['run_id'])
         status = row['status']
-        if (status == 'pending' and type(row['expires_at']) in (int, float)
+        if status == 'invalid':
+            status = 'unavailable'
+        elif (status == 'pending' and type(row['expires_at']) in (int, float)
                 and row['expires_at'] <= time.time()):
             status = 'expired'
+        elif status == 'pending' and row['run_status'] == 'unknown':
+            status = 'details_unavailable'
         elif status == 'pending' and row['run_status'] != 'waiting_for_approval':
             status = 'unavailable'
         elif status == 'details_unavailable' and row['run_status'] in ('completed', 'failed', 'cancelled'):

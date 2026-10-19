@@ -59,6 +59,42 @@ test('owned non-chat approval keeps its Inbox card and explicit decisions',async
  }finally{app.destroy();win.close();}
 });
 
+test('unknown-run notification detail stays non-actionable until exact pending authority recovers on same-owner reentry',async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];
+ const pending={...approvalItem(),status:'pending'};
+ let status='unknown',detail={...pending,status:'details_unavailable',expires_at:null,
+  executable:false,choices:[],details_unavailable:true,error:'Approval details are temporarily unavailable.'};
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',
+   run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,
+   run:{id:'r',session_id:'s',status}};
+  if(p==='/approvals')return {items:[]};
+  if(p==='/approvals/a')return detail;
+  return {items:[]};
+ }},win);
+ try{
+  const card=()=>doc.querySelector('[data-approval-id="a"]');
+  await waitFor(()=>card());
+  assert.equal(card().querySelector('h3').textContent,'Approval details unavailable');
+  assert.equal(card().querySelectorAll('button').length,0,'unknown run details cannot authorize a decision');
+  assert.ok(calls.some(call=>call.p==='/approvals'),'the mounted approval list was read');
+  assert.ok(calls.some(call=>call.p==='/approvals/a'),'the omitted card was checked by exact detail');
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0);
+
+  status='waiting_for_approval';
+  detail=pending;
+  await app.start();
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  assert.equal(card().querySelector('h3').textContent,'Approval required');
+  assert.equal(card().querySelectorAll('button').length,2,'same-owner reentry restores controls only after exact pending detail');
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'recovery never decides automatically');
+ }finally{app.destroy();win.close();}
+});
+
 test('a delayed pending approval detail is not actionable after its expiry',async()=>{
  const list=deferred(),detail=deferred(),calls=[];
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
