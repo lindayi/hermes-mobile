@@ -1319,13 +1319,17 @@ for(const outcome of ['detail','failure'])test(`late approval retry ${outcome} c
  const retry=page.getByRole('button',{name:'Retry status',exact:true});await retry.waitFor();
  let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
  control.approvalDetailStatus=outcome==='detail'?200:503;
- const request=page.waitForRequest(req=>req.url().endsWith('/app-api/approvals/approval-1'));
- const response=page.waitForResponse(res=>res.url().endsWith('/app-api/approvals/approval-1'));
+ const matches=request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1'
+  && request.method()==='GET';
+ const request=page.waitForRequest(matches);
+ const cancelled=page.waitForEvent('requestfailed',{predicate:matches});
  await retry.click();await request;
  await page.getByRole('button',{name:'Chats',exact:true}).click();
  await page.getByRole('button',{name:/Second conversation/}).click();
  await page.getByRole('heading',{name:'Second conversation'}).waitFor();
- control.approvalDetailHold=null;release();await response;
+ const failed=await cancelled;
+ assert.match(failed.failure().errorText,/abort|cancel/i,'leaving the chat cancels the held retry GET');
+ control.approvalDetailHold=null;release();
  await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
  assert.equal(await page.locator('.approval-card').count(),0);
  assert.equal(await page.getByRole('button',{name:'Retry status',exact:true}).count(),0);
