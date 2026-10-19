@@ -1403,6 +1403,27 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
     coordinator().run(apply=True)
     first_fix = next(action for action in store.actions().values()
                      if action.get("kind") == "fix")
+    anchor_comments = [
+        comment for comment in api.comments
+        if comment.get("body", "").startswith(
+            "hermes-coordinator-source-receipt:",
+        )
+    ]
+    assert len(anchor_comments) == 1
+    assert first_fix["receipt_anchor_comment_id"] == anchor_comments[0]["id"]
+    assert first_fix["receipt_anchor_body"] == anchor_comments[0]["body"]
+    assert first_fix["receipt_anchor_role"] == "continuation-source"
+    anchor_post = next(
+        index for index, (route, body) in enumerate(api.writes)
+        if route == "repos/lindayi/hermes-mobile/issues/16/comments"
+        and body.get("body") == anchor_comments[0]["body"]
+    )
+    task_post = next(
+        index for index, (route, body) in enumerate(api.writes)
+        if route == "agents/repos/lindayi/hermes-mobile/tasks"
+        and body.get("prompt") == first_fix["body"]
+    )
+    assert anchor_post < task_post
 
     def finish_task(action, current_head, comment_id, *, transported=False):
         task = api.tasks[action["task_id"]]
@@ -1419,12 +1440,27 @@ def test_sha_bound_fixer_receipts_chain_heads_before_fresh_review_and_merge(tmp_
                 "repository": {"id": 1399942965},
                 "head_ref": "topic",
                 "base_ref": "main",
-                "prompt": receipt_instruction(action["dispatch_nonce"], pull_number=16, start_head=HEAD, base_sha=BASE),
+                "prompt": action["body"],
                 "created_at": "2026-10-01T12:01:00Z",
                 "completed_at": created,
             }],
         )
         if transported:
+            api.neutral_quote_envelope = ("\n", "", ">\n", "\t")
+        if action.get("receipt_anchor_comment_id") is not None:
+            body = (
+                "Hermes-Task-Receipt: v2\n"
+                f"nonce={action['dispatch_nonce']}\n"
+                "pr=16\n"
+                f"session=session-{action['task_id']}\n"
+                f"start_head={action['head']}\n"
+                f"base={BASE}\n"
+                f"head={current_head}\n"
+                "result=ready"
+            )
+            api.reply_to_comment(action["receipt_anchor_comment_id"], body)
+            api.neutral_quote_envelope = ("\n", "", "", "")
+        elif transported:
             body = (
                 "\n> Cloud completion report preserved before parent normalization:\n"
                 "> \n"
