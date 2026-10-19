@@ -800,7 +800,8 @@ test('generated pending-list card loses controls after its held detail returns d
  control.notificationTarget=approvalTarget;
  control.approvals=[target,sibling];control.approvalDetail=target;control.approvalDetailStatus=409;
  let release;control.approvalDetailHold=new Promise(resolve=>release=resolve);
- const listResponse=page.waitForResponse(response=>response.url().endsWith('/approvals')&&response.request().method()==='GET');
+ const listResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals')
+  && response.request().method()==='GET');
  await mount(page,'?notification=notice-target');
  await listResponse;
  const card=page.locator(`[data-approval-id="${target.id}"]`),other=page.locator(`[data-approval-id="${sibling.id}"]`);
@@ -830,7 +831,7 @@ test('generated rejected approval proof exposes no action details or decision co
  assert.equal(await page.getByRole('region',{name:'Approval action details'}).count(),0);
  assert.equal(await page.getByRole('button',{name:/Approve once|Deny/}).count(),0);
  assert.doesNotMatch(await page.locator('body').innerText(),/private synthetic/);
- const response=page.waitForResponse(res=>res.url().endsWith('/approvals'));
+ const response=page.waitForResponse(res=>new URL(res.url()).pathname.endsWith('/approvals'));
  await page.evaluate(()=>dispatchEvent(new Event('focus')));await response;
  assert.equal(await page.locator('[data-approval-id]').count(),0);
  assert.equal(await page.getByRole('button',{name:/Approve once|Deny/}).count(),0);
@@ -1003,7 +1004,7 @@ for(const status of ['completed','cancelled'])test(`generated terminal ${status}
  assert.equal(await card('final').getByRole('heading').innerText(),'Resolved');
  control.approvals=[{...placeholder,status:'pending',details_unavailable:false,executable:true,choices:['once','deny']},pending,other];
  emitRunEvent('approval',control.approvals[0],'late-pending');
- const refreshed=page.waitForResponse(response=>response.url().endsWith('/approvals'));
+ const refreshed=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await refreshed;await page.waitForTimeout(50);
  assert.equal(await card('placeholder').getByRole('heading').innerText(),'Approval unavailable');
  assert.equal(await card(pending.id).getByRole('heading').innerText(),'Approval unavailable');
@@ -1108,7 +1109,7 @@ test('generated second detail GET cannot replay a successfully answered approval
   await (++reads===1?first:second);
   await route.fulfill({json:item});
  });
- const listResponse=page.waitForResponse(response=>response.url().endsWith('/approvals'));
+ const listResponse=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/approvals'));
  await mount(page,'?notification=notice-target');await listResponse;
  await page.waitForTimeout(20);
  releaseFirst();

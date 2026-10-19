@@ -27,6 +27,7 @@ for(const status of ['pending','expired'])test(`approval notification opens exac
    assert.ok([...card.querySelectorAll('button')].some(b=>b.textContent==='Deny'));
    assert.equal(scrolled,card,'push focuses the exact approval card');
   }else{
+   await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
    assert.match(doc.querySelector('[data-approval-id="a"]').textContent,/Expired/);
    assert.equal(doc.querySelector('[data-approval-id="a"] button'),null);
   }
@@ -1204,7 +1205,8 @@ for(const transport of ['events','polling'])test(`approval notification resumes 
   return {items:[]};
  }},win);
  try{
-  const card=doc.querySelector('[data-approval-id="a"]');
+ await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
+ const card=doc.querySelector('[data-approval-id="a"]');
   await waitFor(()=>card?.querySelector('button.primary'));
   assert.equal(doc.querySelector('h1').textContent,'Canonical chat');
   assert.equal(doc.querySelector('.live-message')?.dataset.historySession,'old-alias',
@@ -2039,6 +2041,7 @@ test('non-executable approval details show the capability error beside the comma
   return {items:[]};
  }},win);
  try{
+  await waitFor(()=>doc.querySelector('[data-approval-id="a"]'));
   const card=doc.querySelector('[data-approval-id="a"]');
   assert.ok(card);
   assert.match(card.textContent,/echo fixture/);

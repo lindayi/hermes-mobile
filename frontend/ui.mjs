@@ -1144,17 +1144,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const existing=approvalDetailReads.get(approvalId);
       if(existing)return existing;
       const controller=new win.AbortController();
-      let deadline;
-      const request=Promise.resolve().then(()=>
-        api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal}));
-      const timeout=new Promise((_,reject)=>{
-        deadline=win.setTimeout(()=>{
-          controller.abort();
-          const error=new Error('Approval detail request timed out.');
-          error.name='AbortError';reject(error);
-        },10000);
-      });
-      const pending=Promise.race([request,timeout]).finally(()=>win.clearTimeout(deadline));
+      const deadline=win.setTimeout(()=>controller.abort(),10000);
+      const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal})
+        .finally(()=>win.clearTimeout(deadline));
       approvalDetailReads.set(approvalId,pending);
       pending.then(
         ()=>{if(approvalDetailReads.get(approvalId)===pending)approvalDetailReads.delete(approvalId);},
