@@ -104,8 +104,11 @@ bounds do not resolve approvals. History errors retain discovery and offer an
 explicit read-only retry. History recovery preserves reader position and focus,
 and late responses cannot change another route or owner.
 Notification history recovery reveals a relocated target only while the reader
-still follows it. Loading an older sibling must not refocus an already placed
-target. Composer focus, selection and reader position survive held history reads.
+still follows it. For an omitted target, that baseline starts at the focused
+loading placeholder and is checked before the first card takes focus. A deliberate
+read-only retry starts a new baseline; later reader movement still prevents focus
+theft. Loading an older sibling must not refocus an already placed target. Composer
+focus, selection and reader position survive held history reads.
 Detail expiry uses the pending snapshot's read-time clock, not a later clock
 after authorization work; a concurrent pre-deadline decision claim must not be
 projected as final expiry. Decision-time expiry and atomic single-use claims

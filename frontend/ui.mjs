@@ -978,9 +978,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const request=(async()=>{
         const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
         if(!current())return false;
-        if(approvalHistoryReader)
-          approvalHistoryReader.moved ||= doc.activeElement!==approvalHistoryReader.focus
+        if(approvalHistoryReader){
+          const moved=doc.activeElement!==approvalHistoryReader.focus
             || messages.scrollTop!==approvalHistoryReader.top;
+          approvalHistoryReader.moved ||= moved;
+          if(notificationTarget?.kind==='approval')approvalTargetReaderMoved ||= moved;
+        }
         const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
         const viewport=messages.getBoundingClientRect(),readerAnchor=[...messages.children].find(node=>{
           const rect=node.getBoundingClientRect();
@@ -1336,7 +1339,8 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     let approvalHistoryLoading=null,approvalHistoryOutcome='',approvalHistoryPages=0,
       unplacedApprovals=null,approvalHistoryNotice=null,
-      approvalTargetHistoryReady=notificationTarget?.kind!=='approval',approvalTargetReaderBaseline=null;
+      approvalTargetHistoryReady=notificationTarget?.kind!=='approval',approvalTargetReaderBaseline=null,
+      approvalTargetReaderMoved=false,approvalTargetFocusInProgress=false;
     const approvalAnchor=item=>historyAnchors().get(approvalHistoryKey(item.run_id,session.id));
     const unplacedApprovalItems=()=>[...approvalCards.keys()].map(key=>approvalItems.get(key))
       .filter(item=>item && !approvalAnchor(item)?.isConnected);
@@ -1415,6 +1419,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             button('Retry approval history',()=>{
               if(!current() || approvalHistoryLoading)return;
               approvalHistoryOutcome='';approvalHistoryPages=0;
+              if(notificationTarget?.kind==='approval'){
+                approvalTargetReaderMoved=false;
+                approvalTargetReaderBaseline={focus:doc.activeElement,top:messages.scrollTop};
+              }
               void recoverApprovalHistory();
             },'secondary'));
           unplacedApprovals=h('section',{class:'approval-history-unplaced',role:'region',
@@ -1607,7 +1615,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(focused?.isConnected && doc.activeElement!==focused)focused.focus({preventScroll:true});
       if(notificationTarget?.kind==='approval' && item.id===notificationTarget.approval_id){
         clearApprovalTargetTimer();
-        approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+        removeApprovalTargetPlaceholder();
         if(content.contains(messages))focusApprovalTarget();
       }
       return card;
@@ -1931,16 +1939,38 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         genericApproval=false;renderApprovals();
       }
     };
+    const observeApprovalTargetReader=()=>{
+      if(approvalTargetFocusInProgress || approvalHistoryReader || approvalTargetReaderMoved
+          || !approvalTargetReaderBaseline)return;
+      if(doc.activeElement!==approvalTargetReaderBaseline.focus
+          || messages.scrollTop!==approvalTargetReaderBaseline.top)approvalTargetReaderMoved=true;
+    };
+    doc.addEventListener('focusin',observeApprovalTargetReader);
+    messages.addEventListener('scroll',observeApprovalTargetReader,{passive:true});
+    const removeApprovalTargetPlaceholder=()=>{
+      if(!approvalTargetPlaceholder)return;
+      observeApprovalTargetReader();
+      approvalTargetPlaceholder.remove();approvalTargetPlaceholder=null;
+    };
     const focusApprovalTarget=()=>{
       if(!current())return;
       const card=[...approvalCards.values()].find(node=>node.dataset.approvalId===notificationTarget?.approval_id);
       if(card){
         if(approvalTargetFocusedCard)return;
-        approvalTargetFocusedCard=true;card.scrollIntoView?.({block:'center'});card.focus();
-        approvalTargetReaderBaseline={focus:card,top:messages.scrollTop};
+        approvalTargetFocusedCard=true;
+        if(approvalTargetReaderMoved)return;
+        approvalTargetFocusInProgress=true;
+        try{
+          card.scrollIntoView?.({block:'center'});card.focus();
+          approvalTargetReaderBaseline={focus:card,top:messages.scrollTop};
+        }finally{approvalTargetFocusInProgress=false;}
       }else if(approvalTargetPlaceholder && !approvalTargetPlaceholderFocused){
         approvalTargetPlaceholderFocused=true;
-        approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();
+        approvalTargetFocusInProgress=true;
+        try{
+          approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();
+          approvalTargetReaderBaseline={focus:approvalTargetPlaceholder,top:messages.scrollTop};
+        }finally{approvalTargetFocusInProgress=false;}
       }
     };
     const restoreApprovalTargetHistory=async item=>{
@@ -1966,12 +1996,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         approvalTargetPlaceholder.replaceChildren(h('h3',{},heading),h('p',{},message),
           button('Retry status',event=>{
             if(!current() || !event.currentTarget.isConnected || !approvalTargetPlaceholder?.isConnected)return;
+            approvalTargetFocusedCard=false;approvalTargetReaderMoved=false;approvalTargetReaderBaseline=null;
             approvalTargetPlaceholderFocused=false;
             approvalTargetPlaceholder.setAttribute('role','status');
             approvalTargetPlaceholder.removeAttribute('aria-label');
             approvalTargetPlaceholder.replaceChildren(h('h3',{},'Checking approval status'),
               h('p',{},'This chat is ready. Approval details are loading.'));
             scheduleApprovalTargetTimer();
+            focusApprovalTarget();
             void resolveApprovalTarget(target);
           },'secondary'));
         focusApprovalTarget();
@@ -1983,7 +2015,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           approvalActionStates.get(key),item,detailRead?.authorityRevision ?? -Infinity);
       };
       const preserveTargetDecision=async item=>{
-        approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+        removeApprovalTargetPlaceholder();
         renderApprovals();focusApprovalTarget();
         await restoreApprovalTargetHistory(approvalItems.get(approvalKey(item)) || item);
       };
@@ -2012,7 +2044,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
                 && !finalApprovalStatuses.has(item.status)
                 && !freshRejectedApprovalAuthority(retained,approvalActionStates.get(key),item,
                   detailRead?.authorityRevision ?? -Infinity)){
-              approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+              removeApprovalTargetPlaceholder();
               renderApprovals();focusApprovalTarget();
               await restoreApprovalTargetHistory(existing || item);return;
             }
@@ -2034,7 +2066,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             rememberHandledApproval(key,finalItem,finalStatus,
               locallyExpiredApproval(key) && finalStatus==='expired' && !finalApprovalStatuses.has(item.status));
             clearApprovalExpiry(key);
-            approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+            removeApprovalTargetPlaceholder();
             renderApprovals();focusApprovalTarget();
             await restoreApprovalTargetHistory(finalItem);return;
           }
@@ -2043,7 +2075,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             const latest=approvalItems.get(key);
             if(approvalPending.has(key) && matches(latest))item=latest;
             else if(existing && matches(existing)){
-              approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+              removeApprovalTargetPlaceholder();
               renderApprovals();focusApprovalTarget();
               await restoreApprovalTargetHistory(existing);return;
             }else if(listChanged){
@@ -2123,7 +2155,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
               locallyExpiredApproval(key) && item.status==='expired' && !freshFinal);
             approvalFinals.set(key,item.status);
           }
-          approvalTargetPlaceholder?.remove();approvalTargetPlaceholder=null;
+          removeApprovalTargetPlaceholder();
           renderApprovals();focusApprovalTarget();
           await restoreApprovalTargetHistory(item);
         }else{
@@ -2173,7 +2205,10 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     win.addEventListener('focus',reconcileApprovals);
     stopExtras=()=>{
-      approvalRevision++;win.removeEventListener('focus',reconcileApprovals);clearApprovalTargetTimer();
+      approvalRevision++;win.removeEventListener('focus',reconcileApprovals);
+      doc.removeEventListener('focusin',observeApprovalTargetReader);
+      messages.removeEventListener('scroll',observeApprovalTargetReader);
+      clearApprovalTargetTimer();
       for(const read of approvalDetailReads.values())read.cancel();
       approvalDetailReads.clear();
       for(const {timer} of approvalExpiryTimers.values())win.clearTimeout(timer);

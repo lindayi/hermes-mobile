@@ -20,7 +20,7 @@ const responseBatch=(page,path,count)=>new Promise(resolve=>{
 });
 async function fixture(run){
  const tmp=await mkdtemp((process.env.TMPDIR || '/tmp')+'/b-');let server,browser;
- const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],sessionApprovals:null,sessionApprovalComplete:true,approvalHold:null,approvalDetail:null,approvalDetails:null,approvalDetailHold:null,approvalDetailHoldFor:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0,requestReadHoldHit:null};
+ const dir=generatedAssets(tmp),calls=[],control={preferences:defaults(),getError:false,putError:false,hold:null,user:'fixture-owner',notificationTarget:null,notificationTargetErrors:0,approvals:[],sessionApprovals:null,sessionApprovalComplete:true,approvalHold:null,approvalDetail:null,approvalDetails:null,approvalDetailHold:null,approvalDetailHoldFor:null,approvalDetailHoldHit:null,approvalDetailStatus:200,decisionHold:null,decisionStatus:200,activeRun:null,runEventStreams:[],runEventSequence:0,requestReadHoldHit:null};
  try{
   const names=await readdir(dir),ui=names.find(n=>/^ui\.[a-f0-9]+\.mjs$/.test(n)),sw=names.find(n=>/^sw\.[a-f0-9]+\.js$/.test(n));
   assert.ok(ui && sw,'tests use generated release graph');
@@ -52,7 +52,9 @@ async function fixture(run){
     }else if(p.startsWith('/approvals/') && req.method==='GET'){
      const id=decodeURIComponent(p.split('/').at(-1)),detail=control.approvalDetails?.[id] || control.approvalDetail;
      if(control.approvalDetailHold
-        && (!control.approvalDetailHoldFor||control.approvalDetailHoldFor===id))await control.approvalDetailHold;
+        && (!control.approvalDetailHoldFor||control.approvalDetailHoldFor===id)){
+      control.approvalDetailHoldHit?.();await control.approvalDetailHold;
+     }
      if(control.approvalDetailLost){res.destroy();return;}
      if(detail?.id===id){data=detail;status=control.approvalDetailStatus;}
     }
@@ -323,6 +325,162 @@ test(`generated held initial approval detail preserves notification reader (${mo
  }
  assert.equal(calls.some(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
   ||call.p.startsWith('/runs/')),false,'focus and history reads cause no decisions or run actions');
+}));
+for(const mode of ['onpage-follow','onpage-away','offpage-follow','offpage-away',
+ 'offpage-alias-follow','route','owner'])
+test(`generated empty approval list held detail preserves placeholder reader (${mode})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const alias=mode==='offpage-alias-follow',onpage=mode.startsWith('onpage'),
+  moved=mode.endsWith('away'),target={...approvalTarget,run_session_id:alias?'old-alias':'session-one'},
+  item=approvalRecord({run_session_id:target.run_session_id});
+ control.notificationTarget=target;control.sessionApprovals=[];control.approvalDetail=item;
+ control.approvalDetailHoldFor='approval-1';
+ let releaseDetail,detailHeld;control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
+ const detailHandlerEntered=new Promise(resolve=>detailHeld=resolve);
+ control.approvalDetailHoldHit=detailHeld;
+ const rows=Array.from({length:24},(_,index)=>({id:20+index,role:index%2?'assistant':'user',
+  content:`Latest synthetic message ${index}. `.repeat(12),
+  run_id:onpage&&index===0?'approval-run':'newer-run',session_id:'session-one'}));
+ control.realHistory={latest:{items:rows,offset:10,total:34},pages:{0:{items:[
+  {id:1,role:'user',content:'Older request',run_id:'older-run',session_id:'session-one'},
+  {id:2,role:'user',content:'Target request',run_id:'approval-run',session_id:'session-one'}
+ ],offset:0,total:34}},runs:{}};
+ control.requestReadPath='history';
+ let releaseHistory,historyEntered;
+ control.requestReadHold=new Promise(resolve=>releaseHistory=resolve);
+ const historyHandlerEntered=new Promise(resolve=>historyEntered=resolve);
+ control.requestReadHoldHit=historyEntered;
+ const targetRead=page.waitForRequest(request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1'),
+  listResponse=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals'
+   && response.request().method()==='GET');
+ await mount(page,'?notification=notice-target');
+ await targetRead;
+ await detailHandlerEntered;
+ const emptyList=await listResponse;
+ assert.deepEqual((await emptyList.json()).items,[],'the authenticated pending-list handler returns empty');
+ const placeholder=page.locator('.notification-unavailable'),messages=page.locator('.messages'),
+  composer=page.getByRole('textbox',{name:'Message Hermes'});
+ await page.waitForFunction(()=>document.activeElement?.classList.contains('notification-unavailable'),
+  'the held initial detail leaves focus on its loading placeholder');
+ assert.equal(calls.filter(call=>call.p==='/approvals'&&call.method==='GET').length,1,
+  'the pending-list handler ran exactly once');
+ assert.equal(calls.filter(call=>call.p==='/approvals/approval-1'&&call.method==='GET').length,1,
+  'the initial exact-detail handler is held');
+ assert.equal(calls.filter(call=>call.p.endsWith('/messages')&&new URLSearchParams(call.query).has('offset')).length,0,
+  'history recovery waits for initial detail');
+ if(moved){
+  await composer.fill('Keep this draft');await composer.focus();
+  await composer.evaluate(node=>node.setSelectionRange(2,7));
+  await messages.evaluate(node=>{node.scrollTop=350;});
+  assert.equal(await composer.evaluate(node=>document.activeElement===node),true);
+  assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[2,7]);
+  assert.ok(await messages.evaluate(node=>node.scrollTop>0),'the reader scrolls away before detail release');
+ }
+ if(mode==='route'){
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.getByRole('button',{name:'Second conversation',exact:true}).click();
+  await composer.focus();
+ }
+ if(mode==='owner'){
+  control.user='other-owner';
+  await page.evaluate(async()=>{history.replaceState({},'','/hermes/');await app.start();});
+ }
+ if(mode==='route'||mode==='owner'){
+  releaseDetail();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(calls.filter(call=>call.p.endsWith('/messages')&&new URLSearchParams(call.query).has('offset')).length,0,
+   'stale target teardown cannot start history recovery');
+  assert.equal(await page.locator('[data-approval-id="approval-1"]').count(),0);
+ }else{
+  const detailResponse=responseBatch(page,'/approvals/approval-1',1);
+  control.approvalDetailHold=null;releaseDetail();await detailResponse;
+  const card=page.locator('[data-approval-id="approval-1"]');
+  if(onpage){
+   await card.waitFor();
+   assert.equal(await card.getAttribute('data-history-run'),'approval-run');
+   assert.equal(await card.getAttribute('data-history-session'),'session-one',
+    'the canonical chat anchor stays separate from original-run identity');
+   assert.equal(item.run_session_id,target.run_session_id,'the exact original-run alias is retained');
+   if(moved){
+    assert.equal(await composer.evaluate(node=>document.activeElement===node),true,
+     'first-card rendering preserves composer focus');
+    assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[2,7]);
+    assert.ok(await messages.evaluate(node=>node.scrollTop>0),'first-card rendering preserves reader scroll');
+   }else assert.equal(await card.evaluate(node=>document.activeElement===node),true,
+    'a reader following the placeholder sees the first card');
+   assert.equal(calls.filter(call=>call.p.endsWith('/messages')&&new URLSearchParams(call.query).has('offset')).length,0,
+    'an on-page target does not fetch older history');
+  }else{
+   await historyHandlerEntered;
+   assert.equal(calls.filter(call=>call.p.endsWith('/messages')&&new URLSearchParams(call.query).has('offset')).length,1,
+    'the first target card starts one bounded older-history read');
+   if(moved){
+    assert.equal(await composer.evaluate(node=>document.activeElement===node),true,
+     'the first unplaced card preserves focus while history is held');
+    assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[2,7]);
+   }else assert.equal(await card.evaluate(node=>document.activeElement===node),true,
+    'a reader following the placeholder sees the first unplaced card');
+   const response=responseBatch(page,'/sessions/session-one/messages',1);
+   control.requestReadHold=null;releaseHistory();await response;
+   await page.waitForFunction(()=>document.querySelector('[data-approval-id="approval-1"]')
+    ?.previousElementSibling?.dataset.historyRun==='approval-run');
+   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+   assert.equal(await card.getAttribute('data-history-run'),'approval-run');
+   assert.equal(await card.getAttribute('data-history-session'),'session-one');
+   assert.equal(item.run_session_id,target.run_session_id,'history preserves original-run identity');
+   if(moved){
+    assert.equal(await composer.evaluate(node=>document.activeElement===node),true,
+     'history relocation preserves focus moved before initial detail');
+    assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[2,7]);
+    assert.ok(await messages.evaluate(node=>node.scrollTop>0),'history relocation preserves reader scroll');
+   }else assert.equal(await card.evaluate(node=>document.activeElement===node),true,
+    'a following reader sees the card at its older-page anchor');
+  }
+ }
+ assert.equal(calls.some(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
+  ||call.p.startsWith('/runs/')),false,'target reads and history never decide or start a run');
+}));
+for(const mode of ['away','follow'])
+test(`generated explicit status retry preserves placeholder reader (${mode})`,{timeout:30000},()=>fixture(async({page,control,calls,mount})=>{
+ const item=approvalRecord();
+ control.notificationTarget=approvalTarget;control.sessionApprovals=[];control.approvalDetail=item;
+ control.approvalDetailStatus=503;
+ const emptyList=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals'
+  && response.request().method()==='GET');
+ await mount(page,'?notification=notice-target');
+ assert.deepEqual((await (await emptyList).json()).items,[],'the pending-list handler returns empty');
+ const placeholder=page.locator('.notification-unavailable'),
+  composer=page.getByRole('textbox',{name:'Message Hermes'}),messages=page.locator('.messages');
+ await page.getByRole('button',{name:'Retry status',exact:true}).waitFor();
+ assert.equal(await placeholder.evaluate(node=>document.activeElement===node),
+  true,'the failed initial read keeps focus on its placeholder');
+ const reads=()=>calls.filter(call=>call.p==='/approvals/approval-1'&&call.method==='GET').length;
+ assert.equal(reads(),1,'the initial exact-detail handler failed once');
+ let releaseDetail;control.approvalDetailStatus=200;
+ control.approvalDetailHold=new Promise(resolve=>releaseDetail=resolve);
+ let retryHeld;const retryHandlerEntered=new Promise(resolve=>retryHeld=resolve);
+ control.approvalDetailHoldHit=retryHeld;
+ const retryRead=page.waitForRequest(request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1');
+ await page.getByRole('button',{name:'Retry status',exact:true}).click();
+ await retryRead;await retryHandlerEntered;
+ if(mode==='away'){
+  await composer.fill('Keep this draft');await composer.focus();
+  await composer.evaluate(node=>node.setSelectionRange(2,7));
+  await messages.evaluate(node=>{node.scrollTop=350;});
+ }
+ const detailResponse=responseBatch(page,'/approvals/approval-1',1);
+ control.approvalDetailHold=null;releaseDetail();await detailResponse;
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.waitFor();
+ if(mode==='away'){
+  assert.equal(await composer.evaluate(node=>document.activeElement===node),true,
+   'movement after explicit status retry must not be stolen');
+  assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[2,7]);
+  assert.ok(await messages.evaluate(node=>node.scrollTop>0));
+ }else assert.equal(await card.evaluate(node=>document.activeElement===node),true,
+  'an explicit status retry still reveals the target while the reader follows');
+ assert.equal(reads(),2,'Retry status makes one additional exact-detail GET only');
+ assert.equal(calls.some(call=>call.p.endsWith('/decision')||call.p.startsWith('/auth/verify')
+  ||call.p.startsWith('/runs/')),false,'read-only retry never decides or starts a run');
 }));
 for(const runSession of ['session-one','old-alias'])for(const mode of ['pending','sending','unknown'])
 test(`generated ordinary paginated approval reentry (${runSession}, ${mode})`,{timeout:30000},()=>fixture(async({page,control,calls})=>{

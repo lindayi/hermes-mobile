@@ -170,6 +170,140 @@ test(`held initial approval detail preserves notification reader (${mode})`,asyn
    ||p.startsWith('/runs/')),false,'reading and relocating an approval performs no decisions or run actions');
  }finally{app.destroy();win.close();}
 });
+for(const mode of ['onpage-follow','onpage-away','offpage-follow','offpage-away',
+ 'offpage-alias-follow','route','owner'])
+test(`empty approval list held target detail preserves placeholder reader (${mode})`,async()=>{
+const detail=deferred(),older=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',
+ {url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
+const alias=mode==='offpage-alias-follow',onpage=mode.startsWith('onpage'),
+ moved=mode.endsWith('away'),target={kind:'approval',session_id:'s',
+  run_session_id:alias?'old-alias':'s',run_id:'r',approval_id:'a',request_id:'native-a'},
+ item={...approvalItem(),status:'pending',run_session_id:target.run_session_id};
+let owner='owner',detailReads=0,listReads=0,historyReads=0,cardScrolls=0;
+const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+ if(p==='/inbox/n/target')return target;
+ if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+ if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[
+  {id:20,role:'user',content:'Latest request',run_id:onpage?'r':'newer',session_id:'s'}],
+  offset:10,total:11};
+ if(p==='/sessions/s/messages?limit=10&offset=0&turn_boundary=true'){
+  historyReads++;return older.promise;
+ }
+ if(p==='/approvals'){listReads++;return {items:[],complete:true};}
+ if(p==='/approvals/a'){detailReads++;return detail.promise;}
+ if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+ return {items:[]};
+}},win);
+win.HTMLElement.prototype.scrollIntoView=function(){
+ if(this.dataset.approvalId==='a')cardScrolls++;
+};
+try{
+ const messages=doc.querySelector('.messages');
+ await waitFor(()=>detailReads===1 && listReads===1
+  && doc.activeElement.classList.contains('notification-unavailable'),
+  'an empty pending list leaves the held exact-detail placeholder focused');
+ assert.deepEqual(calls.includes('/approvals'),true,'the empty pending-list handler ran');
+ assert.equal(historyReads,0,'history waits for the held initial target detail');
+ const composer=doc.querySelector('textarea');
+ if(moved){
+  composer.value='Keep this draft';composer.focus();composer.setSelectionRange(2,7);messages.scrollTop=73;
+  assert.equal(doc.activeElement,composer);
+  assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
+ }
+ if(mode==='route')doc.querySelector('[data-view="chats"]').click();
+ if(mode==='owner'){owner='other';win.history.replaceState({},'','/hermes/');await app.start();}
+ detail.resolve(item);
+ if(mode==='route'||mode==='owner'){
+  await tick();await tick();
+  assert.equal(historyReads,0,'a stale target cannot start history recovery');
+  assert.equal(doc.querySelector('[data-approval-id="a"]'),null);
+ }else if(onpage){
+  let card;await waitFor(()=>card=doc.querySelector('[data-approval-id="a"]'),
+   'the exact target card replaces the placeholder');
+  assert.equal(card.dataset.historyRun,'r');
+  assert.equal(item.run_session_id,target.run_session_id,'the original run-session alias is retained');
+  if(moved){
+   assert.equal(doc.activeElement,composer,'first-card rendering preserves composer focus');
+   assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
+   assert.equal(messages.scrollTop,73);
+   assert.equal(cardScrolls,0,'the card does not scroll or focus after reader movement');
+  }else{
+   assert.equal(doc.activeElement,card,'a reader following the placeholder sees the first card');
+   assert.equal(cardScrolls,1);
+  }
+  assert.equal(historyReads,0,'an on-page target needs no history walk');
+ }else{
+  await waitFor(()=>historyReads===1,'the off-page target starts its bounded history walk');
+  const card=doc.querySelector('[data-approval-id="a"]');
+  if(moved){
+   assert.equal(doc.activeElement,composer,'first-card rendering preserves composer focus during history');
+   assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
+  }else assert.equal(doc.activeElement,card,'the first unplaced card stays focused while following');
+  older.resolve({items:[{id:1,role:'user',content:'Older request',run_id:'older',session_id:'s'},
+   {id:2,role:'user',content:'Target request',run_id:'r',session_id:'s'}],offset:0,total:11});
+  await waitFor(()=>card.previousElementSibling?.dataset.historyRun==='r');
+  assert.equal(item.run_session_id,target.run_session_id,'history retains original-run identity');
+  if(moved){
+   assert.equal(doc.activeElement,composer,'history relocation preserves composer focus');
+   assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
+   assert.equal(messages.scrollTop,73);
+   assert.equal(cardScrolls,0,'reader movement before the first card remains authoritative');
+  }else assert.equal(doc.activeElement,card,'a following reader sees the relocated card');
+ }
+ assert.ok(detailReads>=1,'the initial exact-detail handler ran while the pending list was empty');
+ assert.equal(listReads,1,'the pending list returned exactly one empty result');
+ assert.equal(calls.some(p=>p.endsWith('/decision')||p.startsWith('/auth/verify')
+  ||p.startsWith('/runs/')),false,'reading the target performs no decision or run action');
+}finally{app.destroy();win.close();}
+});
+for(const mode of ['away','follow'])
+test(`explicit approval status retry preserves placeholder reader (${mode})`,async()=>{
+const retryDetail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',
+ {url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,
+ item={...approvalItem(),status:'pending'};
+let detailReads=0,listReads=0;
+const app=await mountApp(doc,{clear(){},async request(p){
+ calls.push(p);
+ if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+ if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:'s',
+  run_id:'r',approval_id:'a',request_id:'native-a'};
+ if(p==='/sessions/s')return {id:'s',title:'Synthetic chat'};
+ if(p==='/sessions/s/messages?latest=true&turn_boundary=true')return {items:[
+  {id:20,role:'user',content:'Latest request',run_id:'r',session_id:'s'}],offset:10,total:11};
+ if(p==='/approvals'){listReads++;return {items:[],complete:true};}
+ if(p==='/approvals/a'){
+  if(++detailReads===1)throw Object.assign(new Error('Temporary detail failure'),{status:503});
+  return retryDetail.promise;
+ }
+ return {items:[]};
+}},win);
+try{
+ const composer=doc.querySelector('textarea'),messages=doc.querySelector('.messages');
+ await waitFor(()=>detailReads===1 && listReads===1
+  && [...doc.querySelectorAll('button')].some(button=>button.textContent==='Retry status'),
+  'the initial detail failure exposes its read-only retry');
+ assert.equal(doc.activeElement.classList.contains('notification-unavailable'),true,
+  'the initial placeholder receives focus');
+ [...doc.querySelectorAll('button')].find(button=>button.textContent==='Retry status').click();
+ await waitFor(()=>detailReads===2,'Retry status starts one new exact-detail GET');
+ if(mode==='away'){
+  composer.value='Keep this draft';composer.focus();composer.setSelectionRange(2,7);messages.scrollTop=73;
+ }
+ retryDetail.resolve(item);
+ let card;await waitFor(()=>card=doc.querySelector('[data-approval-id="a"]'),
+  'the exact card replaces the retried placeholder');
+ if(mode==='away'){
+  assert.equal(doc.activeElement,composer,'movement after explicit retry must not be stolen');
+  assert.deepEqual([composer.selectionStart,composer.selectionEnd],[2,7]);
+  assert.equal(messages.scrollTop,73);
+ }else assert.equal(doc.activeElement,card,'an explicit retry still reveals the target when followed');
+ assert.equal(detailReads,2,'retry performs only one additional exact-detail GET');
+ assert.equal(calls.some(p=>p.endsWith('/decision')||p.startsWith('/auth/verify')
+  ||p.startsWith('/runs/')),false,'status retry never decides or starts a run');
+}finally{app.destroy();win.close();}
+});
 for(const runSession of ['s','old-alias'])for(const mode of ['pending','sending','unknown'])
 test(`ordinary paginated approval reentry (${runSession}, ${mode})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
