@@ -8,6 +8,127 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{reso
 const waitFor=async(check,message='expected request was not made')=>{for(let i=0;i<50&&!check();i++)await tick();assert.ok(check(),message);};
 const fakeCredential=()=>({id:'cred',rawId:new Uint8Array([1]).buffer,type:'public-key',getClientExtensionResults:()=>({}),response:{clientDataJSON:new Uint8Array([2]).buffer,authenticatorData:new Uint8Array([3]).buffer,signature:new Uint8Array([4]).buffer,userHandle:null}});
 const approvalItem=()=>({id:'a',run_id:'r',request_id:'native-a',session_id:'s',run_session_id:'s',title:'Execute fixture',command:'echo fixture',target:'fixture target',expires_at:2000000000,executable:true,choices:['once','deny']});
+for(const runSession of ['s','old-alias'])for(const mode of ['pending','sending','unknown'])
+test(`ordinary paginated approval reentry (${runSession}, ${mode})`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[];
+ const decision=deferred(),item={...approvalItem(),status:'pending',run_session_id:runSession},
+  sibling={...item,id:'b',request_id:'native-b'};
+ let reopened=mode==='pending';
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const rows=(offset,count)=>Array.from({length:count},(_,index)=>({id:offset+index+1,role:'user',
+  content:`Request ${offset+index+1}`,run_id:offset+index===0?'r':`new-${offset+index}`,session_id:'s'}));
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:'owner',status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages')){
+   const url=new URL(p,'https://fixture.test'),offset=Number(url.searchParams.get('offset'));
+   if(url.searchParams.has('offset'))return {items:rows(offset,offset===5?100:5),offset,total:205};
+   return reopened?{items:rows(105,100),offset:105,total:205,
+    run:{id:'new-run',session_id:'s',status:'running',input:'Latest request'}}
+    :{items:rows(0,1),offset:0,total:1,run:{id:'r',session_id:runSession,status:'waiting_for_approval'}};
+  }
+  if(p==='/approvals'){
+   assert.equal(o.query.session_id,'s','use actual session-scoped discovery');
+   return {items:reopened && mode!=='pending'?[]:[item,sibling],complete:true};
+  }
+  if(p==='/approvals/a')return item;
+  if(p==='/approvals/b')return sibling;
+  if(p==='/auth/verify/options')return {challenge_id:'fixture',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {verified:true};
+  if(p==='/approvals/a/decision')return decision.promise;
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  doc.querySelector('.session-row').click();await waitFor(()=>card()?.querySelector('button.primary'));
+  if(mode!=='pending'){
+   card().querySelector('button.primary').click();await waitFor(()=>calls.some(call=>call.p.endsWith('/decision')));
+   if(mode==='unknown'){
+    decision.reject(Object.assign(new Error('Synthetic lost ACK'),{status:503}));
+    await waitFor(()=>card()?.querySelector('h3').textContent==='Decision status unknown');
+   }
+   doc.querySelector('[data-view="chats"]').click();await waitFor(()=>doc.querySelector('.session-row'));
+   reopened=true;doc.querySelector('.session-row').click();
+  }
+  await waitFor(()=>calls.filter(call=>call.p.startsWith('/sessions/s/messages?limit=')).length===2,
+   'ordinary reentry must request the two earlier pages');
+  await waitFor(()=>card()?.previousElementSibling?.dataset.historyRun==='r');
+  assert.equal(doc.querySelectorAll('[data-approval-id="a"]').length,1);
+  const origin=doc.querySelector('[data-history-run="r"]:not(.approval-card)'),
+   newer=doc.querySelector('[data-history-run="new-105"]');
+  assert.ok(origin.compareDocumentPosition(card()) & win.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(card().compareDocumentPosition(newer) & win.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.equal(card().querySelectorAll('button:enabled').length,mode==='pending'?2:0);
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,mode==='pending'?0:1);
+  assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,mode==='pending'?0:1);
+  if(mode==='sending'){
+   decision.resolve({status:'resolved'});await waitFor(()=>card()?.querySelector('h3').textContent==='Resolved');
+   assert.equal(card().previousElementSibling?.dataset.historyRun,'r','ACK preserves placement');
+  }
+  assert.equal(calls.filter(call=>call.p.startsWith('/sessions/s/messages?limit=')).length,2,'approvals share history reads');
+  assert.equal(calls.some(call=>call.p.startsWith('/inbox/')),false,'not notification navigation');
+ }finally{app.destroy();win.close();}
+});
+for(const outcome of ['missing','error','route','owner','limit','live'])
+test(`ordinary approval history recovery is truthful and bounded (${outcome})`,async()=>{
+ const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/'}),win=dom.window,doc=win.document,calls=[],older=deferred();
+ let owner='owner',olderReads=0,fail=outcome==='error';
+ const items=Array.from({length:3},(_,i)=>({...approvalItem(),id:`a${i}`,request_id:`req${i}`,status:'pending'}));
+ const row=(run_id,id)=>({id,run_id,session_id:'s',role:'user',content:`Request ${id}`});
+ const app=await mountApp(doc,{clear(){},async request(p,o={}){
+  calls.push({p,o});
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Synthetic chat'}],total:1};
+  if(p.startsWith('/sessions/s/messages')){
+   const query=new URL(p,'https://fixture.test').searchParams;
+   if(!query.has('offset'))return {items:[row('newer',10101)],offset:outcome==='limit'?10100:1,total:10101,
+    ...(outcome==='live'?{run:{id:'r',session_id:'s',status:'waiting_for_approval',input:'Live request'}}:{})};
+   olderReads++;
+   if(['route','owner'].includes(outcome))await older.promise;
+   if(fail)throw Object.assign(new Error('Synthetic history failure'),{status:503});
+   const offset=Number(query.get('offset'));
+   return outcome==='limit'
+    ?{items:Array.from({length:100},(_,i)=>i===0?row('other',offset+i+1):{id:offset+i+1,role:'system',content:'Synthetic system row'}),offset,total:10101}
+    :{items:[row(outcome==='error'?'r':'deleted-other',1)],offset:0,total:10101};
+  }
+  if(p==='/approvals')return {items,complete:true};
+  return {items:[]};
+ }},win);
+ try{
+  doc.querySelector('.session-row').click();
+  await waitFor(()=>doc.querySelector('[data-approval-id="a0"]'));
+  if(outcome==='live'){
+   await tick();assert.equal(olderReads,0,'a real live-run anchor needs no older history');
+   assert.equal(doc.querySelector('.approval-history-unplaced'),null);
+  }else if(['route','owner'].includes(outcome)){
+   await waitFor(()=>olderReads===1);
+   if(outcome==='route'){doc.querySelector('[data-view="chats"]').click();await tick();}
+   else{owner='other';await app.start();}
+   older.resolve();await tick();await tick();
+   assert.equal(doc.querySelector('.approval-history-unplaced'),null,'late history cannot enter the new route');
+   assert.equal(doc.querySelector('[data-history-run="deleted-other"]'),null);
+  }else{
+   await waitFor(()=>doc.querySelector('.approval-history-unplaced h3')?.textContent===
+    (outcome==='error'?'Approval history unavailable':outcome==='limit'?'Earlier approval history limit reached':'Approval request not found in saved history'));
+   assert.equal(olderReads,outcome==='limit'?100:1,'one bounded walk is shared across cards');
+   assert.equal(doc.querySelectorAll('.approval-history-unplaced .approval-card').length,3);
+   assert.match(doc.querySelector('.approval-history-unplaced').textContent,/not placed in the request timeline/);
+   assert.equal(doc.querySelectorAll('.approval-history-unplaced .approval-card button:enabled').length,6,
+    'unknown history does not resolve or lose pending approvals');
+   win.dispatchEvent(new win.Event('focus'));await tick();
+   assert.equal(olderReads,outcome==='limit'?100:1,'refresh cannot start a per-card request storm');
+   if(outcome==='error'){
+    fail=false;
+    [...doc.querySelectorAll('button')].find(node=>node.textContent==='Retry approval history').click();
+    await waitFor(()=>!doc.querySelector('.approval-history-unplaced'));
+    assert.equal(olderReads,2);
+    assert.equal(doc.querySelectorAll('.approval-card').length,3);
+   }
+  }
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify')).length,0);
+ }finally{older.resolve();app.destroy();win.close();}
+});
 for(const status of ['pending','expired'])test(`approval notification opens exact chat without deciding (${status})`,async()=>{
  const dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document,calls=[];let scrolled;
  win.HTMLElement.prototype.scrollIntoView=function(){scrolled=this;};

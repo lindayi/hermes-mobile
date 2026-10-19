@@ -130,6 +130,57 @@ const approvalHistory=()=>({
  pages:{0:{items:[{id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'}],offset:0,total:11}},
  runs:{}
 });
+for(const runSession of ['session-one','old-alias'])for(const mode of ['pending','sending','unknown'])
+test(`generated ordinary paginated approval reentry (${runSession}, ${mode})`,{timeout:30000},()=>fixture(async({page,control,calls})=>{
+ const pending=approvalRecord({run_session_id:runSession}),
+  sibling=approvalRecord({id:'approval-2',request_id:'request-2',run_session_id:runSession});
+ const rows=(offset,count)=>Array.from({length:count},(_,index)=>({id:offset+index+1,role:'user',
+  content:`Request ${offset+index+1}`,run_id:offset+index===0?'approval-run':`new-${offset+index}`,session_id:'session-one'}));
+ const paginated={latest:{items:rows(105,100),offset:105,total:205},
+  pages:{5:{items:rows(5,100),offset:5,total:205},0:{items:rows(0,5),offset:0,total:205}},runs:{}};
+ control.sessionApprovals=[pending,sibling];control.approvals=[];
+ control.approvalDetails={'approval-1':pending,'approval-2':sibling};
+ control.realHistory=mode==='pending'?paginated:{latest:{items:rows(0,1),offset:0,total:1},pages:{},runs:{}};
+ control.activeRun={id:mode==='pending'?'new-run':'approval-run',session_id:mode==='pending'?'session-one':runSession,
+  status:mode==='pending'?'running':'waiting_for_approval',input:'Current request'};
+ let releaseDecision;control.decisionHold=new Promise(resolve=>releaseDecision=resolve);
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.waitFor();
+ if(mode!=='pending'){
+  await holdPasskey(page);
+  await card.getByRole('button',{name:'Approve once',exact:true}).click();
+  await page.waitForFunction(()=>window.passkeyRequest?.started);
+  const posted=page.waitForRequest(request=>new URL(request.url()).pathname==='/hermes/app-api/approvals/approval-1/decision');
+  await page.evaluate(()=>finishPasskey());await posted;
+  if(mode==='unknown'){
+   control.decisionStatus=503;releaseDecision();
+   await card.getByRole('heading',{name:'Decision status unknown',exact:true}).waitFor();
+  }
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  control.sessionApprovals=[];control.realHistory=paginated;
+  control.activeRun={id:'new-run',session_id:'session-one',status:'running',input:'Latest request'};
+  await page.getByRole('button',{name:'First conversation',exact:true}).click();
+ }
+ await page.waitForFunction(()=>document.querySelector('[data-approval-id="approval-1"]')?.previousElementSibling?.dataset.historyRun==='approval-run');
+ const older=calls.filter(call=>call.p==='/sessions/session-one/messages' && new URLSearchParams(call.query).has('offset'));
+ assert.deepEqual(older.map(call=>Number(new URLSearchParams(call.query).get('offset'))),[5,0],
+  'the generated UI requests actual earlier pages once, shared by both approvals');
+ assert.ok(calls.some(call=>call.p==='/approvals' && new URLSearchParams(call.query).get('session_id')==='session-one'));
+ assert.equal(calls.some(call=>call.p.startsWith('/inbox/')),false);
+ assert.equal(await card.count(),1);
+ assert.ok(await card.evaluate(node=>!!(node.compareDocumentPosition(document.querySelector('[data-history-run="new-105"]')) & Node.DOCUMENT_POSITION_FOLLOWING)));
+ assert.equal(await card.locator('button:enabled').count(),mode==='pending'?2:0);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,mode==='pending'?0:1);
+ assert.equal(calls.filter(call=>call.p==='/auth/verify/options').length,mode==='pending'?0:1);
+ assert.equal(calls.filter(call=>call.p==='/auth/verify/finish').length,mode==='pending'?0:1);
+ if(mode==='sending'){
+  releaseDecision();await card.getByRole('heading',{name:'Resolved',exact:true}).waitFor();
+  assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
+  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,1);
+ }
+ await page.evaluate(()=>app.destroy());
+}));
 async function holdPasskey(page){
  await page.evaluate(()=>{
   window.PublicKeyCredential=function(){};
@@ -140,6 +191,73 @@ async function holdPasskey(page){
   window.cancelPasskey=()=>reject(new DOMException('Passkey cancelled','NotAllowedError'));
  });
 }
+for(const outcome of ['error','missing','route','owner'])
+test(`generated ordinary history recovery preserves discovery and reader (${outcome})`,{timeout:30000},()=>fixture(async({page,control,calls})=>{
+ const pending=approvalRecord();
+ control.approvals=[];control.sessionApprovals=[pending];
+ const rows=Array.from({length:100},(_,i)=>({id:i+6,role:'user',content:`New request ${i}`,
+  run_id:`new-${i}`,session_id:'session-one'}));
+ control.realHistory={latest:{items:rows,offset:5,total:105},pages:{0:{items:[
+  {id:1,role:'user',content:'Original request',run_id:outcome==='missing'?'deleted-other':'approval-run',session_id:'session-one'},
+  ...Array.from({length:4},(_,i)=>({id:i+2,role:'user',content:`Old request ${i}`,run_id:`old-${i}`,session_id:'session-one'}))
+ ],offset:0,total:105}},runs:{}};
+ let release;control.requestReadPath='history';control.requestReadHold=new Promise(resolve=>release=resolve);
+ control.requestReadErrors=outcome==='error'?1:0;
+ const requested=page.waitForRequest(request=>{
+  const url=new URL(request.url());return url.pathname==='/hermes/app-api/sessions/session-one/messages'
+   && url.searchParams.has('offset');
+ });
+ await page.getByRole('button',{name:'First conversation',exact:true}).click();await requested;
+ const card=page.locator('[data-approval-id="approval-1"]');
+ await card.waitFor();
+ const before=await page.evaluate(()=>{
+  const messages=document.querySelector('.messages'),anchor=document.querySelector('[data-history-run="new-40"]'),
+   input=document.querySelector('.composer textarea');
+  messages.scrollTop+=anchor.getBoundingClientRect().top-messages.getBoundingClientRect().top-50;
+  input.focus({preventScroll:true});input.value='Unsent draft';input.setSelectionRange(3,6);
+  return anchor.getBoundingClientRect().top;
+ });
+ if(outcome==='route')await page.getByRole('button',{name:'Chats',exact:true}).click();
+ if(outcome==='owner'){control.user='other-owner';await page.evaluate(()=>app.start());}
+ release();control.requestReadHold=null;
+ if(['route','owner'].includes(outcome)){
+  await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor();
+  assert.equal(await card.count(),0);
+  assert.equal(await page.locator('[data-history-run="approval-run"]').count(),0);
+ }else{
+  const group=page.getByRole('region',{name:'Approvals outside loaded history',exact:true});
+  await group.getByRole('heading',{name:outcome==='error'?'Approval history unavailable':'Approval request not found in saved history',exact:true}).waitFor();
+  assert.equal(await group.locator('.approval-card').count(),1);
+  assert.equal(await card.locator('button:enabled').count(),2);
+  if(outcome==='error'){
+   // Retry is a history read, not a decision or a new model request.
+   control.requestReadHold=new Promise(resolve=>release=resolve);
+   const retried=page.waitForRequest(request=>{
+    const url=new URL(request.url());return url.pathname==='/hermes/app-api/sessions/session-one/messages'
+     && url.searchParams.has('offset');
+   });
+   await group.getByRole('button',{name:'Retry approval history',exact:true}).click();await retried;
+   await page.evaluate(()=>{
+    const messages=document.querySelector('.messages'),anchor=document.querySelector('[data-history-run="new-40"]');
+    messages.scrollTop+=anchor.getBoundingClientRect().top-messages.getBoundingClientRect().top-50;
+    const input=document.querySelector('.composer textarea');input.focus({preventScroll:true});input.setSelectionRange(3,6);
+   });
+   release();control.requestReadHold=null;
+   await page.waitForFunction(()=>document.querySelector('[data-approval-id="approval-1"]')?.previousElementSibling?.dataset.historyRun==='approval-run');
+  }
+  const after=await page.evaluate(()=>({
+   top:document.querySelector('[data-history-run="new-40"]').getBoundingClientRect().top,
+   focused:document.activeElement===document.querySelector('.composer textarea'),
+   selection:[document.activeElement.selectionStart,document.activeElement.selectionEnd]
+  }));
+  assert.ok(Math.abs(after.top-before)<2,`history recovery must preserve the reader anchor: ${before} -> ${after.top}`);
+  assert.equal(after.focused,true);assert.deepEqual(after.selection,[3,6]);
+  assert.equal(await card.count(),1);
+ }
+ assert.equal(calls.filter(call=>call.p==='/sessions/session-one/messages' && new URLSearchParams(call.query).has('offset')).length,outcome==='error'?2:1);
+ assert.equal(calls.filter(call=>call.p.endsWith('/decision') || call.p.startsWith('/auth/verify') || call.p==='/runs').length,0);
+ await page.evaluate(()=>app.destroy());
+}));
 test('sessions list has a compact heading and Search Filter New toolbar without summary',{timeout:30000},()=>fixture(async({page})=>{
  await page.getByRole('button',{name:'First conversation',exact:true}).waitFor();
  assert.equal(await page.getByRole('heading',{name:'Sessions',exact:true}).count(),1);
@@ -847,14 +965,22 @@ test('generated long approval details are keyboard-scrollable before decision',{
  assert.equal(calls.filter(call=>call.p.endsWith('/decision')).length,0,'keyboard review does not decide');
 }));
 
-test('manual older-history loading repositions an already rendered approval card',{timeout:30000},()=>fixture(async({page,control})=>{
+test('manual older-history loading repositions an already rendered approval card',{timeout:30000},()=>fixture(async({page,control,calls})=>{
  control.approvals=[approvalRecord()];control.realHistory=approvalHistory();
+ let release;control.requestReadPath='history';control.requestReadHold=new Promise(resolve=>release=resolve);
+ const requested=page.waitForRequest(request=>{
+  const url=new URL(request.url());return url.pathname==='/hermes/app-api/sessions/session-one/messages'
+   && url.searchParams.has('offset');
+ });
  await page.getByRole('button',{name:'First conversation',exact:true}).click();
  const card=page.locator('[data-approval-id="approval-1"]');
- await card.waitFor();
+ await card.waitFor();await requested;
  await page.getByRole('button',{name:'Load older messages',exact:true}).click();
+ release();control.requestReadHold=null;
  await page.locator('.messages [data-history-run="approval-run"]:not(.approval-card)').waitFor();
  assert.equal(await card.evaluate(node=>node.previousElementSibling?.dataset.historyRun),'approval-run');
+ assert.equal(calls.filter(call=>call.p==='/sessions/session-one/messages' && new URLSearchParams(call.query).has('offset')).length,1,
+  'manual loading shares the automatic in-flight history page');
 }));
 
 test('generated approval expiry rearms an early callback and a capped distant deadline',{timeout:30000},()=>fixture(async({page,control,mount,calls})=>{

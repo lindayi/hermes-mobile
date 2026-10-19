@@ -95,6 +95,14 @@ that rejection's authority revision. Keep its exact identity and original turn
 chronology on later refresh or re-entry, without restoring pending controls.
 Unavailability is not a final native execution outcome and cannot settle an
 in-flight or uncertain decision.
+Ordinary chat entry, pending-list discovery and retained-decision restoration
+share one older-history walk, with at most 100 pages per attempt. A loaded saved
+turn or the actual live run anchors a card; the latest run cannot stand in for an
+absent older request. Until its exact run anchor is found, keep the card in a
+labelled group outside the request timeline. Missing/deleted history and exhausted
+bounds do not resolve approvals. History errors retain discovery and offer an
+explicit read-only retry. History recovery preserves reader position and focus,
+and late responses cannot change another route or owner.
 Retained rejections show non-actionable revalidation, never Decision pending merely
 because fresh authority is required. The unknown-run `details_unavailable` projection
 stays recoverable through bounded exact-detail refreshes, including after failed

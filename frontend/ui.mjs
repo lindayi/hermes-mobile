@@ -977,8 +977,12 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const limit=Math.min(100,oldestOffset),offset=oldestOffset-limit;
       const request=(async()=>{
         const page=await api.request(`/sessions/${encodeURIComponent(session.id)}/messages?limit=${limit}&offset=${offset}&turn_boundary=true`);
-        if(version!==routeVersion)return false;
+        if(!current())return false;
         const previousHeight=messages.scrollHeight,previousTop=messages.scrollTop;
+        const viewport=messages.getBoundingClientRect(),readerAnchor=[...messages.children].find(node=>{
+          const rect=node.getBoundingClientRect();
+          return rect.bottom>viewport.top && rect.top<viewport.bottom && !node.hidden;
+        }),readerTop=readerAnchor?.getBoundingClientRect().top;
         const fragment=doc.createDocumentFragment();
         const olderNodes=renderPage(page.items),earliest=turnHint.nextElementSibling;
         const seam=olderNodes.at(-1);
@@ -994,7 +998,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         reflowBackground();
         renderApprovals();
         if(!page.items?.length || oldestOffset===0)more?.remove();
-        messages.scrollTop=previousTop+messages.scrollHeight-previousHeight;
+        messages.scrollTop=readerAnchor?.isConnected
+          ?messages.scrollTop+readerAnchor.getBoundingClientRect().top-readerTop
+          :previousTop+messages.scrollHeight-previousHeight;
         return Boolean(page.items?.length);
       })();
       const pending=request.finally(()=>{if(loadingOlder===pending)loadingOlder=null;});
@@ -1322,6 +1328,61 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       }
       return approvalHistoryAnchors;
     };
+    let approvalHistoryLoading=null,approvalHistoryOutcome='',approvalHistoryPages=0,
+      unplacedApprovals=null,approvalHistoryNotice=null,
+      approvalTargetHistoryReady=notificationTarget?.kind!=='approval';
+    const approvalAnchor=item=>historyAnchors().get(approvalHistoryKey(item.run_id,session.id));
+    const unplacedApprovalItems=()=>[...approvalCards.keys()].map(key=>approvalItems.get(key))
+      .filter(item=>item && !approvalAnchor(item)?.isConnected);
+    const showApprovalHistory=()=>{
+      if(!unplacedApprovals)return;
+      if(!unplacedApprovalItems().length){
+        unplacedApprovals.remove();return;
+      }
+      const labels={loading:'Loading earlier approval requests',error:'Approval history unavailable',
+        missing:'Approval request not found in saved history',limited:'Earlier approval history limit reached'};
+      approvalHistoryNotice.querySelector('h3').textContent=labels[approvalHistoryOutcome]
+        || 'Locating earlier approval requests';
+      approvalHistoryNotice.querySelector('p').textContent=
+        'These cards are not placed in the request timeline. Their approval status is unchanged.';
+      approvalHistoryNotice.querySelector('button').hidden=!['error','limited'].includes(approvalHistoryOutcome);
+    };
+    const recoverApprovalHistory=()=>{
+      if(approvalHistoryLoading)return approvalHistoryLoading;
+      if(!current() || !unplacedApprovalItems().length
+          || ['error','missing','limited'].includes(approvalHistoryOutcome))return Promise.resolve();
+      // One bounded walk serves all cards in this chat, not one walk per approval.
+      approvalHistoryLoading=Promise.resolve().then(async()=>{
+        const previousOffset=oldestOffset;
+        approvalHistoryOutcome='loading';showApprovalHistory();
+        try{
+          while(current() && unplacedApprovalItems().length && oldestOffset>0 && approvalHistoryPages<100){
+            const previousOffset=oldestOffset;
+            approvalHistoryPages++;
+            const loaded=await loadOlder();
+            if(!current())return;
+            if(!loaded || oldestOffset>=previousOffset){approvalHistoryOutcome='missing';break;}
+          }
+          if(!current())return;
+          if(!approvalHistoryOutcome || approvalHistoryOutcome==='loading')
+            approvalHistoryOutcome=unplacedApprovalItems().length
+              ?oldestOffset>0?'limited':'missing':'';
+        }catch(error){
+          if(!current())return;
+          if(error.status===401){expiredSession();return;}
+          approvalHistoryOutcome='error';
+        }finally{
+          approvalHistoryLoading=null;
+          if(current()){
+            showApprovalHistory();
+            if(oldestOffset<previousOffset && notificationTarget?.kind==='approval'){
+              approvalTargetFocusedCard=false;focusApprovalTarget();
+            }
+          }
+        }
+      });
+      return approvalHistoryLoading;
+    };
     const placeApprovalCard=(card,item)=>{
       let index=historyAnchors(),key=approvalHistoryKey(item.run_id,session.id),anchor=index.get(key);
       if(anchor && !anchor.isConnected){
@@ -1331,7 +1392,23 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         if(card.parentNode!==anchor || card!==anchor.lastElementChild)anchor.append(card);
       }else if(anchor){
         if(card.parentNode!==anchor.parentNode || card.previousElementSibling!==anchor)anchor.after(card);
-      }else if(card.parentNode!==messages)messages.append(card);
+      }else{
+        if(!unplacedApprovals){
+          approvalHistoryNotice=h('div',{},h('h3'),h('p'),
+            button('Retry approval history',()=>{
+              if(!current() || approvalHistoryLoading)return;
+              approvalHistoryOutcome='';approvalHistoryPages=0;
+              void recoverApprovalHistory();
+            },'secondary'));
+          unplacedApprovals=h('section',{class:'approval-history-unplaced',role:'region',
+            'aria-label':'Approvals outside loaded history'},approvalHistoryNotice);
+        }
+        if(!unplacedApprovals.isConnected)messages.append(unplacedApprovals);
+        if(card.parentNode!==unplacedApprovals)unplacedApprovals.append(card);
+        showApprovalHistory();
+        if(approvalTargetHistoryReady)void recoverApprovalHistory();
+      }
+      showApprovalHistory();
     };
     const renderApprovalCard=(item,status)=>{
       const key=approvalKey(item);
@@ -1848,39 +1925,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         approvalTargetPlaceholder.scrollIntoView?.({block:'center'});approvalTargetPlaceholder.focus();
       }
     };
-    let approvalTargetHistoryLoading=false,approvalTargetHistoryNotice=null;
     const restoreApprovalTargetHistory=async item=>{
       const key=approvalKey(item),sameTarget=()=>current()
         && sameApprovalIdentity(approvalItems.get(key),item);
-      if(approvalTargetHistoryLoading || !sameTarget())return;
-      approvalTargetHistoryLoading=true;
-      approvalTargetHistoryNotice?.remove();approvalTargetHistoryNotice=null;
-      try{
-        const findAnchor=()=>[...messages.querySelectorAll('[data-history-run]')]
-          .find(node=>node.dataset.historyRun===item.run_id && node.dataset.historySession===session.id
-            && !node.matches('.approval-card'));
-        let pages=0,loadedHistory=false;
-        while(!findAnchor() && oldestOffset>0 && pages++<100){
-          const loaded=await loadOlder();
-          if(!sameTarget())return;
-          if(!loaded)break;
-          loadedHistory=true;
-        }
-        if(!sameTarget())return;
-        if(loadedHistory)approvalTargetFocusedCard=false;
-        renderApprovals();focusApprovalTarget();
-      }catch(error){
-        if(!sameTarget())return;
-        if(error.status===401){expiredSession();return;}
-        approvalTargetHistoryNotice=h('section',{class:'notification-unavailable',role:'region',
-          'aria-label':'Approval history'},h('h3',{},'Approval history unavailable'),
-          h('p',{},'The approval status is unchanged. Earlier messages could not be loaded.'),
-          button('Retry approval history',event=>{
-            if(!sameTarget() || !event.currentTarget.isConnected)return;
-            void restoreApprovalTargetHistory(item);
-          },'secondary'));
-        messages.append(approvalTargetHistoryNotice);
-      }finally{approvalTargetHistoryLoading=false;}
+      if(!sameTarget())return;
+      approvalTargetHistoryReady=true;
+      await recoverApprovalHistory();
+      if(!sameTarget())return;
+      renderApprovals();focusApprovalTarget();
     };
     const resolveApprovalTarget=async target=>{
       const targetReadGeneration=++approvalTargetReadGeneration,
