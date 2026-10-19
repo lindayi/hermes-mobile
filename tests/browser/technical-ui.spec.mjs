@@ -155,7 +155,6 @@ test('generated browser preserves dispatched decisions and fences unknown-run ap
       listMode='full';heldList={resolve:()=>json(res,{items:[first,sibling]})};return;
      }
      const items=listMode==='omit-sibling'?[first]:[first,sibling];
-     if(listMode==='omit-sibling')listMode='full';
      return json(res,{items});
     }
     if(p==='/approvals/b' && req.method==='GET'){
@@ -207,7 +206,12 @@ test('generated browser preserves dispatched decisions and fences unknown-run ap
    'the sibling approval remains actionable');
 
   holdDetail=true;listMode='omit-sibling';
+  const omittedList=page.waitForResponse(async response=>{
+   if(new URL(response.url()).pathname!=='/hermes/app-api/approvals' || response.request().method()!=='GET')return false;
+   const data=await response.json();return data.items?.length===1 && data.items[0].id===first.id;
+  });
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+  await omittedList;
   await page.waitForFunction(()=>document.querySelector('[data-approval-id="b"]')!==null);
   for(let i=0;i<100 && detailReads===0;i++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.equal(detailReads,1,'omission starts exact-detail revalidation for the sibling');

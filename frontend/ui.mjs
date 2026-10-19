@@ -1188,6 +1188,14 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const sameApprovalIdentity=(left,right)=>left?.id===right?.id && left.run_id===right.run_id
       && left.request_id===right.request_id && left.session_id===right.session_id
       && left.run_session_id===right.run_session_id;
+    const freshRejectedApprovalAuthority=(decision,actionState,detail,authorityRevision)=>
+      actionState?.needsFreshAuthority && decision?.needsFreshAuthority
+      && decision.retryAuthorityRevision<=authorityRevision
+      && decision.status==='rejected' && decision.state===actionState
+      && !decision.dispatched && !actionState.dispatched && !actionState.decisionStarted
+      && !actionState.pending && !actionState.uncertain
+      && decision.owner===owner && decision.canonicalSessionId===session.id
+      && sameApprovalIdentity(decision.identity,detail);
     const sameApprovalData=(left,right)=>!!left && approvalDataFields.every(field=>
       JSON.stringify(left[field])===JSON.stringify(right[field]));
     const retainedApprovalDecision=item=>{
@@ -1236,7 +1244,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const deadline=win.setTimeout(()=>controller.abort(),10000);
       const pending=api.request(`/approvals/${encodeURIComponent(approvalId)}`,{signal:controller.signal})
         .finally(()=>win.clearTimeout(deadline));
-      const read={pending,runId,generation,cancelled:false,
+      const read={pending,runId,generation,authorityRevision:approvalDecisionAuthorityRevision,cancelled:false,
         valid:()=>!read.cancelled && !controller.signal.aborted
           && approvalDetailGeneration(runId)===generation,
         cancel:()=>{read.cancelled=true;win.clearTimeout(deadline);controller.abort();}};
@@ -1531,7 +1539,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(targets.length<Math.min(10,eligible.length))targets.push(...eligible.slice(0,Math.min(10,eligible.length)-targets.length));
       if(eligible.length)approvalDetailBatchOffset=(start+targets.length)%eligible.length;
       await Promise.all(targets.map(async([key,item])=>{
-        const read=readApprovalDetail(item.id,item.run_id),decisionAuthorityRevision=approvalDecisionAuthorityRevision;
+        const read=readApprovalDetail(item.id,item.run_id);
         try{
           const detail=await read.pending;
           if(!read.valid())return;
@@ -1541,19 +1549,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const actionState=approvalActionStates.get(key),
             currentStatus=actionState?.uncertain?'unknown':approvalFinals.get(key) || item.status,
             decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item)),
-            freshRejectedAuthority=actionState?.needsFreshAuthority
-              && decision?.needsFreshAuthority && decision.retryAuthorityRevision<=decisionAuthorityRevision
-              && decision.status==='rejected' && decision.state===actionState
-              && !decision.dispatched && !actionState.dispatched && !actionState.decisionStarted
-              && !actionState.pending && !actionState.uncertain
-              && decision.owner===owner && decision.canonicalSessionId===session.id
-              && sameApprovalIdentity(decision.identity,detail);
+            freshRejectedAuthority=freshRejectedApprovalAuthority(decision,actionState,detail,read.authorityRevision);
           if(detail.status==='pending' && freshRejectedAuthority){
             decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;
             approvalItems.set(key,detail);approvalPending.set(key,detail);approvalFinals.delete(key);
             renderApprovals();return;
           }
-          if(detail.status==='unavailable' && decision && !freshRejectedAuthority)return;
+          if(detail.status==='unavailable' && decision
+              && (decision.dispatched || decision.needsFreshAuthority || actionState?.uncertain)
+              && !freshRejectedAuthority)return;
           let status=detail.status==='unavailable' && freshRejectedAuthority?'unavailable'
             :actionState?.uncertain && !finalApprovalStatuses.has(detail.status)
             ?'unknown':preferredApprovalStatus(detail.status,currentStatus,locallyExpiredApproval(key));
@@ -1604,6 +1608,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
            if(!read.valid() || !sameRead())return;
            if(error.status===401){expiredSession();return;}
            if(error.status!==404)return;
+           if(actionState?.needsFreshAuthority)return;
            detail={...item,status:'unavailable'};
           }
           if(!read.valid() || !sameRead() || !detail || !sameApprovalIdentity(item,detail)
@@ -1612,11 +1617,20 @@ export async function mountApp(doc, api, win = doc.defaultView) {
             live=status==='pending' || status==='details_unavailable',
             next=live?detail:{...detail,status,executable:false,choices:[],details_unavailable:false,
               error:approvalDetailsUnavailable(detail) || approvalDetailsUnavailable(item)?'':detail.error};
+          const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
+          if(status==='unavailable' && decision
+              && (decision.dispatched || decision.needsFreshAuthority || actionState?.uncertain)){
+            if(!freshRejectedApprovalAuthority(decision,actionState,detail,
+                Math.min(decisionAuthorityRevision,read.authorityRevision)))return;
+            decision.rejectedUnavailable=true;
+            settleApprovalDecision(owner,session.id,item,status);
+          }
           if(live && actionState?.pending)return;
           let authorityChanged=false;
           if(status==='pending' && actionState?.needsFreshAuthority){
             const decision=approvalDecisionStates.get(approvalDecisionKey(owner,session.id,item));
-            if(decision?.needsFreshAuthority && decision.retryAuthorityRevision<=decisionAuthorityRevision
+            if(decision?.needsFreshAuthority
+                && decision.retryAuthorityRevision<=Math.min(decisionAuthorityRevision,read.authorityRevision)
                 && decision.owner===owner && decision.canonicalSessionId===session.id
                 && sameApprovalIdentity(decision.identity,detail)){
               decision.needsFreshAuthority=false;actionState.needsFreshAuthority=false;

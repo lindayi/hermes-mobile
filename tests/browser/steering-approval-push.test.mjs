@@ -2041,6 +2041,74 @@ test(`exact unavailable after omitted decision re-entry (${runSession}, ${outcom
  }finally{decision.resolve({status:'resolved'});afterRejection.resolve(unavailable);app.destroy();win.close();}
 });
 
+for(const runSession of ['s','old-alias'])
+for(const fence of ['authority','id','run_id','request_id','session_id','run_session_id','route','owner'])
+test(`rejected unavailable detail preserves ${fence} fence (${runSession})`,async()=>{
+ const decision=deferred(),detail=deferred(),calls=[],
+  dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),
+  win=dom.window,doc=win.document;
+ win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};
+ const pending={...approvalItem(),status:'pending',run_session_id:runSession},
+  unavailable={...pending,status:'unavailable',executable:false,choices:[]};
+ let owner='owner',posts=0,detailReads=0,listReads=0,reentered=false;
+ const app=await mountApp(doc,{clear(){},async request(p){
+  calls.push(p);
+  if(p==='/auth/me')return {user:{id:owner,status:'ready'}};
+  if(p==='/inbox/n/target')return {kind:'approval',session_id:'s',run_session_id:runSession,
+   run_id:'r',approval_id:'a',request_id:'native-a'};
+  if(p.startsWith('/sessions?'))return {items:[{id:'s',title:'Exact chat title'}],total:1};
+  if(p==='/sessions/s')return {id:'s',title:'Exact chat title'};
+  if(p.startsWith('/sessions/s/messages'))return {items:[],total:0,offset:0,
+   run:{id:reentered?'new-run':'r',session_id:reentered?'s':runSession,status:'running'}};
+  if(p==='/approvals'){listReads++;return {items:posts?[]:[pending],complete:true};}
+  if(p==='/approvals/a'){detailReads++;return reentered?detail.promise:pending;}
+  if(p==='/auth/verify/options')return {challenge_id:'c1',options:{challenge:'AQ'}};
+  if(p==='/auth/verify/finish')return {ok:true};
+  if(p==='/approvals/a/decision'){posts++;return decision.promise;}
+  return {items:[]};
+ }},win);
+ const card=()=>doc.querySelector('[data-approval-id="a"]');
+ try{
+  await waitFor(()=>card()?.querySelector('button.primary'));
+  card().querySelector('button.primary').click();await waitFor(()=>posts===1);
+  doc.querySelector('[data-view="chats"]').click();
+  await waitFor(()=>doc.querySelector('.session-row'));
+  if(fence!=='authority'){
+   decision.reject(Object.assign(new Error('Approval changed'),{status:409}));await tick();
+  }
+  const before=detailReads;
+  reentered=true;doc.querySelector('.session-row').click();
+  await waitFor(()=>card() && detailReads>before);
+  if(fence==='authority'){
+   const lists=listReads;
+   decision.reject(Object.assign(new Error('Approval changed'),{status:409}));
+   await waitFor(()=>listReads>lists);
+  }else if(fence==='route'){
+   doc.querySelector('[data-view="chats"]').click();
+   await waitFor(()=>doc.querySelector('.session-row'));
+  }else if(fence==='owner'){
+   owner='other';win.history.replaceState({},'','/hermes/');await app.start();
+  }
+  const result=['id','run_id','request_id','session_id','run_session_id'].includes(fence)
+   ?{...unavailable,[fence]:'foreign'}:unavailable;
+  detail.resolve(result);await tick();await tick();
+  if(fence==='route' || fence==='owner')assert.equal(card(),null);
+  else{
+   assert.notEqual(card()?.querySelector('h3').textContent,'Approval unavailable',
+    'only an exact, post-rejection authority read can settle the retained rejection');
+   assert.ok([...card().querySelectorAll('button')].every(button=>
+    button.disabled || button.closest('.actions')?.hidden),
+   'a fenced response cannot expose decision controls');
+   if(fence==='authority'){
+    win.dispatchEvent(new win.Event('focus'));
+    await waitFor(()=>card()?.querySelector('h3').textContent==='Approval unavailable',
+     'a newly started exact read can settle the same rejected decision');
+   }
+  }
+  assert.equal(posts,1);assert.equal(calls.filter(p=>p==='/auth/verify/options').length,1);
+ }finally{decision.resolve({status:'resolved'});detail.resolve(unavailable);app.destroy();win.close();}
+});
+
 for(const runSession of ['s','old-alias'])test(`unknown run invalidates its held approval detail generation (${runSession})`,async()=>{
  const initialDetail=deferred(),calls=[],dom=new JSDOM('<div id="app"></div>',{url:'https://fixture.test/hermes/?notification=n'}),win=dom.window,doc=win.document;
  const pending={...approvalItem(),run_session_id:runSession,status:'pending'};

@@ -579,6 +579,7 @@ test('generated chat restores an omitted dispatched decision after a newer run s
 
  control.activeRun={id:'newer-run',session_id:'session-one',status:'running',input:'Newer request'};
  control.sessionApprovals=[sibling];
+ control.approvalDetail={...pending,status:'unavailable',executable:false,choices:[]};
  control.realHistory={latest:{items:[
   {id:1,role:'user',content:'Original request',run_id:'approval-run',session_id:'session-one'},
   {id:2,role:'assistant',content:'Newer response',run_id:'newer-run',session_id:'session-one'}
@@ -587,9 +588,11 @@ test('generated chat restores an omitted dispatched decision after a newer run s
   const url=new URL(response.url());return url.pathname==='/hermes/app-api/approvals'
    && url.searchParams.has('session_id') && response.request().method()==='GET';
  });
+ const reentryDetail=page.waitForResponse(response=>new URL(response.url()).pathname==='/hermes/app-api/approvals/approval-1'
+  && response.request().method()==='GET' && response.status()===200);
  await page.getByRole('button',{name:'Chats',exact:true}).click();
  await page.getByRole('button',{name:'First conversation',exact:true}).click();
- await reentryList;
+ await reentryList;await reentryDetail;
  await page.getByRole('heading',{name:'Exact notification chat',exact:true}).waitFor();
  await page.locator('[data-approval-id="newer-approval"] button.primary').waitFor();
  assert.equal(await card.count(),1,'the omitted dispatched decision remains visible after re-entry');
