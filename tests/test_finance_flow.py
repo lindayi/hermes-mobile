@@ -239,6 +239,78 @@ def test_pair_selectors_are_parameterized_and_do_not_constrain_transactions(env)
         assert client.get(BASE + '/transactions', params=params).json()['total'] == 2
 
 
+@pytest.mark.parametrize('empty_field', ['account', 'source', 'target', 'kind'])
+def test_empty_identifiers_are_omitted_with_explicit_coverage(env, empty_field):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        tx(db, 'empty-category', category_id='', amount_minor=-25)
+        if empty_field == 'account':
+            tx(db, 'empty-account', account='', category_id='', amount_minor=-50)
+        else:
+            pair(db, 'empty-pair', **{empty_field: ''})
+    response = client.get(BASE + '/flow')
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body['edges']) == 1
+    edge = body['edges'][0]
+    assert edge['selector']['filters']['category'] == ''
+    assert edge['amount_minor'] == 25 and edge['count'] == 1
+    section = 'transactions' if empty_field == 'account' else 'pairs'
+    assert body['coverage'][section]['unselectable'] == 1
+    assert body['coverage']['complete'] is False
+    assert any('unselectable' in warning.lower() for warning in body['warnings'])
+    detail = client.get(BASE + '/transactions', params=edge['selector']['filters'])
+    assert detail.status_code == 200, detail.text
+    assert [item['entry_id'] for item in detail.json()['items']] == ['empty-category']
+
+
+@pytest.mark.parametrize('side', ['d', 'c'])
+@pytest.mark.parametrize('field', ['account', 'currency'])
+def test_unmatched_pairs_include_existing_endpoints_with_null_fields(env, side, field):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        pair(db, 'nullable')
+        pair(db, 'matched')
+        db.execute(f'UPDATE linked_transfer_legs SET {field}=NULL WHERE record_id=?', ('nullable-' + side,))
+        db.execute(f'UPDATE hierarchical_transactions SET {field}=NULL WHERE record_id=?', ('nullable-' + side,))
+    response = client.get(BASE + '/transfers', params={'transfer_status': 'unmatched'})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['total'] == 1
+    assert [item['link_id'] for item in body['items']] == ['nullable']
+    assert body['items'][0]['missing_counterpart'] is False
+    assert body['network']['links'] == []
+    matched = client.get(BASE + '/transfers', params={'transfer_status': 'matched'})
+    assert matched.status_code == 200, matched.text
+    assert matched.json()['total'] == 1
+    assert [item['link_id'] for item in matched.json()['items']] == ['matched']
+    assert client.get(BASE + '/transfers').json()['total'] == 2
+
+
+@pytest.mark.parametrize('side', ['d', 'c'])
+@pytest.mark.parametrize('endpoint', ['flow', 'transfers'])
+def test_exact_empty_category_filters_pairs_by_either_endpoint(env, side, endpoint):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        pair(db, 'empty-category')
+        pair(db, 'other-category', amount=300)
+        db.execute("UPDATE hierarchical_transactions SET category_id='' WHERE record_id=?", ('empty-category-' + side,))
+    response = client.get(BASE + '/' + endpoint, params={'category': '', 'category_mode': 'exact', 'dataset': 'all'})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    if endpoint == 'flow':
+        assert len(body['edges']) == 1
+        edge = body['edges'][0]
+        assert edge['count'] == 1 and edge['amount_minor'] == 200
+        assert edge['selector']['endpoint'] == 'transfers'
+        assert edge['selector']['filters']['category'] == ''
+        detail = client.get(BASE + '/transfers', params=edge['selector']['filters'])
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+    assert body['total'] == 1
+    assert [item['link_id'] for item in body['items']] == ['empty-category']
+
+
 def test_unselectable_pair_identifiers_are_omitted_with_explicit_coverage(env):
     client, path, _, _ = env
     with sqlite3.connect(path) as db:

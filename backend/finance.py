@@ -228,8 +228,8 @@ def flow_id(*parts):
     return json.dumps(parts, ensure_ascii=True, separators=(',', ':'))
 
 
-FLOW_SELECTABLE = 'account IS NOT NULL AND length(account)<=200 AND category_id IS NOT NULL AND length(category_id)<=120'
-PAIR_SELECTABLE = 'length(debit_account)<=200 AND length(credit_account)<=200 AND link_type IS NOT NULL AND length(link_type)<=120'
+FLOW_SELECTABLE = 'account IS NOT NULL AND length(account) BETWEEN 1 AND 200 AND category_id IS NOT NULL AND length(category_id)<=120'
+PAIR_SELECTABLE = 'length(debit_account) BETWEEN 1 AND 200 AND length(credit_account) BETWEEN 1 AND 200 AND link_type IS NOT NULL AND length(link_type) BETWEEN 1 AND 120'
 
 
 def query_flow(db, f):
@@ -388,8 +388,8 @@ def pair_predicate(db, f):
             clauses.append(f'{column}=?')
             args.append(value)
     if f.transfer_status is not None:
-        clauses.append(('NOT (' if f.transfer_status == 'unmatched' else '(') + MATCHED_PAIR + ')')
-    if f.category or f.dataset != 'all':
+        clauses.append(('NOT ' if f.transfer_status == 'unmatched' else '') + f'COALESCE(({MATCHED_PAIR}),0)')
+    if f.category is not None or f.dataset != 'all':
         # Source date/scope already select the pair; membership can match either endpoint.
         tx_where, tx_args = transaction_predicate(db, f.model_copy(update={'q': '', 'account': None, 'record_id': None, 'scope': 'all', 'direction': None, 'transfer_status': None}), apply_dates=False)
         clauses.append(f'(debit_record_id IN (SELECT record_id FROM hierarchical_transactions WHERE {tx_where}) OR credit_record_id IN (SELECT record_id FROM hierarchical_transactions WHERE {tx_where}))')

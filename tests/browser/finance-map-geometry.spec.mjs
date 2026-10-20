@@ -100,6 +100,23 @@ for(const width of [390,1280])test(`chooser stays above an existing inspector an
  await activateButton(page,'touch',choice);await inspector.locator('tbody tr').first().waitFor();
  assert.equal(calls.filter(c=>c.name==='transactions').at(-1).q.direction,'outgoing');assert.equal(await inspector.count(),1);
 });
+for(const action of ['replace','dismiss'])test(`inspection ${action} removes both overlays without leaving stale evidence`,{timeout:20000},async t=>{
+ const expenseEdges=[expense('cash-food',false),expense('food-refund',true)];
+ const {page}=await fixture(t,{width:1280,edges:[...expenseEdges,...flow.edges]});
+ await activate(page,'mouse',await streamPoint(page,['cash-reserve']));
+ const inspector=page.getByRole('complementary',{name:'Flow inspector'});await inspector.locator('tbody tr').first().waitFor();
+ await activate(page,'mouse',await streamPoint(page,expenseEdges.map(e=>e.id)));
+ await page.getByRole('complementary',{name:'Overlapping streams',exact:true}).waitFor();
+ if(action==='replace'){
+  await page.locator('[data-edge="cash-food"]').focus();await page.keyboard.press('Enter');
+  assert.equal(await inspector.count(),1,'Replacing inspection must remove the previous evidence panel as well as chooser');
+  await inspector.locator('tbody tr').first().waitFor();assert.match(await inspector.textContent(),/Everyday → Food/);
+ }else{
+  await page.locator('[data-edge="cash-food"]').focus();await page.keyboard.press('Escape');
+ }
+ if(action==='replace')await page.getByRole('button',{name:'Close inspector',exact:true}).click();
+ assert.equal(await page.locator('.flow-inspector').count(),0,'Dismissing inspection must remove every evidence/chooser overlay');
+});
 for(const width of [390,1280])test(`large overlap chooser pages every exact stream at ${width}`,{timeout:30000},async t=>{
  const outgoing=Array.from({length:80},(_,i)=>{const edge=expense('food-'+i,false);return {...edge,label:'Food purchase '+i,selector:{...edge.selector,filters:{...edge.selector.filters,category:'expense.food.item'+i}}};}),refund=expense('refund',true);
  const {page,calls}=await fixture(t,{width,edges:[...outgoing,refund]});

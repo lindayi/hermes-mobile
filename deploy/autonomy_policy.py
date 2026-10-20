@@ -278,7 +278,7 @@ ISSUE122_FINANCE_OVERLAY = {
 SOURCE_FINGERPRINTS.update(ISSUE122_FINANCE_OVERLAY)
 # Issue #124 adds the read-only money map; historical source pins remain above.
 ISSUE124_MONEY_MAP_OVERLAY = {
-    'backend/finance.py': 'b8b54f604c6d2d327386220356deeb5b262a3bf565a162716d3f14f323c542ca',
+    'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
 }
 SOURCE_FINGERPRINTS.update(ISSUE124_MONEY_MAP_OVERLAY)
 SOURCE_BLOCKERS = {

@@ -92,6 +92,20 @@ test('dense projection retains every edge, separates direction and offers exact 
  const focused=mapProjection(data,'Synthetic account 0');assert.equal(focused.edges.flatMap(e=>e.members||[e]).length,edges.filter(e=>e.source==='a0').length);
  assert.ok(focused.nodes.some(n=>n.account==='Synthetic account 0'));
 });
+test('dense transfer families and overflow preserve unmatched designation and exact members',async()=>{
+ const {mapProjection}=await import(moduleURL);
+ const nodes=[{id:'a',label:'Checking',account:'Checking',kind:'account'},{id:'b',label:'Savings',account:'Savings',kind:'account'}],edges=[];
+ for(let i=0;i<26;i++){
+  nodes.push({id:'t'+i,label:'Unmatched transfer: Cash '+i,kind:'transfer'});
+  edges.push({id:'e'+i,source:'a',target:'t'+i,kind:'transfer',label:'Checking → Unmatched transfer: Cash '+i,amount_minor:100,count:1,currency:'CAD',selector:{endpoint:'transactions',filters:{account:'Checking',category:'transfer.family'+i,direction:'outgoing',flow:'transfer',transfer_status:'unmatched'}}});
+ }
+ edges.push({id:'pair',source:'a',target:'b',kind:'transfer',label:'Checking → Savings',amount_minor:200,count:1,currency:'CAD',selector:{endpoint:'transfers',filters:{source_account:'Checking',target_account:'Savings',link_type:'own_cash',transfer_status:'matched'}}});
+ const result=mapProjection({nodes,edges});assert.equal(result.grouped,true);
+ for(const node of result.nodes.filter(n=>n.kind==='transfer'))assert.match(node.label,/unmatched/i);
+ assert.ok(result.nodes.some(n=>n.id==='group:other:transfer'),'Exercise overflow family');
+ for(const edge of result.edges){assert.deepEqual(edge.members.map(e=>e.selector),edge.members.map(e=>edges.find(original=>original.id===e.id).selector));if(edge.members[0].selector.filters.transfer_status==='unmatched')assert.match(edge.label,/unmatched/i);else assert.doesNotMatch(edge.label,/unmatched/i);}
+ assert.equal(result.edges.flatMap(e=>e.members).length,edges.length);
+});
 test('flow API forwards bounded selector field allowlist without accepting arbitrary paths',async()=>{
  const {financeAPI}=await import(moduleURL);let url;
  const api=financeAPI(async u=>{url=u;return {ok:true,json:async()=>({})};});
@@ -105,6 +119,9 @@ test('empty exact category survives transport while ordinary empty filters stay 
  assert.equal(url.searchParams.has('category'),true,'An explicit empty exact category must not widen to all categories');
  assert.equal(url.searchParams.get('category'),'');
  assert.equal(url.searchParams.get('category_mode'),'exact');
+ await api('transfers',{source_account:'Synthetic cash',target_account:'Synthetic reserve',link_type:'own_cash',category:'',category_mode:'exact',transfer_status:'matched'});
+ assert.equal(url.searchParams.has('category'),true);assert.equal(url.searchParams.get('category'),'');
+ for(const [key,value] of Object.entries({source_account:'Synthetic cash',target_account:'Synthetic reserve',link_type:'own_cash',transfer_status:'matched'}))assert.equal(url.searchParams.get(key),value);
  assert.equal(url.searchParams.has('q'),false);
  await api('transactions',{account:'',category:'',category_mode:'prefix',q:''});
  assert.equal(url.searchParams.has('category'),false);

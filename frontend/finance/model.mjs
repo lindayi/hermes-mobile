@@ -71,14 +71,14 @@ export function mapProjection(data,focus='',compact=false) {
   else if(n.kind!=='account'){
    const member=edges.find(e=>e.source===n.id||e.target===n.id),category=member?.selector?.filters?.category;
    const path=category?category.split(/[.:/]/).slice(0,2).join('.'):n.kind;
-   key='group:'+n.kind+':'+path;label=categoryLabel(path);
+   key='group:'+n.kind+':'+path;label=(n.kind==='transfer'?'Unmatched transfer: ':'')+categoryLabel(path);
   }
   mapped.set(n.id,key);if(!projected.has(key))projected.set(key,{...n,id:key,label,...(key==='group:accounts'?{account:undefined,summary:true}:{})});
  }
  // Keep eight readable families per zone, folding the remainder explicitly.
  for(const kind of ['income','expense','investment','financing','adjustment','unresolved','transfer']){
   const family=[...projected.values()].filter(n=>n.kind===kind).sort((a,b)=>a.label.localeCompare(b.label));
-  if(family.length>8){const overflow=new Set(family.slice(7).map(n=>n.id)),key='group:other:'+kind;for(const [id,to] of mapped)if(overflow.has(to))mapped.set(id,key);for(const id of overflow)projected.delete(id);projected.set(key,{id:key,label:'Other '+kind+' categories',kind});}
+  if(family.length>8){const overflow=new Set(family.slice(7).map(n=>n.id)),key='group:other:'+kind;for(const [id,to] of mapped)if(overflow.has(to))mapped.set(id,key);for(const id of overflow)projected.delete(id);projected.set(key,{id:key,label:kind==='transfer'?'Other unmatched transfers':'Other '+kind+' categories',kind});}
  }
  const bundles=new Map();
  for(const edge of edges){const source=mapped.get(edge.source),target=mapped.get(edge.target);const key=JSON.stringify([source,target,edge.kind,edge.currency,edge.selector?.endpoint,edge.selector?.filters?.direction,edge.selector?.filters?.transfer_status]);

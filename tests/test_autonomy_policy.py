@@ -336,7 +336,7 @@ _ISSUE122_FINANCE_FIXTURE = {
 
 
 _ISSUE124_MONEY_MAP_FIXTURE = {
-    'backend/finance.py': 'b8b54f604c6d2d327386220356deeb5b262a3bf565a162716d3f14f323c542ca',
+    'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
 }
 
 
