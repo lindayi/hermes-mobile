@@ -33,7 +33,7 @@ SOURCE_CONTROL_ROOTS = frozenset({
 SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'backend/app.py', 'backend/attachments.py', 'backend/auth.py', 'backend/auth_store.py',
     'backend/background_delivery.py', 'backend/catalog_search.py', 'backend/chat_snapshot.py',
-    'backend/clarifications.py',
+    'backend/clarifications.py', 'backend/finance.py', 'backend/finance_market.py',
     'backend/configuration.py', 'backend/model_controls.py', 'backend/native_api_service.py',
     'backend/native_notifications.py', 'backend/native_run_controls.py',
     'backend/context_compression_presentation.py', 'backend/delivery.py',
@@ -131,6 +131,8 @@ REQUIRED_FILES = (
     'backend/configuration.py',
     'backend/context_compression_presentation.py',
     'backend/delivery.py',
+    'backend/finance.py',
+    'backend/finance_market.py',
     'backend/hermes_client.py',
     'backend/jobs.py',
     'backend/model_controls.py',
@@ -265,6 +267,20 @@ ISSUE115_REVIEW_EVIDENCE_OVERLAY = {
     'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
 }
 SOURCE_FINGERPRINTS.update(ISSUE115_REVIEW_EVIDENCE_OVERLAY)
+# Issue #122 owner-only finance and nested frontend entrypoints. Retain the
+# historical app/build pins above; these values attest source consistency only.
+ISSUE122_FINANCE_OVERLAY = {
+    'backend/app.py': '0140f22b01003b04bd64372991452888e5985a17b44d34b005855bbedad1a568',
+    'backend/finance.py': '21d442ad8bc6002711ab82dcb4f4975da93d6365face11941430ad44b3ebeae5',
+    'backend/finance_market.py': '4fb17c3fc66e3d094291b3192eee02366ee879da3298c027eb27e51b39e8e731',
+    'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
+}
+SOURCE_FINGERPRINTS.update(ISSUE122_FINANCE_OVERLAY)
+# Issue #124 adds the read-only money map; historical source pins remain above.
+ISSUE124_MONEY_MAP_OVERLAY = {
+    'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
+}
+SOURCE_FINGERPRINTS.update(ISSUE124_MONEY_MAP_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
@@ -329,6 +345,8 @@ SOURCE_BLOCKERS = {
     'backend/chat_snapshot.py': 'execution-source-contract',
     'backend/context_compression_presentation.py': 'execution-source-contract',
     'backend/delivery.py': 'execution-source-contract',
+    'backend/finance.py': 'execution-source-contract',
+    'backend/finance_market.py': 'execution-source-contract',
     'backend/hermes_client.py': 'execution-source-contract',
     'backend/jobs.py': 'execution-source-contract',
     'backend/native_catalog.py': 'execution-source-contract',

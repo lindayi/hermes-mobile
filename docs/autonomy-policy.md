@@ -115,6 +115,23 @@ resolves relative package imports and initializers and rejects unresolved local 
 unsupported dynamic imports. It does not discover arbitrary subprocess roots or
 establish complete execution-source coverage by itself.
 
+### Issue #122 finance source family
+
+The issue #122 overlay pins `backend/app.py`, `backend/finance.py`,
+`backend/finance_market.py`, and `deploy/frontend_release.py` for the owner-only,
+read-only Finance Observatory and its nested frontend entrypoint. The finance
+modules are explicit members of the fixed local Python closure and required
+source inventory, with the existing `execution-source-contract` blocker. Tests
+retain independent literal digests and reject missing, malformed, mutated, or
+superseded source pins in every transition phase. Earlier app/build literals and
+`SOURCE_BASELINES` remain historical provenance, not current candidate values.
+These pins establish source consistency only: they do not establish exact-head
+Copilot review, hosted CI, merge authorization, or deployment evidence. Issue #124
+adds a later finance-only overlay for the explorable money map, preserving issue
+#122's literal history. Refresh the current policy and independent fixture literals
+together after source changes; never derive expected digests from candidate files
+at test runtime. No review, CI, authorization or deployment policy is changed.
+
 ### Historical issue #100 authorization and rendered-review candidate
 
 The PR101 + PR103 assembly preserved issue #100's former Copilot-bound sensitive
