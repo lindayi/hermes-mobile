@@ -63,6 +63,9 @@ class Filters(BaseModel):
     scope: Literal['personal', 'all', 'protected'] = 'personal'
     account: str | None = Field(default=None, max_length=200)
     category: str | None = Field(default=None, max_length=120)
+    category_mode: Literal['prefix', 'exact'] = 'prefix'
+    flow: Literal['income', 'expense', 'transfer', 'investment', 'financing', 'adjustment', 'unresolved'] | None = None
+    vesting_policy: Literal['horizon', 'range'] = 'horizon'
     dataset: Literal['bank', 'investment', 'all'] = 'all'
     q: str = Field(default='', max_length=120)
     record_id: str | None = Field(default=None, max_length=200)
@@ -103,16 +106,27 @@ def transaction_predicate(db, f):
     clauses = [VALID_TX, 'currency=?', scope_sql(f.scope, protected='current_planning_protected')]
     args = [f.currency]
     start, end = date_range(db, f)
-    for value, sql in ((start, 'date>=?'), (end, 'date<=?'), (f.account, 'account=?'), (f.record_id, 'record_id=?')):
+    for value, sql in ((start, 'date>=?'), (end, 'date<=?'), (f.account, 'account=?')):
         if value is not None:
             clauses.append(sql)
             args.append(value)
+    if f.record_id is not None:
+        # Payroll links carry raw IDs; keep all aliases inside the regular predicate.
+        clauses.append('(record_id=? OR tx_id=? OR event_id=?)')
+        args.extend([f.record_id] * 3)
     if f.dataset != 'all':
         clauses.append('dataset=?')
         args.append(f.dataset)
+    if f.flow is not None:
+        clauses.append(f'({FLOW})=?')
+        args.append(f.flow)
     if f.category:
-        clauses.append("category_id LIKE ? ESCAPE '\\'")
-        args.append(escaped_like(f.category) + '%')
+        if f.category_mode == 'exact':
+            clauses.append('category_id=?')
+            args.append(f.category)
+        else:
+            clauses.append("category_id LIKE ? ESCAPE '\\'")
+            args.append(escaped_like(f.category) + '%')
     if f.q:
         clauses.append("(description LIKE ? ESCAPE '\\' OR merchant LIKE ? ESCAPE '\\' OR category_id LIKE ? ESCAPE '\\')")
         args.extend(['%' + escaped_like(f.q) + '%'] * 3)
@@ -188,7 +202,7 @@ def query_overview(db, f):
     transfers = f"COALESCE(SUM(CASE WHEN ({FLOW})='transfer' AND amount_minor>0 THEN amount_minor ELSE 0 END),0) transfer_in_minor,COALESCE(SUM(CASE WHEN ({FLOW})='transfer' AND amount_minor<0 THEN -amount_minor ELSE 0 END),0) transfer_out_minor"
     totals = rows(db, f'SELECT ? currency,{aggregate},{transfers},{others} FROM hierarchical_transactions WHERE {where}', [f.currency, *args])
     monthly = rows(db, f'SELECT substr(date,1,7) month,currency,{aggregate} FROM hierarchical_transactions WHERE {where} GROUP BY substr(date,1,7),currency ORDER BY month', args)
-    categories, category_coverage = select_bounded(db, f'(SELECT category_id,SUM(amount_minor) amount_minor,COUNT(*) count FROM hierarchical_transactions WHERE {where} GROUP BY category_id)', ['category_id','amount_minor','count'], args=args, order='ORDER BY category_id')
+    categories, category_coverage = select_bounded(db, f'(SELECT category_id,({FLOW}) flow,{INCOME} income_minor,{EXPENSE} expense_minor,SUM(amount_minor) amount_minor,COUNT(*) count FROM hierarchical_transactions WHERE {where} GROUP BY category_id,({FLOW}))', ['category_id','flow','income_minor','expense_minor','amount_minor','count'], args=args, order='ORDER BY category_id,flow')
     snap_where, snap_args = snapshot_predicate(f)
     balances, balance_coverage = select_bounded(db, 'investment_latest_balances', BALANCE_FIELDS, snap_where, snap_args, 'ORDER BY account,as_of DESC')
     warnings = ['Net is operating surplus (income minus signed net expense), not cash change or net worth.', 'Personal scope excludes mother/family earmarks; own restricted cash remains included. Protected scope overlaps personal.', 'Recorded snapshots are dated; reported investment totals already include cash. Coverage may be partial.']
@@ -374,18 +388,32 @@ def query_compensation(db, f):
         ('links','payroll_component_links','payroll_id code tx_id event_id status evidence'),
     ):
         result[key], result['coverage'][key] = select_bounded(db, table, fields.split(), f'payroll_id IN (SELECT payroll_id FROM payroll_cashflow_bridge WHERE {where})', args, 'ORDER BY payroll_id,code')
-    pred, params = dated_predicate('1=1', [], f, 'award_date')
+    # Grants are context, not vest-date observations: never filter by award_date.
+    pred, params = '1=1', []
     if f.scope == 'protected' or f.account:
         pred += ' AND 0=1'
     result['awards'], result['coverage']['awards'] = select_bounded(db, 'equity_awards', AWARD_FIELDS, pred, params, 'ORDER BY award_date DESC,award_id')
     for award in result['awards']:
         award['symbol'] = 'MSFT' if (award['employer'] or '').strip().lower() in ('microsoft', 'microsoft corporation', 'microsoft canada') else None
-    result['vesting'], result['coverage']['vesting'] = select_bounded(db, 'equity_vesting_schedule', 'award_id vest_date percent_basis_points theoretical_shares actual_vested_shares status source_id'.split(), f'award_id IN (SELECT award_id FROM equity_awards WHERE {pred})', params, 'ORDER BY vest_date,award_id')
+    vest_pred, vest_params = f'award_id IN (SELECT award_id FROM equity_awards WHERE {pred})', params
+    if f.vesting_policy == 'range':
+        vest_pred, vest_params = dated_predicate(vest_pred, vest_params, f, 'vest_date')
+    result['vesting'], result['coverage']['vesting'] = select_bounded(db, 'equity_vesting_schedule', 'award_id vest_date percent_basis_points theoretical_shares actual_vested_shares status source_id'.split(), vest_pred, vest_params, 'ORDER BY vest_date,award_id')
+    result['coverage']['awards']['date_policy'] = 'all_grant_references'
+    result['coverage']['vesting'].update(
+        policy=f.vesting_policy, date_basis='vest_date',
+        start=f.start.isoformat() if f.vesting_policy == 'range' and f.start else None,
+        end=f.end.isoformat() if f.vesting_policy == 'range' and f.end else None)
+    result['warnings'].extend([
+        'Award references are independent of payroll dates and currency. Awards and vesting are unavailable for protected scope or an account selection because award account/protection attribution is absent.',
+        'Vesting range filters stored vest dates only; all eligible grant references remain context, regardless of grant date.' if f.vesting_policy == 'range' else
+        'Vesting horizon includes all stored eligible schedule dates, independently of the selected payroll date range.'])
     return result
 
 
 FINANCIAL_FACT_NAMES = ('mortgage_balance','mortgage_payment','mortgage_rate','mortgage_renewal','mortgage_terms','mortgage','heloc_balance','heloc_limit','heloc_rate','heloc','property_tax','property_tax_schedule','hbp_balance','hbp_repayment','hbp','tfsa_room','tfsa_notice','rrsp_room','rrsp_notice','notice_of_assessment','registered_account_notice',
-    'hbp_latest_balance_minimum','rrsp_remaining_before_hbp','rrsp_remaining_with_2040_hbp_from_existing_contributions','rrsp_2026_annual_starting_room','rrsp_known_later_contributions','tfsa_indicative_jan_feb_tax','rrsp_remaining_contribution_capacity_current','tfsa_2026_excess_tax_unassessed','tfsa_available_room_current','tfsa_excess_current')
+    'hbp_latest_balance_minimum','rrsp_remaining_before_hbp','rrsp_2026_annual_starting_room','rrsp_known_later_contributions','tfsa_indicative_jan_feb_tax','rrsp_remaining_contribution_capacity_current','tfsa_2026_excess_tax_unassessed','tfsa_available_room_current','tfsa_excess_current')
+FINANCIAL_FACT_FAMILY = ('rrsp_remaining_with_', '_hbp_from_existing_contributions')
 CONTEXT_KEYS = ('partner_rent_schedule','partner_shared_settlement','mortgage','heloc','hbp','tfsa','rrsp','td_mortgage_payment','td_mortgage_fees','tfsa_correction')
 NOTE_TOPICS = ('mortgage','heloc','property_tax','tax','registered_accounts','hbp','tfsa','rrsp','coverage','obligations')
 
@@ -434,8 +462,11 @@ def query_obligations(db, f):
         upcoming_pred += ' AND ' + scope_sql(f.scope, '(SELECT allocation FROM account_policies p WHERE p.account=property_tax_cashflow.account LIMIT 1)', '(SELECT planning_protected FROM account_policies p WHERE p.account=property_tax_cashflow.account LIMIT 1)')
         result['upcoming_tax_schedule'], result['coverage']['upcoming_tax_schedule'] = select_bounded(db, 'property_tax_cashflow', TAX_FIELDS, upcoming_pred, upcoming_args, 'ORDER BY due_date,bill_id')
         result['warnings'].append('Upcoming tax schedule is stored evidence after the selected end date through that calendar year, not inferred payments.')
-    pred = 'fact_name IN (' + ','.join('?' for _ in FINANCIAL_FACT_NAMES) + ')'
-    args = list(FINANCIAL_FACT_NAMES)
+    # Fixed family with a bounded, digits-only designation; never allow arbitrary facts.
+    prefix, suffix = FINANCIAL_FACT_FAMILY
+    designation = f'substr(fact_name,{len(prefix) + 1},length(fact_name)-{len(prefix) + len(suffix)})'
+    pred = '(fact_name IN (' + ','.join('?' for _ in FINANCIAL_FACT_NAMES) + f") OR (fact_name GLOB ? AND length({designation}) BETWEEN 1 AND 9 AND {designation} NOT GLOB '*[^0-9]*'))"
+    args = [*FINANCIAL_FACT_NAMES, prefix + '*' + suffix]
     if f.account:
         pred += ' AND account=?'
         args.append(f.account)

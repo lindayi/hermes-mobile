@@ -271,7 +271,7 @@ SOURCE_FINGERPRINTS.update(ISSUE115_REVIEW_EVIDENCE_OVERLAY)
 # historical app/build pins above; these values attest source consistency only.
 ISSUE122_FINANCE_OVERLAY = {
     'backend/app.py': '0140f22b01003b04bd64372991452888e5985a17b44d34b005855bbedad1a568',
-    'backend/finance.py': 'ab5d9ca48b561bb72a9c06b61688f436711f9596434593781e59b572b383a3a9',
+    'backend/finance.py': 'ff1d3128a032d5b4d4f1bb9ad8474d1d2b8fa9fc7b7199f6a59b809cd1a4ba54',
     'backend/finance_market.py': '025c296b8ddd3c88a50d433634c6ff00920debb39cae9ffd92bbef9f499dcecf',
     'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
 }

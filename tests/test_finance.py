@@ -64,6 +64,31 @@ def test_registered_room_facts_and_mortgage_intent_are_available_as_dated_contex
     assert 'td_mortgage_payment' in {r['key'] for r in result['context']}
 
 
+def test_obligation_fact_numeric_family_is_bounded_and_keeps_safe_projection(env):
+    client, path, _, _ = env
+    prefix, suffix = 'rrsp_remaining_with_', '_hbp_from_existing_contributions'
+    with sqlite3.connect(path) as db:
+        for designation in ('731', '815', '', '73x1', '-731', '7.31', '1234567890'):
+            insert(db, 'facts', fact_id='family-' + designation, account='Checking',
+                   fact_name=prefix + designation + suffix, value_json='{"amount_minor":123}',
+                   raw_json='PRIVATE RAW', source_id='synthetic')
+        for name in ('arbitrary_secret', prefix + '731_wrong_suffix', 'wrong_prefix_731' + suffix):
+            insert(db, 'facts', fact_id=name, fact_name=name, value_json='"PRIVATE VALUE"')
+        insert(db, 'account_policies', account='Checking', allocation='personal', planning_protected=0)
+        insert(db, 'account_policies', account='Family', allocation='mother', planning_protected=1)
+        insert(db, 'facts', fact_id='protected', account='Family', fact_name=prefix + '731' + suffix, value_json='123')
+    response = client.get(BASE + '/obligations')
+    assert response.status_code == 200, response.text
+    facts = response.json()['facts']
+    assert {r['fact_id'] for r in facts} == {'family-731', 'family-815'}
+    assert {r['fact_name'] for r in facts} == {prefix + n + suffix for n in ('731', '815')}
+    assert all(r['value'] == {'amount_minor': 123} for r in facts)
+    assert 'PRIVATE' not in response.text and 'raw_json' not in response.text
+    assert client.get(BASE + '/obligations?account=Other').json()['facts'] == []
+    protected = client.get(BASE + '/obligations?scope=protected').json()['facts']
+    assert [r['fact_id'] for r in protected] == ['protected']
+
+
 @pytest.mark.parametrize('root',[Path('/var/www/html/owner'),ROOT/'frontend'])
 def test_public_roots_rejected_before_sqlite_connect(root,monkeypatch):
     called=[]
@@ -122,6 +147,59 @@ def test_overview_and_drilldown_conserve_signed_allocations(env):
     assert client.get(BASE + '/transactions?currency=USD').json()['total'] == 1
 
 
+def test_exact_category_drilldown_excludes_nested_categories(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        tx(db, 'food', amount_minor=-100, expense_minor=100)
+        tx(db, 'delivery', category_id='expense.food.delivery', amount_minor=-200, expense_minor=200)
+    # The legacy prefix selector remains the hierarchy-wide search.
+    prefix = client.get(BASE + '/transactions', params={'category': 'expense.food'}).json()
+    assert prefix['total'] == 2
+    response = client.get(BASE + '/transactions', params={'category': 'expense.food', 'category_mode': 'exact'})
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert [r['entry_id'] for r in detail['items']] == ['food']
+    band = next(r for r in client.get(BASE + '/overview').json()['categories'] if r['category_id'] == 'expense.food')
+    assert sum(r['amount_minor'] for r in detail['items']) == band['amount_minor'] == -100
+
+
+def test_category_bands_separate_mixed_flows_and_reconcile_exact_drilldowns(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        tx(db, 'food', amount_minor=-1000, expense_minor=1000)
+        tx(db, 'correction', flow='adjustment', amount_minor=200, expense_minor=-200)
+        tx(db, 'delivery', category_id='expense.food.delivery', amount_minor=-300, expense_minor=300)
+        tx(db, 'recovery', category_id='expense.refund', amount_minor=50, expense_minor=-50)
+        tx(db, 'pay', category_id='income.salary', flow='income', amount_minor=2000, income_minor=2000, expense_minor=0)
+        tx(db, 'pay-reversal', category_id='income.salary', flow='income', amount_minor=-100, income_minor=-100, expense_minor=0)
+        # Effective FLOW overrides raw expense for transfer categories, and falls back to unresolved.
+        tx(db, 'card', category_id='transfer.card', flow='expense', amount_minor=-400, expense_minor=400)
+        tx(db, 'unknown', category_id='other', flow=None, amount_minor=-10, expense_minor=10)
+        tx(db, 'investment', flow='investment', amount_minor=-20, expense_minor=20)
+        tx(db, 'financing', flow='financing', amount_minor=30, expense_minor=-30)
+    overview = client.get(BASE + '/overview').json()
+    bands = overview['categories']
+    food = [r for r in bands if r['category_id'] == 'expense.food']
+    assert len(food) == 4  # expense, adjustment, investment and financing stay distinct.
+    assert all({'flow', 'income_minor', 'expense_minor', 'amount_minor', 'count'} <= r.keys() for r in bands)
+    assert next(r for r in food if r['flow'] == 'expense')['expense_minor'] == 1000
+    assert next(r for r in food if r['flow'] == 'adjustment')['expense_minor'] == 0
+    for band in bands:
+        params = {'category': band['category_id'], 'category_mode': 'exact', 'flow': band['flow']}
+        response = client.get(BASE + '/transactions', params=params)
+        assert response.status_code == 200, response.text
+        detail = response.json()
+        assert detail['total'] == band['count']
+        assert sum(r['amount_minor'] for r in detail['items']) == band['amount_minor']
+        totals = client.get(BASE + '/overview', params=params).json()['totals'][0]
+        assert (totals['income_minor'], totals['expense_minor']) == (band['income_minor'], band['expense_minor'])
+    assert sum(r['income_minor'] for r in bands) == overview['totals'][0]['income_minor'] == 1900
+    assert sum(r['expense_minor'] for r in bands) == overview['totals'][0]['expense_minor'] == 1250
+    assert next(r for r in bands if r['category_id'] == 'expense.refund')['expense_minor'] == -50
+    assert {r['entry_id'] for r in client.get(BASE + '/transactions?flow=transfer').json()['items']} == {'card'}
+    assert {r['entry_id'] for r in client.get(BASE + '/transactions?flow=unresolved').json()['items']} == {'unknown'}
+
+
 def test_transactions_bound_search_escape_and_safe_projection(env):
     client, path, _, _ = env
     with sqlite3.connect(path) as db:
@@ -138,6 +216,39 @@ def test_transactions_bound_search_escape_and_safe_projection(env):
     assert result['total'] == 1
     assert result['items'][0]['drive_url'].startswith('https://drive.google.com/')
     assert client.get(BASE + '/transactions?limit=1&offset=1').json()['total'] == 2
+
+
+@pytest.mark.parametrize('identifier', ['tx_id', 'event_id'])
+def test_raw_payroll_record_id_drilldown_preserves_regular_filters(env, identifier):
+    client, path, _, _ = env
+    raw_id = 'raw-payroll-link'
+    with sqlite3.connect(path) as db:
+        tx(db, 'eligible', record_id='bank:raw-payroll-link', **{identifier: raw_id})
+        for name, override in [
+            ('currency', {'currency': 'USD'}), ('account', {'account': 'Other'}),
+            ('scope', {'allocation': 'mother'}), ('dataset', {'dataset': 'investment'}),
+            ('category', {'category_id': 'expense.food.delivery'}), ('flow', {'flow': 'adjustment'}),
+            ('search', {'description': 'unrelated', 'merchant': 'unrelated'}),
+            ('old', {'date': '2024-12-31'}), ('future', {'date': '2026-01-01'}),
+            ('pending', {'record_status': 'pending'}), ('duplicate', {'duplicate_of': 'eligible'}),
+            ('excluded', {'included': 0}),
+        ]:
+            tx(db, name, **{identifier: raw_id}, **override)
+        insert(db, 'payroll_cashflow_bridge', payroll_id='pay', pay_date='2025-02-10', currency='CAD')
+        insert(db, 'payroll_component_links', payroll_id='pay', code='NET', **{identifier: raw_id})
+    linked = client.get(BASE + '/compensation').json()['links'][0][identifier]
+    params = {'record_id': linked, 'start': '2025-01-01', 'end': '2025-12-31',
+              'account': 'Checking', 'dataset': 'bank', 'category': 'expense.food',
+              'category_mode': 'exact', 'flow': 'expense', 'q': 'Synthetic', 'limit': 1}
+    response = client.get(BASE + '/transactions', params=params)
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert detail['total'] == 1
+    assert [r['entry_id'] for r in detail['items']] == ['eligible']
+    assert client.get(BASE + '/transactions', params={**params, 'offset': 1}).json()['items'] == []
+    assert client.get(BASE + '/transactions', params={**params, 'record_id': "' OR 1=1--"}).json()['total'] == 0
+    # Canonical record IDs still work alongside the two raw identifiers.
+    assert client.get(BASE + '/transactions', params={**params, 'record_id': 'bank:raw-payroll-link'}).json()['total'] == 1
 
 
 def test_transfers_pair_once_complete_network_and_boundary_dates(env):
@@ -214,6 +325,81 @@ def test_compensation_dated_awards_and_payroll_components(env):
     assert data['links'][0]['tx_id'] == 'bank'
     assert data['awards'][0]['grant_currency'] == 'USD'
     assert 'raw_json' not in response.text
+
+
+@pytest.fixture
+def vesting_env(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        tx(db, 'latest', date='2026-06-30')
+        for ident, grant_date in [('old', '2025-01-01'), ('current', '2026-01-01')]:
+            insert(db, 'equity_awards', award_id=ident, employer='Microsoft', grant_currency='USD',
+                   award_date=grant_date, granted_shares='10', status='unvested', included_in_assets=0)
+        for ident, vest_date in [('old', '2025-12-31'), ('old', '2026-01-01'), ('old', '2026-12-31'),
+                                 ('old', '2027-01-01'), ('current', '2027-06-01')]:
+            insert(db, 'equity_vesting_schedule', award_id=ident, vest_date=vest_date,
+                   theoretical_shares='2.5', percent_basis_points=2500, actual_vested_shares=None, status='scheduled')
+        for ident, day in [('prior', '2025-06-01'), ('selected', '2026-06-01'), ('future', '2027-06-01')]:
+            insert(db, 'payroll_cashflow_bridge', payroll_id=ident, pay_date=day, currency='CAD')
+            insert(db, 'payroll_components', payroll_id=ident, code='NET', amount_minor=100)
+            insert(db, 'payroll_component_links', payroll_id=ident, code='NET', tx_id=ident)
+    return client
+
+
+def test_compensation_default_horizon_ignores_grant_and_payroll_date_range(vesting_env):
+    client = vesting_env
+    result = client.get(BASE + '/compensation?start=2026-01-01&end=2026-12-31').json()
+    assert {r['award_id'] for r in result['awards']} == {'old', 'current'}
+    assert {(r['award_id'], r['vest_date']) for r in result['vesting']} == {
+        ('old', '2025-12-31'), ('old', '2026-01-01'), ('old', '2026-12-31'),
+        ('old', '2027-01-01'), ('current', '2027-06-01'),
+    }
+    assert all(r['actual_vested_shares'] is None and r['status'] == 'scheduled' for r in result['vesting'])
+    assert all(r['included_in_assets'] == 0 for r in result['awards'])
+    for key in ('payroll', 'components', 'links'):
+        assert [r['payroll_id'] for r in result[key]] == ['selected']
+    assert result['coverage']['vesting']['policy'] == 'horizon'
+    assert result['coverage']['vesting']['date_basis'] == 'vest_date'
+    assert result['coverage']['vesting']['start'] is None
+    assert result['coverage']['vesting']['end'] is None
+    assert result['coverage']['awards']['date_policy'] == 'all_grant_references'
+    # No dates still means the entire stored schedule, not latest recorded year.
+    assert len(client.get(BASE + '/compensation').json()['vesting']) == 5
+
+
+@pytest.mark.parametrize('dates,expected', [
+    ({'start': '2026-01-01', 'end': '2026-12-31'}, {('old', '2026-01-01'), ('old', '2026-12-31')}),
+    ({'start': '2027-01-01'}, {('old', '2027-01-01'), ('current', '2027-06-01')}),
+    ({'end': '2025-12-31'}, {('old', '2025-12-31')}),
+    ({'start': '2028-01-01', 'end': '2028-12-31'}, set()),
+])
+def test_compensation_range_filters_vest_dates_not_grant_dates(vesting_env, dates, expected):
+    response = vesting_env.get(BASE + '/compensation', params={'vesting_policy': 'range', **dates})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert {(r['award_id'], r['vest_date']) for r in result['vesting']} == expected
+    # All eligible grant references remain explicit context, even if no event falls in range.
+    assert {r['award_id'] for r in result['awards']} == {'old', 'current'}
+    assert result['coverage']['awards']['date_policy'] == 'all_grant_references'
+    coverage = result['coverage']['vesting']
+    assert coverage['total'] == len(expected)
+    assert coverage['complete'] is True
+    assert coverage['policy'] == 'range'
+    assert coverage['date_basis'] == 'vest_date'
+    assert coverage['start'] == dates.get('start')
+    assert coverage['end'] == dates.get('end')
+    assert all(r['actual_vested_shares'] is None and r['status'] == 'scheduled' for r in result['vesting'])
+
+
+@pytest.mark.parametrize('policy', ['horizon', 'range'])
+@pytest.mark.parametrize('selector', [{'scope': 'protected'}, {'account': 'Checking'}])
+def test_compensation_vesting_preserves_explicit_account_and_protected_exclusions(vesting_env, policy, selector):
+    response = vesting_env.get(BASE + '/compensation', params={'vesting_policy': policy, **selector})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['awards'] == result['vesting'] == []
+    assert result['coverage']['awards']['total'] == result['coverage']['vesting']['total'] == 0
+    assert any('protected scope' in warning and 'account selection' in warning for warning in result['warnings'])
 
 
 def test_obligations_allowlist_and_source_backed_positions(env):
@@ -314,7 +500,7 @@ def test_upcoming_tax_schedule_separate_from_filtered_paid_history(env):
     assert data['upcoming_tax_schedule'][0]['bill_id'] == 'future'
 
 
-@pytest.mark.parametrize('params', ['limit=101', 'offset=-1', 'scope=other', 'currency=EUR', 'start=2025-02-30', 'start=1900-01-01&end=2025-01-01', 'start=2026-01-01&end=2025-01-01', 'q=' + 'x'*121, 'path=/tmp/other', 'sql=DROP', 'dataset=other'])
+@pytest.mark.parametrize('params', ['limit=101', 'offset=-1', 'scope=other', 'currency=EUR', 'start=2025-02-30', 'start=1900-01-01&end=2025-01-01', 'start=2026-01-01&end=2025-01-01', 'q=' + 'x'*121, 'path=/tmp/other', 'sql=DROP', 'dataset=other', 'category_mode=other', 'flow=other', 'vesting_policy=other'])
 def test_invalid_filters_rejected(env, params):
     assert env[0].get(BASE + '/transactions?' + params).status_code == 422
 

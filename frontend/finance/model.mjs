@@ -52,7 +52,7 @@ export function monthlyPeriods(periods=[]) {
  return periods.filter(p=>{const days=(Date.parse(p.end_date)-Date.parse(p.start_date))/86400000;return Number.isFinite(days)&&days>=0&&days<=35;}).sort((a,b)=>a.start_date.localeCompare(b.start_date)).filter(p=>{if(accepted.some(q=>q.account===p.account&&q.currency===p.currency&&q.start_date<p.end_date&&q.end_date>p.start_date))return false;accepted.push(p);return true;});
 }
 const endpoints = new Set(['meta','overview','transactions','transfers','investments','compensation','obligations','quotes']);
-const filters = new Set(['start','end','currency','scope','account','category','dataset','record_id','q','limit','offset','symbols']);
+const filters = new Set(['start','end','currency','scope','account','category','category_mode','flow','vesting_policy','dataset','record_id','q','limit','offset','symbols']);
 export function financeAPI(fetcher=globalThis.fetch.bind(globalThis),timeout=15000) {
  return async (endpoint, query={}, signal) => {
   if (!endpoints.has(endpoint)) throw new Error('Invalid finance endpoint');

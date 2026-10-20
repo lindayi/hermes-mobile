@@ -22,7 +22,7 @@ export function alluvial(rows,currency,inspect){
   s.append(svg('rect',{x:188,y:left,width:12,height:groupHeight,rx:3,fill:palette[index%6]}),svg('text',{x:177,y:left+14,'text-anchor':'end',class:'chart-label'},name));
   items.forEach((r,j)=>{const h=heights[j],sy=left,y=right,color=palette[index++%6];
    const path=svg('path',{d:`M200 ${sy} C410 ${sy} 475 ${y} 680 ${y} L680 ${y+h} C475 ${y+h} 410 ${sy+h} 200 ${sy+h} Z`,fill:color,opacity:'.32',class:'flow-link',tabindex:0,role:'button','aria-label':`Inspect ${r.label}`},svg('title',{},`${r.label}: ${money(r.amount_minor,currency)} · ${r.direction}`));
-   const run=()=>inspect(r.category_id);path.addEventListener('click',run);path.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();run();}});
+   const run=()=>inspect(r);path.addEventListener('click',run);path.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();run();}});
    s.append(path,svg('rect',{x:680,y,width:5,height:h,fill:color}),svg('text',{x:700,y:y+12,class:'chart-label'},String(r.label).slice(0,28)),svg('text',{x:700,y:y+29,class:'chart-value'},money(r.amount_minor,currency)));
    left+=h;right+=Math.max(34,h)+12;
   });left+=22;

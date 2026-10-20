@@ -18,6 +18,12 @@ Optional `dashboard_notes` stores contextual findings in plain text: note_id pri
 
 The user confirmation and original-source review pipeline remain separate from this dashboard. Changes to private records become visible on later API requests; chart totals are not generated into public assets. A historical source date does not become current when a page is loaded today.
 
+## Chart and linked-record selectors
+
+A category band represents an exact category and effective flow, not its entire prefix subtree. The backend preserves separate signed income/expense aggregates and the frontend carries exact category + flow into the matching transaction query. Ordinary category-prefix search remains available explicitly. Clicking a linked transfer leg visibly switches to that leg's date/account/currency and all-scope/all-dataset context; crossing a year boundary or family earmark must not make an already displayed counterpart disappear. Payroll links may use exact original IDs as well as qualified record IDs.
+
+The compensation schedule has an explicit full-horizon default, separate from payroll dates. Selecting vest-date range filters scheduled events by vest date, not award date, and retains their grant-reference context. No date passage silently creates actual vested shares.
+
 ## Quotes and estimated valuations
 
 Only a fixed allowlisted set of public symbols is requested from external services. No account IDs, holdings quantities, user identity or private transaction information is sent. Current-price estimates depend on last-known share quantities and are not a refreshed broker account. Unsupported funds/GICs stay dated observations, not invented live quotes. Provider failures, stale timestamps and FX observation dates are visible. The bank exchange rate is an indicative reference, not an executable conversion rate. Sources can be delayed/unavailable, particularly unofficial quote endpoints.
