@@ -263,7 +263,7 @@ _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE = {
 }
 
 _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE = {
-    'deploy/cloud_coordinator.py': '887e0668e262d7c33df587b6d631046e04bb67afd210c7e22657ff62012999df',
+    'deploy/cloud_coordinator.py': '9fd27a8a0725f4e6176b42bd9aecd7fbde25d55ced87acbe39356bd1887c0f55',
     'deploy/task_receipts.py': '5b8ab1e609f3febf3f8f20dd35da3b3521b1d9513ecdc3555eb466e4bf660a5a',
 }
 

@@ -1976,7 +1976,14 @@ Source receipt-anchor publication has its own durable reservation counter, cappe
 at the source-repair limit. The reservation is charged atomically before posting,
 survives restart and re-enrollment, and is not charged again when recovering an
 existing anchor. Therefore main changes before task claim cannot create an
-unbounded sequence of owner comments.
+unbounded sequence of owner comments. An exhausted source-anchor counter blocks a
+new reservation in planning and emits the existing budget outcome once; it must
+not report a repair as started. An already-reserved matching anchor remains
+recoverable at the ceiling under the same identity checks. If capacity changes
+between planning and dispatch, the apply summary reports `source-anchor-budget`
+and clears `repair_requested`; the next scan emits its normal deduplicated budget
+outcome. Uncertain anchor publication likewise clears `repair_requested` without
+pretending that a source task was dispatched.
 Compaction preserves every action correlated by map key, embedded reservation key,
 or task ID to a retained abandonment root, and conflicting copies of retained
 receipt proofs. Missing or foreign issue fields never sever that correlation.

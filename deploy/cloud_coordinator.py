@@ -7903,11 +7903,15 @@ class Coordinator:
                 )
             )
         )
+        source_anchor_budget_stop = self._source_anchor_capacity_exhausted(repair)
+        if source_anchor_budget_stop:
+            repair = None
         source_budget_stop = (
             not needs_reconciliation
             and budget_needed
             and snapshot["enrollment"].get("neutral_attempts_unknown") is not True
-            and (attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT)
+            and (attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT
+                 or source_anchor_budget_stop)
         )
         neutral_budget_stop = (
             needs_reconciliation and budget_needed
@@ -7931,7 +7935,15 @@ class Coordinator:
             subject = f"PR #{number}"
             if type(linked_issue) is int:
                 subject += f" (linked issue #{linked_issue})"
-            if no_progress >= NO_PROGRESS_LIMIT:
+            if source_anchor_budget_stop:
+                reservations = snapshot["enrollment"]["source_anchor_reservations"]
+                message = (
+                    f"Source repair stopped for {subject}: receipt-anchor capacity "
+                    f"is exhausted ({reservations}/{REPAIR_LIMIT} reservations). "
+                    "No new task was started; existing anchors and history are retained."
+                )
+                snapshot["budget_incident"] = f"source-anchor-limit-{reservations}"
+            elif no_progress >= NO_PROGRESS_LIMIT:
                 message = (
                     f"Source repair stopped for {subject} after {no_progress} consecutive "
                     f"completed attempts showed no verified forward progress "
@@ -9840,6 +9852,19 @@ class Coordinator:
             and not _cloud_agent_active(workflows, action["head_ref"])
         )
 
+    def _source_anchor_capacity_exhausted(self, action):
+        if (not isinstance(action, dict) or action.get("kind") != "fix"
+                or action.get("task_type") not in {None, "source", "review-followup"}):
+            return False
+        state = self.store.snapshot()
+        enrollment = state["enrollments"].get(str(action.get("issue")), {})
+        if enrollment.get("source_anchor_reservations", 0) < REPAIR_LIMIT:
+            return False
+        request = _source_receipt_anchor_request(action, "reservation")
+        # Existing reservations still use normal immutable-anchor validation;
+        # reaching the cap only prevents creating another anchor.
+        return request is not None and request["key"] not in state["outbox"]
+
     def _ensure_neutral_receipt_anchor(self, action):
         return self._ensure_receipt_anchor(action, source=False)
 
@@ -10182,11 +10207,15 @@ class Coordinator:
                 or _cloud_agent_active(workflows, branch)):
             return "agent-running"
         if neutral or source_anchor:
+            if source_anchor and self._source_anchor_capacity_exhausted(action):
+                return "source-anchor-budget"
             anchor = (
                 self._ensure_receipt_anchor(action, source=True) if source_anchor
                 else self._ensure_neutral_receipt_anchor(action)
             )
             if not isinstance(anchor, dict) or anchor.get("status") != "sent":
+                if source_anchor and self._source_anchor_capacity_exhausted(action):
+                    return "source-anchor-budget"
                 return "receipt-anchor-uncertain"
             action = action | {
                 "dispatch_nonce": anchor["nonce"],
@@ -11211,7 +11240,8 @@ class Coordinator:
             if action:
                 result = self._dispatch_task(action)
                 if result in {"agent-running", "superseded", "conflict", "behind", "draft",
-                              "mergeability-unknown"}:
+                              "mergeability-unknown", "source-anchor-budget",
+                              "receipt-anchor-uncertain"}:
                     pr_plan["repair"] = None
                     if result == "mergeability-unknown":
                         pr_plan["reasons"] = [reason for reason in pr_plan["reasons"]
