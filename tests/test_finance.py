@@ -64,6 +64,17 @@ def test_registered_room_facts_and_mortgage_intent_are_available_as_dated_contex
     assert 'td_mortgage_payment' in {r['key'] for r in result['context']}
 
 
+def test_obligation_nested_numeric_overflow_remains_json_serializable(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        insert(db, 'facts', fact_id='overflow', fact_name='rrsp_room', value_json='{"amount_minor":1e999,"nested":[-1e999,{"value":1e999,"finite":1.5}],"zero":0}', reviewer='cross_tax')
+    response = client.get(BASE + '/obligations')
+    assert response.status_code == 200
+    value = next(row['value'] for row in response.json()['facts'] if row['fact_id'] == 'overflow')
+    assert value == {'amount_minor': None, 'nested': [None, {'value': None, 'finite': 1.5}], 'zero': 0}
+    assert 'Infinity' not in response.text
+
+
 def test_obligation_fact_numeric_family_is_bounded_and_keeps_safe_projection(env):
     client, path, _, _ = env
     prefix, suffix = 'rrsp_remaining_with_', '_hbp_from_existing_contributions'
@@ -326,6 +337,20 @@ def test_transfers_pair_once_complete_network_and_boundary_dates(env):
     assert pairs['l0']['credit']['date'] == '2026-01-01'
     assert pairs['missing']['credit'] is None
     assert result['network']['coverage']['complete'] is True
+
+
+def test_investment_policy_exclusions_do_not_count_date_only_exclusions(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        for month, start, end in [('march', '2025-03-01', '2025-03-31'), ('april', '2025-04-01', '2025-04-30')]:
+            insert(db, 'investment_balance_history', observation_id=month, account='Broker', as_of=end, currency='CAD', source_rank=1, allocation='personal', planning_protected=0)
+            insert(db, 'investment_period_metrics', period_id=month, account='Broker', start_date=start, end_date=end, currency='CAD', allocation='personal', planning_protected=0)
+        insert(db, 'investment_balance_history', observation_id='duplicate-april', account='Broker', as_of='2025-04-30', currency='CAD', source_rank=2, allocation='personal', planning_protected=0)
+    result = client.get(BASE + '/investments?start=2025-04-01&end=2025-04-30').json()
+    assert [row['observation_id'] for row in result['history']] == ['april']
+    assert [row['period_id'] for row in result['periods']] == ['april']
+    assert result['coverage']['history']['excluded_by_coherence_or_period_policy'] == 1
+    assert result['coverage']['periods']['excluded_by_coherence_or_period_policy'] == 0
 
 
 def test_investments_preserve_unknown_basis_and_nonoverlapping_periods(env):

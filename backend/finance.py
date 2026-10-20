@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 import sqlite3
 import json
+import math
 import time
 from urllib.parse import urlsplit
 
@@ -368,7 +369,8 @@ def query_investments(db, f):
                      CASE WHEN investment_period_metrics.flow_complete=1 THEN 0 ELSE 1 END,investment_period_metrics.end_date,investment_period_metrics.period_id))'''
         result[key], result['coverage'][key] = select_bounded(db, table, fields, pred, params, f'ORDER BY {date_column or "as_of"} DESC,{fields[0]}')
         if key in ('holdings', 'periods', 'history'):
-            eligible = db.execute(f'SELECT COUNT(*) FROM {table} WHERE {where}', args).fetchone()[0]
+            candidate_where, candidate_args = dated_predicate(where, args, f, date_column) if date_column else (where, args)
+            eligible = db.execute(f'SELECT COUNT(*) FROM {table} WHERE {candidate_where}', candidate_args).fetchone()[0]
             result['coverage'][key]['excluded_by_coherence_or_period_policy'] = eligible - result['coverage'][key]['total']
     return result
 
@@ -457,6 +459,8 @@ def parsed_value(raw):
     except (ValueError, RecursionError):
         return None
     def clean(v, depth=0):
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
         if depth > 6:
             return None
         if isinstance(v, dict):
