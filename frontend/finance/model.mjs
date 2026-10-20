@@ -3,9 +3,9 @@ export function reportedReturn(value,method) {
  const n=typeof value==='string'&&value.length<=32&&/^-?[0-9]+(?:\.[0-9]+)?$/.test(value)?Number(value):value;
  return finite(n)?`${n}% (${method||'method unavailable'})`:'Unavailable';
 }
-export function money(value,currency='CAD') {
- if(!finite(value))return 'Unavailable';
- return new Intl.NumberFormat('en-CA',{style:'currency',currency:currency==='USD'?'USD':'CAD',currencyDisplay:'code',maximumFractionDigits:2}).format(value/100);
+export function money(value,currency) {
+ if(!finite(value)||!['CAD','USD'].includes(currency))return 'Unavailable';
+ return new Intl.NumberFormat('en-CA',{style:'currency',currency,currencyDisplay:'code',maximumFractionDigits:2}).format(value/100);
 }
 export function initialRange(range={}) {return /^\d{4}-\d{2}-\d{2}$/.test(range.end||'')?{start:range.end.slice(0,4)+'-01-01',end:range.end}:{start:'',end:''};}
 export function evidenceURL(value) {
@@ -24,8 +24,10 @@ export function recordedPosition(data,currency) {
  const sum=(rows,get)=>rows.length&&rows.every(r=>finite(get(r)))?rows.reduce((n,r)=>n+get(r),0):null;
  const investments=sum(investmentRows,r=>r.market_value_minor),cash=sum(cashRows,value),debt=sum(debtRows,value);
  const protection=r=>r.planning_protected??r.current_planning_protected;
- const known=r=>[0,1,false,true].includes(protection(r));
- const protectedRow=r=>protection(r)===1||protection(r)===true;
+ // Match scope_sql: case-insensitive mother% / family%, without trimming or a delimiter requirement.
+ const family=r=>/^(mother|family)/i.test(r.allocation??'');
+ const known=r=>family(r)||[0,1,false,true].includes(protection(r));
+ const protectedRow=r=>family(r)||protection(r)===1||protection(r)===true;
  const liquid=cashRows.length&&cashRows.every(r=>known(r)&&finite(value(r)))?cashRows.filter(r=>!protectedRow(r)).reduce((n,r)=>n+value(r),0):null;
  const all=[...investmentRows.map(r=>({...r,position_value:r.market_value_minor})),...cashRows.map(r=>({...r,position_value:value(r)}))];
  const restricted=all.length&&all.every(r=>known(r)&&finite(r.position_value))?all.filter(protectedRow).reduce((n,r)=>n+r.position_value,0):null;

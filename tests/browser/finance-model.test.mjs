@@ -19,6 +19,11 @@ test('unknown money, signed flows, exact dates and evidence URLs stay conservati
  assert.deepEqual(flowRows([{category_id:'expense.food',amount_minor:-500,count:1}],[])[0].direction,'flow');
  assert.equal(monthlyPeriods([{account:'A',start_date:'2024-01-01',end_date:'2024-12-31'},{account:'A',start_date:'2024-01-01',end_date:'2024-01-31'}]).length,1);
 });
+test('money requires an explicit supported currency without relabeling unknown or EUR as CAD',async()=>{
+ const {money}=await import(moduleURL);
+ for(const currency of [undefined,null,'','unknown','EUR'])assert.equal(money(123,currency),'Unavailable',`currency ${currency}`);
+ assert.equal(money(123,'CAD'),'CAD 1.23');assert.equal(money(-123,'USD'),'-USD 1.23');
+});
 test('cashflow uses typed expense sign and maps only supported share symbols',async()=>{
  const {flowRows,quoteSymbol}=await import(moduleURL);
  const rows=flowRows([{category_id:'food',flow:'expense',amount_minor:-1000,expense_minor:1000},{category_id:'food_refund',flow:'expense',amount_minor:200,expense_minor:-200}],[]);
@@ -33,6 +38,18 @@ test('recorded position keeps included investment cash and restricted liquidity 
  assert.deepEqual(result,{investments:10000,cash:8000,liquid:5000,restricted:3000,debt:4000,net:14000});
  assert.equal(recordedPosition({balances:[],bank_balances:[],liabilities:[]},'CAD').net,null);
  assert.equal(recordedPosition({balances:[{currency:'CAD',market_value_minor:null}],bank_balances:[{currency:'CAD',amount_minor:100}],liabilities:[{currency:'CAD',amount_minor:0}]},'CAD').net,null);
+});
+test('recorded position protects mother and family allocation prefixes independently of flags',async()=>{
+ const {recordedPosition}=await import(moduleURL);
+ for(const allocation of ['mother_reserved','family','MOTHER','Family_reserved','motherOther','familyOther'])for(const planning_protected of [0,false,null,undefined]){
+  const row={currency:'CAD',allocation,planning_protected};
+  assert.deepEqual(recordedPosition({balances:[{...row,market_value_minor:10000}],bank_balances:[{...row,amount_minor:3000},{currency:'CAD',allocation:'personal',amount_minor:5000,current_planning_protected:0}],liabilities:[{currency:'CAD',amount_minor:4000}]},'CAD'),{investments:10000,cash:8000,liquid:5000,restricted:13000,debt:4000,net:14000},`${allocation} / ${planning_protected}`);
+ }
+ for(const allocation of ['personal','other_family',' mother_reserved',null,undefined]){
+  const result=recordedPosition({bank_balances:[{currency:'CAD',allocation,amount_minor:3000,planning_protected:0}]},'CAD');
+  assert.equal(result.liquid,3000);assert.equal(result.restricted,0);
+ }
+ const unknown=recordedPosition({bank_balances:[{currency:'CAD',allocation:'personal',amount_minor:3000}]},'CAD');assert.equal(unknown.liquid,null);assert.equal(unknown.restricted,null);
 });
 test('monthly performance retains cross-month statement windows without overlapping observations',async()=>{
  const {monthlyPeriods}=await import(moduleURL);

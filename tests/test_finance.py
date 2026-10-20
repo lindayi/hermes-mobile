@@ -251,6 +251,55 @@ def test_raw_payroll_record_id_drilldown_preserves_regular_filters(env, identifi
     assert client.get(BASE + '/transactions', params={**params, 'record_id': 'bank:raw-payroll-link'}).json()['total'] == 1
 
 
+@pytest.mark.parametrize('membership', [
+    {'dataset': 'investment'},
+    {'category': 'transfer.receiving', 'category_mode': 'exact'},
+    {'category': 'transfer.receiv', 'category_mode': 'prefix'},
+    {'dataset': 'investment', 'category': 'transfer.receiving', 'category_mode': 'exact'},
+])
+@pytest.mark.parametrize('receiving_allocation', ['personal', 'mother_reserved'])
+def test_transfer_membership_keeps_cross_date_receiving_endpoint(env, membership, receiving_allocation):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        insert(db, 'cash_links', link_id='year-boundary', debit_tx='debit',
+               credit_tx='credit', link_type='investment_funding', evidence='Synthetic pair')
+        for record, account, amount, day, dataset, category in [
+            ('debit', 'Checking', -200, '2025-12-31', 'bank', 'transfer.sending'),
+            ('credit', 'Broker', 200, '2026-01-01', 'investment', 'transfer.receiving'),
+        ]:
+            insert(db, 'linked_transfer_legs', link_id='year-boundary', record_id=record,
+                   account=account, amount_minor=amount, date=day, currency='CAD',
+                   allocation=receiving_allocation if record == 'credit' else 'personal', planning_protected=0)
+            tx(db, record, account=account, amount_minor=amount, date=day,
+               dataset=dataset, category_id=category, flow='transfer', expense_minor=0,
+               allocation=receiving_allocation if record == 'credit' else 'personal')
+    params = {'start': '2025-12-31', 'end': '2025-12-31', 'account': 'Checking', **membership}
+    response = client.get(BASE + '/transfers', params=params)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['total'] == 1
+    pair = result['items'][0]
+    assert pair['link_id'] == 'year-boundary'
+    assert pair['debit']['date'] == '2025-12-31'
+    assert pair['credit']['date'] == '2026-01-01'
+    assert pair['missing_counterpart'] is False
+    assert result['network']['links'] == [
+        {'source': 'Checking', 'target': 'Broker', 'currency': 'CAD', 'amount_minor': 200, 'count': 1},
+    ]
+    # Membership does not move the pair into the credit-date range or relax filters.
+    for override in [
+        {'start': '2026-01-01', 'end': '2026-01-01'},
+        {'account': 'Other'}, {'currency': 'USD'},
+        *([{'scope': 'protected'}] if receiving_allocation == 'personal' else []),
+        {'category': 'transfer.absent'},
+        {'dataset': 'bank', 'category': 'transfer.receiving', 'category_mode': 'exact'},
+    ]:
+        excluded = client.get(BASE + '/transfers', params={**params, **override})
+        assert excluded.status_code == 200, excluded.text
+        assert excluded.json()['total'] == 0, override
+        assert excluded.json()['network']['links'] == [], override
+
+
 def test_transfers_pair_once_complete_network_and_boundary_dates(env):
     client, path, _, _ = env
     with sqlite3.connect(path) as db:

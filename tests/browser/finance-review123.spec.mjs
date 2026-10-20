@@ -69,6 +69,28 @@ test('clicked transfer counterpart replaces source-date, account and scope predi
  const table=page.getByRole('table',{name:'Transactions',exact:true});assert.equal(await table.locator('tbody tr').count(),1);await table.getByText(credit.description,{exact:true}).waitFor();await table.getByText('CAD 500.00',{exact:true}).waitFor();assert.equal(await page.locator('[data-page-status]').textContent(),'1–1 of 1 records');assert.equal(await page.getByText(debit.description,{exact:true}).count(),0);
 });
 
+test('network account nodes keep paired transfers, source dates and scope when filtering either endpoint',{timeout:20000},async t=>{
+ const pairs=[{link_id:'synthetic-link',link_type:'own_cash',debit,credit,protected_boundary:true},{link_id:'synthetic-unrelated',link_type:'own_cash',debit:{...debit,account:'Synthetic other'},credit:{...credit,account:'Synthetic other'},protected_boundary:false}];
+ const transfers=q=>{
+  const items=pairs.filter(p=>(!q.start||p.debit.date>=q.start)&&(!q.end||p.debit.date<=q.end)&&[p.debit,p.credit].some(r=>r.currency===q.currency)&&[p.debit,p.credit].some(r=>q.scope==='all'||r.allocation==='personal')&&(!q.account||[p.debit,p.credit].some(r=>r.account===q.account)));
+  return {items,total:items.length,limit:25,offset:Number(q.offset||0),network:{links:items.map(p=>({source:p.debit.account,target:p.credit.account,amount_minor:Math.abs(p.debit.amount_minor),currency:p.debit.currency,count:1}))}};
+ };
+ const {page,calls,url}=await fixture(t,{responses:{transfers}});await page.goto(url);await ready(page);
+ await page.getByLabel('From',{exact:true}).fill(debit.date);await page.getByLabel('Through',{exact:true}).fill(debit.date);await page.getByLabel('Dataset').selectOption('bank');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
+ await page.getByRole('tab',{name:'Transfers',exact:true}).click();await ready(page);
+ assert.equal(await page.getByRole('table',{name:'Transfer evidence',exact:true}).locator('tbody tr').count(),2);
+ for(const account of [credit.account,debit.account]){
+  await page.getByRole('button',{name:'Inspect account '+account,exact:true}).click();await ready(page);
+  assert.equal(await page.getByRole('tab',{name:'Transfers',exact:true}).getAttribute('aria-selected'),'true');
+  assert.equal(calls.filter(c=>c.name==='transactions').length,0);
+  assert.deepEqual(last(calls,'transfers'),{start:debit.date,end:debit.date,currency:'CAD',scope:'personal',dataset:'bank',account,offset:'0',limit:'25'});
+  assert.deepEqual(await formValues(page),{start:debit.date,end:debit.date,currency:'CAD',scope:'personal',dataset:'bank',account});
+  const table=page.getByRole('table',{name:'Transfer evidence',exact:true});assert.equal(await table.locator('tbody tr').count(),1);
+  await table.getByText(debit.date,{exact:true}).waitFor();await table.getByText(credit.date,{exact:true}).waitFor();await table.getByRole('button',{name:credit.account,exact:true}).waitFor();
+  assert.equal(await page.locator('[data-page-status]').textContent(),'1–1 of 1 records');
+ }
+});
+
 test('category bands and table drill into exact authoritative flows with signed amount and count parity',{timeout:30000},async t=>{
  const {page,calls,url}=await fixture(t,{rows:categoryRows,responses:{overview:categoryOverview}});await page.goto(url);await ready(page);
  const cases=[['expense.food','expense','CAD 10.00','-CAD 10.00'],['expense.food','adjustment','CAD 2.00','CAD 2.00'],['expense.refund','expense','-CAD 1.00','CAD 1.00'],['expense.income','income','CAD 4.00','CAD 4.00']];
@@ -112,6 +134,30 @@ test('alluvial keeps skewed category bands, nodes and labels inside its viewBox 
  assert.deepEqual(overflow,[]);
  await page.getByText('Diagram shows the 12 largest categories by absolute materiality; the full signed table below retains every returned category.',{exact:true}).waitFor();
  await page.getByText('Cash-flow categories · table alternative',{exact:true}).click();assert.equal(await page.getByRole('table',{name:'Cash-flow categories',exact:true}).locator('tbody tr').count(),13);
+});
+
+test('unknown and unsupported source currencies never inherit the selected CAD label',{timeout:20000},async t=>{
+ const currencies=[undefined,null,'unknown','EUR','CAD','USD'];
+ const awards=currencies.map((grant_currency,i)=>({award_id:`synthetic-currency-${i}`,employer:'Synthetic employer',grant_currency,grant_value_minor:100000,granted_shares:10,status:'scheduled'}));
+ const holdings=currencies.map((currency,i)=>({account:'Synthetic cash',name:`Synthetic holding ${i}`,currency,market_value_minor:100000}));
+ const {page,url}=await fixture(t,{responses:{compensation:()=>({awards}),investments:()=>({holdings})}});await page.goto(url);await ready(page);
+ await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
+ const grants=page.getByRole('table',{name:'Grant reference values',exact:true});
+ for(let i=0;i<4;i++)assert.equal(await grants.locator('tbody tr').nth(i).locator('td').nth(4).textContent(),'Unavailable');
+ await grants.locator('tbody tr').nth(4).getByText('CAD 1,000.00',{exact:true}).waitFor();await grants.locator('tbody tr').nth(5).getByText('USD 1,000.00',{exact:true}).waitFor();
+ await page.getByRole('tab',{name:'Investments',exact:true}).click();await ready(page);
+ const rows=page.getByRole('table',{name:'Recorded holdings',exact:true}).locator('tbody tr');
+ for(let i=0;i<4;i++)assert.equal(await rows.nth(i).locator('td').nth(5).textContent(),'Unavailable');
+ await rows.nth(4).getByText('CAD 1,000.00',{exact:true}).waitFor();await rows.nth(5).getByText('USD 1,000.00',{exact:true}).waitFor();
+});
+
+test('overview treats family allocation assets as restricted even with an unprotected flag',{timeout:20000},async t=>{
+ const overview={balances:[{account:'Synthetic investments',currency:'CAD',allocation:'family',planning_protected:0,market_value_minor:10000}],bank_balances:[{account:'Synthetic protected',currency:'CAD',allocation:'mother_reserved',planning_protected:0,amount_minor:3000},{account:'Synthetic cash',currency:'CAD',allocation:'personal',planning_protected:0,amount_minor:5000}],liabilities:[{account:'Synthetic debt',currency:'CAD',amount_minor:4000}]};
+ const {page,url}=await fixture(t,{responses:{overview:()=>overview}});await page.goto(url);await ready(page);
+ await page.getByLabel('Scope').selectOption('all');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
+ await page.locator('[data-position="liquid"]').getByText('CAD 50.00',{exact:true}).waitFor();
+ await page.locator('[data-position="restricted"]').getByText('CAD 130.00',{exact:true}).waitFor();
+ await page.locator('[data-position="net"]').getByText('CAD 140.00',{exact:true}).waitFor();
 });
 
 test('vesting policy defaults to full horizon and explicitly selects vest dates without losing grant context',{timeout:20000},async t=>{

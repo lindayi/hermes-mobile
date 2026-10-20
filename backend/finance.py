@@ -104,10 +104,10 @@ def date_range(db, f):
     return start, end
 
 
-def transaction_predicate(db, f):
+def transaction_predicate(db, f, *, apply_dates=True):
     clauses = [VALID_TX, 'currency=?', scope_sql(f.scope, protected='current_planning_protected')]
     args = [f.currency]
-    start, end = date_range(db, f)
+    start, end = date_range(db, f) if apply_dates else (None, None)
     for value, sql in ((start, 'date>=?'), (end, 'date<=?'), (f.account, 'account=?')):
         if value is not None:
             clauses.append(sql)
@@ -248,8 +248,8 @@ def pair_predicate(db, f):
         clauses.append("(evidence LIKE ? ESCAPE '\\' OR debit_account LIKE ? ESCAPE '\\' OR credit_account LIKE ? ESCAPE '\\' OR link_type LIKE ? ESCAPE '\\')")
         args.extend(['%' + escaped_like(f.q) + '%'] * 4)
     if f.category or f.dataset != 'all':
-        # Hierarchy membership selects pairs without dropping the boundary counterpart.
-        tx_where, tx_args = transaction_predicate(db, f.model_copy(update={'q': '', 'account': None, 'record_id': None}))
+        # Source date/scope already select the pair; membership can match either endpoint.
+        tx_where, tx_args = transaction_predicate(db, f.model_copy(update={'q': '', 'account': None, 'record_id': None, 'scope': 'all'}), apply_dates=False)
         clauses.append(f'(debit_record_id IN (SELECT record_id FROM hierarchical_transactions WHERE {tx_where}) OR credit_record_id IN (SELECT record_id FROM hierarchical_transactions WHERE {tx_where}))')
         args.extend(tx_args * 2)
     return ' AND '.join(clauses), args
