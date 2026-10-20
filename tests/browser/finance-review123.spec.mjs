@@ -45,7 +45,7 @@ const categoryRows=[
  {...debit,record_id:'bank:synthetic-income',date:'2024-01-01',flow:'income',category_id:'expense.income',amount_minor:400,expense_minor:0,income_minor:400},
 ];
 function categoryOverview(q){
- const groups=new Map();for(const row of selected(categoryRows,q)){const key=row.category_id+'|'+row.flow;const group=groups.get(key)||{category_id:row.category_id,flow:row.flow,currency:row.currency,amount_minor:0,expense_minor:0,income_minor:0,count:0};for(const field of ['amount_minor','expense_minor','income_minor'])group[field]+=row[field];group.count++;groups.set(key,group);}return {categories:[...groups.values()]};
+ const groups=new Map();for(const row of selected(categoryRows,q)){const key=row.category_id+'|'+row.flow;const group=groups.get(key)||{category_id:row.category_id,flow:row.flow,amount_minor:0,expense_minor:0,income_minor:0,count:0};for(const field of ['amount_minor','expense_minor','income_minor'])group[field]+=row[field];group.count++;groups.set(key,group);}return {categories:[...groups.values()]};
 }
 
 for(const holdings of [[],[{security_key:'SYNTHETIC_PLAN',quantity:'10',quantity_basis:'plan units',currency:'CAD'}]])test(`quote coverage replaces loading without removing caveats for ${holdings.length?'unsupported':'empty'} holdings`,{timeout:20000},async t=>{
