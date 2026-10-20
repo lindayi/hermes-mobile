@@ -639,6 +639,11 @@ def create_app(settings=None, *, gateway_client=None):
         return JSONResponse({'detail':'Native state temporarily unavailable'},503)
 
     app.include_router(build_auth_router(auth),prefix=BASE)
+    # Finance shares the enrolled passkey session but is strictly owner-only.
+    from .finance import build_finance_router
+    from .finance_market import build_market_router
+    app.include_router(build_finance_router(auth, settings.profiles.get('default')))
+    app.include_router(build_market_router(auth))
     app.include_router(build_notifications_router(notifications,auth),prefix=BASE)
     app.include_router(build_profiles_router(ProfileProvisioner(auth,runner=subprocess.run if settings.profile_creation_enabled else None)),prefix=BASE)
     app.include_router(build_jobs_router(JobService(auth,gateways,delivery_targets=settings.job_delivery_targets,runtime_validator=require_binding)),prefix=BASE)

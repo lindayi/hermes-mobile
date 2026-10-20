@@ -325,6 +325,16 @@ _PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
 }
 
 
+# Issue #122 source family; independent literals, never derived from policy or
+# candidate bytes at runtime. Earlier app/build overlays remain historical.
+_ISSUE122_FINANCE_FIXTURE = {
+    'backend/app.py': '0140f22b01003b04bd64372991452888e5985a17b44d34b005855bbedad1a568',
+    'backend/finance.py': '21d442ad8bc6002711ab82dcb4f4975da93d6365face11941430ad44b3ebeae5',
+    'backend/finance_market.py': '4fb17c3fc66e3d094291b3192eee02366ee879da3298c027eb27e51b39e8e731',
+    'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
+}
+
+
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
             | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
@@ -345,7 +355,7 @@ def _source_files():
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
             | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
-            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
+            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE)
 
 
 def _source_ci():
@@ -824,6 +834,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE98_PHOTO_POLICY_FIXTURE)
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
     pending |= set(_PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
+    pending |= set(_ISSUE122_FINANCE_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -899,8 +910,12 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     } == _PENDING_ISSUE67_WORKFLOW_FIXTURE
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
-    } == _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
-    for path, digest in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE.items():
+    } == {
+        path: digest for path, digest in (
+            _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
+        ).items() if path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+    }
+    for path, digest in (_PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -925,11 +940,13 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in (
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
             | _ISSUE98_PHOTO_POLICY_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+            | _ISSUE122_FINANCE_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
                          | _ISSUE98_PHOTO_POLICY_FIXTURE
-                         | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE).items():
+                         | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+                         | _ISSUE122_FINANCE_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -1121,6 +1138,62 @@ def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, pat
     assert evidence == before
 
 
+def test_issue122_finance_source_family_is_complete_and_independent():
+    assert set(_ISSUE122_FINANCE_FIXTURE) == {
+        'backend/app.py', 'backend/finance.py', 'backend/finance_market.py',
+        'deploy/frontend_release.py',
+    }
+    assert {path: SOURCE_FINGERPRINTS[path] for path in _ISSUE122_FINANCE_FIXTURE} == (
+        _ISSUE122_FINANCE_FIXTURE
+    )
+    assert set(_ISSUE122_FINANCE_FIXTURE) <= SOURCE_CONTROL_PYTHON_FILES
+    assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract'
+               for path in _ISSUE122_FINANCE_FIXTURE)
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('path', sorted(_ISSUE122_FINANCE_FIXTURE))
+@pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
+def test_issue122_finance_source_changes_fail_closed(phase, path, change):
+    evidence = _phase_evidence(phase)
+    assert _blockers(evidence, phase) == set()
+    if change == 'missing':
+        evidence['main']['files'].pop(path)
+        blocker = 'main-source-missing'
+    elif change == 'malformed':
+        evidence['main']['files'][path] = 'not-a-sha256'
+        blocker = 'main-source-invalid'
+    else:
+        source = (Path(__file__).resolve().parents[1] / path).read_bytes()
+        evidence['main']['files'][path] = hashlib.sha256(
+            source + b'\n# unreviewed finance source mutation\n',
+        ).hexdigest()
+        blocker = 'execution-source-contract'
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': False, 'phase': phase, 'blockers': [blocker],
+    }
+    assert evidence == before
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize(('path', 'digest'), [
+    ('backend/app.py', '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7'),
+    ('deploy/frontend_release.py', '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3'),
+])
+def test_issue122_historical_source_pins_are_preserved_but_not_current(phase, path, digest):
+    historical = _MERGED_MAIN_SOURCE_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+    assert historical[path] == digest
+    assert _ISSUE122_FINANCE_FIXTURE[path] != digest
+    evidence = _phase_evidence(phase)
+    evidence['main']['files'][path] = digest
+    before = copy.deepcopy(evidence)
+    assert validate_transition(evidence, phase=phase) == {
+        'ready': False, 'phase': phase, 'blockers': ['execution-source-contract'],
+    }
+    assert evidence == before
+
+
 def test_reviewed_static_python_closure_is_complete_and_has_no_dynamic_imports():
     closure, dynamic_imports, unresolved_imports = _static_python_control_closure()
     assert closure == SOURCE_CONTROL_PYTHON_FILES
@@ -1139,6 +1212,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'backend/background_delivery.py', 'backend/catalog_search.py',
         'backend/chat_snapshot.py', 'backend/clarifications.py', 'backend/configuration.py',
         'backend/context_compression_presentation.py', 'backend/delivery.py',
+        'backend/finance.py', 'backend/finance_market.py',
         'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
         'backend/native_catalog.py', 'backend/native_run_controls.py', 'backend/notification_policy.py',
         'backend/notifications.py', 'backend/operational_notifications.py',
@@ -1158,7 +1232,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     starter_bridge = {'deploy/issue_starter.py'}
     assert closure == shared | coordinator | starter_bridge
-    assert len(closure) == 42
+    assert len(closure) == 44
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)

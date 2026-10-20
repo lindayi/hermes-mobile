@@ -27,13 +27,13 @@ def build_frontend(source: Path, destination: Path) -> Path:
             if key in seen and seen[key] != str(path):
                 raise ValueError('Case-colliding public paths')
             seen[key] = str(path)
-    digest = hashlib.sha256(b'hermes-frontend-release-v1\0')
+    digest = hashlib.sha256(b'hermes-frontend-release-v2\0')
     for name, data in sorted(files.items()):
         encoded = name.encode('utf-8')
         digest.update(len(encoded).to_bytes(8, 'big') + encoded)
         digest.update(len(data).to_bytes(8, 'big') + data)
     version = digest.hexdigest()[:24]
-    mapping = {name: name if name == 'index.html' else str(Path(name).with_name(
+    mapping = {name: name if Path(name).name == 'index.html' else str(Path(name).with_name(
         f'{Path(name).stem}.{version}{Path(name).suffix}')) for name in files}
     output = {}
     for name, data in files.items():
