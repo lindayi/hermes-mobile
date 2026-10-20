@@ -48,14 +48,30 @@ def rows(db, sql, params=()):
     return [dict(row) for row in db.execute(sql, params)]
 
 
+def category_label(category):
+    return ' / '.join(part.replace('_', ' ').replace('-', ' ').title() for part in (category or 'Uncategorized').split('.'))
+
+
+def category_projection(db):
+    # Allocation components (usually "whole") are not taxonomy labels.
+    categories = f'(SELECT category_id,MIN(parent_id) parent_id FROM hierarchical_transactions WHERE {VALID_TX} GROUP BY category_id) t'
+    if table_exists(db, 'category_nodes'):
+        return categories + ' LEFT JOIN category_nodes n ON n.category_id=t.category_id', ['t.category_id', 'n.label', 'CASE WHEN n.category_id IS NOT NULL THEN n.parent_id ELSE t.parent_id END parent_id']
+    return categories, ['t.category_id', 'NULL label', 't.parent_id']
+
+
 def query_meta(db, filters=None):
     span = dict(db.execute(f'SELECT MIN(date) start, MAX(date) end FROM hierarchical_transactions WHERE {VALID_TX}').fetchone())
     accounts, account_coverage = select_bounded(db, f'(SELECT account,allocation,planning_protected FROM account_policies UNION SELECT account,allocation,current_planning_protected planning_protected FROM hierarchical_transactions WHERE {VALID_TX} AND account NOT IN (SELECT account FROM account_policies))', ['account','allocation','planning_protected'], order='ORDER BY account')
+    table, fields = category_projection(db)
+    categories, category_coverage = select_bounded(db, table, fields, order='ORDER BY t.category_id')
+    for category in categories:
+        category['label'] = category['label'] or category_label(category['category_id'])
     return {'meta': metadata(), 'range': span,
             'accounts': accounts,
             'currencies': [r[0] for r in db.execute(f'SELECT DISTINCT currency FROM hierarchical_transactions WHERE {VALID_TX} ORDER BY currency')],
-            'categories': rows(db, f'SELECT DISTINCT category_id, component label, parent_id FROM hierarchical_transactions WHERE {VALID_TX} ORDER BY category_id LIMIT 1000'),
-            'coverage': {'range_basis': 'recorded transaction dates', 'complete': False, 'accounts': account_coverage}}
+            'categories': categories,
+            'coverage': {'range_basis': 'recorded transaction dates', 'complete': False, 'accounts': account_coverage, 'categories': category_coverage}}
 
 
 class Filters(BaseModel):
@@ -67,6 +83,11 @@ class Filters(BaseModel):
     account: str | None = Field(default=None, max_length=200)
     category: str | None = Field(default=None, max_length=120)
     category_mode: Literal['prefix', 'exact'] = 'prefix'
+    direction: Literal['incoming', 'outgoing'] | None = None
+    source_account: str | None = Field(default=None, max_length=200)
+    target_account: str | None = Field(default=None, max_length=200)
+    link_type: str | None = Field(default=None, max_length=120)
+    transfer_status: Literal['matched', 'unmatched'] | None = None
     flow: Literal['income', 'expense', 'transfer', 'investment', 'financing', 'adjustment', 'unresolved'] | None = None
     vesting_policy: Literal['horizon', 'range'] = 'horizon'
     dataset: Literal['bank', 'investment', 'all'] = 'all'
@@ -123,7 +144,11 @@ def transaction_predicate(db, f, *, apply_dates=True):
     if f.flow is not None:
         clauses.append(f'({FLOW})=?')
         args.append(f.flow)
-    if f.category:
+    if f.direction is not None:
+        clauses.append('amount_minor>0' if f.direction == 'incoming' else 'amount_minor<0')
+    if f.transfer_status is not None:
+        clauses.append(('NOT ' if f.transfer_status == 'unmatched' else '') + MATCHED_LEG)
+    if f.category is not None:
         if f.category_mode == 'exact':
             clauses.append('category_id=?')
             args.append(f.category)
@@ -198,6 +223,107 @@ INCOME = f'COALESCE(SUM(CASE WHEN {OPERATING} THEN income_minor ELSE 0 END),0)'
 EXPENSE = f'COALESCE(SUM(CASE WHEN {OPERATING} THEN expense_minor ELSE 0 END),0)'
 
 
+def flow_id(*parts):
+    # JSON tuples are stable, collision-free and do not depend on SQL row order.
+    return json.dumps(parts, ensure_ascii=True, separators=(',', ':'))
+
+
+FLOW_SELECTABLE = 'account IS NOT NULL AND length(account) BETWEEN 1 AND 200 AND category_id IS NOT NULL AND length(category_id)<=120'
+PAIR_SELECTABLE = 'length(debit_account) BETWEEN 1 AND 200 AND length(credit_account) BETWEEN 1 AND 200 AND link_type IS NOT NULL AND length(link_type) BETWEEN 1 AND 120'
+
+
+def query_flow(db, f):
+    start, end = date_range(db, f)
+    inherited = f.model_dump(mode='json', exclude_none=True, exclude={'limit', 'offset'})
+    inherited.update(start=start, end=end)
+    candidate_where, candidate_args = transaction_predicate(db, f)
+    transaction_stats = rows(db, f'''SELECT COUNT(*) total,
+        COALESCE(SUM(amount_minor=0),0) zero_amount,
+        COALESCE(SUM(amount_minor IS NULL),0) unknown_amount,
+        COALESCE(SUM(CASE WHEN amount_minor!=0 AND NOT ({FLOW_SELECTABLE})
+            AND NOT ({MATCHED_LEG}) THEN 1 ELSE 0 END),0) unselectable
+        FROM hierarchical_transactions WHERE {candidate_where}''', candidate_args)[0]
+    where, args = transaction_predicate(db, f.model_copy(update={'transfer_status': 'unmatched'}))
+    if f.transfer_status == 'matched':
+        where += ' AND 0=1'
+    grouped = f'''SELECT account,category_id,({FLOW}) kind,
+        CASE WHEN amount_minor>0 THEN 'incoming' ELSE 'outgoing' END direction,
+        SUM(ABS(amount_minor)) amount_minor,COUNT(*) count
+        FROM hierarchical_transactions WHERE {where} AND amount_minor!=0 AND {FLOW_SELECTABLE}
+        GROUP BY account,category_id,({FLOW}),amount_minor>0'''
+    table = '(' + grouped + ') g'
+    label = 'NULL label'
+    if table_exists(db, 'category_nodes'):
+        table += ' LEFT JOIN category_nodes n ON n.category_id=g.category_id'
+        label = 'n.label'
+    groups, coverage = select_bounded(db, table, ['g.*', label], args=args,
+                                     order='ORDER BY account,g.category_id,kind,direction')
+    nodes, edges = {}, []
+    for group in groups:
+        account, category, kind, direction = (group[k] for k in ('account', 'category_id', 'kind', 'direction'))
+        account_id, category_id = flow_id('account', account), flow_id('category', kind, category)
+        label = group['label'] or category_label(category)
+        if kind == 'transfer':
+            label = 'Unmatched transfer: ' + label
+        nodes[account_id] = {'id': account_id, 'label': account, 'kind': 'account', 'account': account}
+        nodes[category_id] = {'id': category_id, 'label': label, 'kind': kind}
+        source, target = (category_id, account_id) if direction == 'incoming' else (account_id, category_id)
+        edges.append({'id': flow_id('transaction', account, category, kind, direction),
+                      'source': source, 'target': target, 'kind': kind,
+                      'label': f'{label} — {direction}', 'amount_minor': group['amount_minor'],
+                      'currency': f.currency, 'count': group['count'],
+                      'selector': {'endpoint': 'transactions', 'filters': {
+                          **inherited, 'account': account, 'category': category,
+                          'category_mode': 'exact', 'flow': kind, 'direction': direction,
+                          'transfer_status': 'unmatched'}}})
+    pair_where, pair_args = pair_predicate(db, f)
+    if f.flow not in (None, 'transfer'):
+        pair_where += ' AND 0=1'
+    pair_table = f'({PAIR_CTE} SELECT * FROM pairs WHERE {pair_where})'
+    pair_stats = rows(db, f'''SELECT COUNT(*) total,
+        COALESCE(SUM(debit_record_id IS NULL OR credit_record_id IS NULL),0) missing_counterpart,
+        COALESCE(SUM(debit_currency!=credit_currency),0) cross_currency,
+        COALESCE(SUM(debit_account=credit_account),0) same_account,
+        COALESCE(SUM(CASE WHEN {MATCHED_PAIR} AND NOT ({PAIR_SELECTABLE}) THEN 1 ELSE 0 END),0) unselectable
+        FROM {pair_table}''', pair_args)[0]
+    pair_groups = f'''(SELECT debit_account,credit_account,link_type,debit_currency,
+        SUM(-debit_amount_minor) amount_minor,COUNT(*) count FROM {pair_table}
+        WHERE {MATCHED_PAIR} AND {PAIR_SELECTABLE}
+        GROUP BY debit_account,credit_account,link_type,debit_currency)'''
+    pairs, pair_coverage = select_bounded(db, pair_groups, ['*'], args=pair_args,
+                                        order='ORDER BY debit_account,credit_account,link_type,debit_currency',
+                                        limit=max(0, ROW_LIMIT - len(edges)))
+    for pair in pairs:
+        source, target = pair['debit_account'], pair['credit_account']
+        for account in (source, target):
+            ident = flow_id('account', account)
+            nodes[ident] = {'id': ident, 'label': account, 'kind': 'account', 'account': account}
+        edges.append({'id': flow_id('pair', source, target, pair['link_type'], pair['debit_currency']),
+                      'source': flow_id('account', source), 'target': flow_id('account', target),
+                      'kind': 'transfer', 'label': f"{source} → {target} — {category_label(pair['link_type'])}",
+                      'amount_minor': pair['amount_minor'], 'currency': pair['debit_currency'], 'count': pair['count'],
+                      'selector': {'endpoint': 'transfers', 'filters': {**inherited,
+                          'source_account': source, 'target_account': target, 'link_type': pair['link_type'],
+                          'transfer_status': 'matched'}}})
+    coverage = {'total': coverage['total'] + pair_coverage['total'], 'returned': len(edges),
+                'omitted': coverage['omitted'] + pair_coverage['omitted'],
+                'complete': coverage['complete'] and pair_coverage['complete']}
+    warnings = ['Recorded aggregate movements, not tracing income dollars or a balanced cash statement.',
+                'Personal excludes family earmarks; own restricted accounts remain included. Protected scope overlaps personal.',
+                'Paired transfers use debit date (credit date only if debit is missing), either-endpoint membership, and the debit magnitude once; signed counterpart amounts can differ.',
+                'Missing counterparts, cross-currency pairs and same-account movements are not matched paths. Unmatched observations retain their recorded sign; in-kind movements are not cash.']
+    if not coverage['complete']:
+        warnings.append('Partial money map: aggregate edge output limit reached; omitted groups are not shown.')
+    unrepresented = transaction_stats['unknown_amount'] or transaction_stats['unselectable'] or pair_stats['unselectable']
+    complete = coverage['complete'] and not unrepresented
+    if unrepresented:
+        warnings.append('Partial money map: unknown amounts or unselectable account/category/link identifiers are omitted; see coverage.')
+    return {'meta': metadata(), 'range': {'start': start, 'end': end}, 'currency': f.currency,
+            'nodes': sorted(nodes.values(), key=lambda node: node['id']), 'edges': edges,
+            'coverage': {'complete': complete, 'edges': coverage, 'pairs': pair_stats,
+                         'transactions': transaction_stats, 'edge_limit': ROW_LIMIT}, 'warnings': warnings}
+
+
 def query_overview(db, f):
     where, args = transaction_predicate(db, f)
     aggregate = f'{INCOME} income_minor,{EXPENSE} expense_minor,({INCOME}-{EXPENSE}) net_minor'
@@ -231,6 +357,15 @@ PAIR_CTE = f'''WITH legs AS (
 )'''
 
 
+# Only evidenced, signed, same-currency, distinct-account pairs enter the map.
+MATCHED_PAIR = '''debit_record_id IS NOT NULL AND credit_record_id IS NOT NULL
+    AND debit_account!=credit_account AND debit_currency=credit_currency
+    AND debit_amount_minor<0 AND credit_amount_minor>0'''
+MATCHED_LEG = f'''COALESCE(record_id IN ({PAIR_CTE}
+    SELECT debit_record_id FROM pairs WHERE {MATCHED_PAIR}
+    UNION SELECT credit_record_id FROM pairs WHERE {MATCHED_PAIR}),0)'''
+
+
 def pair_predicate(db, f):
     clauses = ['COALESCE(debit_currency,credit_currency)=?']
     args = [f.currency]
@@ -248,9 +383,15 @@ def pair_predicate(db, f):
     if f.q:
         clauses.append("(evidence LIKE ? ESCAPE '\\' OR debit_account LIKE ? ESCAPE '\\' OR credit_account LIKE ? ESCAPE '\\' OR link_type LIKE ? ESCAPE '\\')")
         args.extend(['%' + escaped_like(f.q) + '%'] * 4)
-    if f.category or f.dataset != 'all':
+    for value, column in ((f.source_account, 'debit_account'), (f.target_account, 'credit_account'), (f.link_type, 'link_type')):
+        if value is not None:
+            clauses.append(f'{column}=?')
+            args.append(value)
+    if f.transfer_status is not None:
+        clauses.append(('NOT ' if f.transfer_status == 'unmatched' else '') + f'COALESCE(({MATCHED_PAIR}),0)')
+    if f.category is not None or f.dataset != 'all':
         # Source date/scope already select the pair; membership can match either endpoint.
-        tx_where, tx_args = transaction_predicate(db, f.model_copy(update={'q': '', 'account': None, 'record_id': None, 'scope': 'all'}), apply_dates=False)
+        tx_where, tx_args = transaction_predicate(db, f.model_copy(update={'q': '', 'account': None, 'record_id': None, 'scope': 'all', 'direction': None, 'transfer_status': None}), apply_dates=False)
         clauses.append(f'(debit_record_id IN (SELECT record_id FROM hierarchical_transactions WHERE {tx_where}) OR credit_record_id IN (SELECT record_id FROM hierarchical_transactions WHERE {tx_where}))')
         args.extend(tx_args * 2)
     return ' AND '.join(clauses), args
@@ -552,6 +693,10 @@ def build_finance_router(auth_service, profile_root):
     @router.get('/overview')
     def get_overview(request: Request):
         return handle(request, query_overview)
+
+    @router.get('/flow')
+    def get_flow(request: Request):
+        return handle(request, query_flow)
 
     @router.get('/transactions')
     def get_transactions(request: Request):

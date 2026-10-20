@@ -34,7 +34,8 @@ async function fixture(t,{rows=transactionRows,responses={}}={}){
  const page=await browser.newPage({viewport:{width:1280,height:900},serviceWorkers:'block'});page.setDefaultTimeout(5000);
  return {page,calls,url:`http://127.0.0.1:${server.address().port}/hermes/finance/`};
 }
-async function ready(page){await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');}
+async function ready(page){await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');for(const selector of ['[data-secondary]','.filter-options']){const d=page.locator(selector);if(await d.count()&&!await d.evaluate(n=>n.open))await d.locator(':scope > summary').click();}}
+const categoryName=id=>{const text=id.split('.').slice(1).join(' ');return text.charAt(0).toUpperCase()+text.slice(1);};
 async function formValues(page){return page.locator('#filters').evaluate(f=>Object.fromEntries(new FormData(f)));}
 function last(calls,name){return calls.filter(c=>c.name===name).at(-1).query;}
 const categoryRows=[
@@ -59,7 +60,7 @@ for(const holdings of [[],[{security_key:'SYNTHETIC_PLAN',quantity:'10',quantity
 
 test('clicked transfer counterpart replaces source-date, account and scope predicates visibly',{timeout:20000},async t=>{
  const {page,calls,url}=await fixture(t);await page.goto(url);await ready(page);
- await page.getByLabel('From',{exact:true}).fill('2023-12-31');await page.getByLabel('Through',{exact:true}).fill('2023-12-31');await page.getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('bank');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
+ await page.getByLabel('From',{exact:true}).fill('2023-12-31');await page.getByLabel('Through',{exact:true}).fill('2023-12-31');await page.locator('#filters').getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('bank');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
  await page.getByRole('tab',{name:'Transfers',exact:true}).click();await ready(page);
  await page.getByLabel('Search transfers').fill('year boundary');await page.getByRole('button',{name:'Search',exact:true}).click();await ready(page);
  await page.getByRole('button',{name:'Synthetic protected',exact:true}).click();await ready(page);
@@ -98,17 +99,17 @@ test('category bands and table drill into exact authoritative flows with signed 
   await page.getByRole('tab',{name:'Overview',exact:true}).click();await ready(page);
   await page.getByText('Cash-flow categories · table alternative',{exact:true}).click();
   const rows=page.getByRole('table',{name:'Cash-flow categories',exact:true}).locator('tbody tr');
-  const row=rows.filter({has:page.getByRole('button',{name:'Inspect '+category,exact:true})}).filter({has:page.getByRole('cell',{name:flow,exact:true})});
+  const row=rows.filter({has:page.getByRole('button',{name:'Inspect '+categoryName(category),exact:true})}).filter({has:page.getByRole('cell',{name:flow,exact:true})});
   // Same category/direction may occur in different flow classes: expose the authoritative flow.
   assert.equal(await row.count(),1);await row.getByText(aggregate,{exact:true}).waitFor();assert.equal(await row.locator('td').last().textContent(),'1');
   if(mode==='table')await row.getByRole('button').click();
-  else {const matching=categoryOverview(last(calls,'overview')).categories.filter(r=>r.category_id===category);const index=matching.findIndex(r=>r.flow===flow);await page.locator('[data-chart="alluvial"]').getByRole('button',{name:'Inspect '+category,exact:true}).nth(index).click();}
+  else {const matching=categoryOverview(last(calls,'overview')).categories.filter(r=>r.category_id===category);const index=matching.findIndex(r=>r.flow===flow);await page.locator('[data-chart="alluvial"]').getByRole('button',{name:'Inspect '+categoryName(category),exact:true}).nth(index).click();}
   await ready(page);const q=last(calls,'transactions');assert.equal(q.category,category);assert.equal(q.category_mode,'exact');assert.equal(q.flow,flow);assert.equal(q.start,'2024-01-01');assert.equal(q.end,'2024-01-02');assert.equal(q.scope,'personal');
   assert.match(await page.locator('.filter-chip').textContent(),new RegExp(category.replaceAll('.','\\.')+'.*exact.*'+flow));
   const ledger=page.getByRole('table',{name:'Transactions',exact:true});assert.equal(await ledger.locator('tbody tr').count(),1);await ledger.getByText(source,{exact:true}).waitFor();assert.equal(await page.locator('[data-page-status]').textContent(),'1–1 of 1 records');
  }
  await page.getByRole('button',{name:'Clear drilldown'}).click();await ready(page);for(const key of ['category','category_mode','flow'])assert.equal(last(calls,'transactions')[key],undefined);assert.equal(await page.getByRole('table',{name:'Transactions',exact:true}).locator('tbody tr').count(),categoryRows.length);
- await page.getByRole('tab',{name:'Overview',exact:true}).click();await ready(page);await page.locator('[data-chart="alluvial"]').getByRole('button',{name:'Inspect expense.food',exact:true}).first().click();await ready(page);
+ await page.getByRole('tab',{name:'Overview',exact:true}).click();await ready(page);await page.locator('[data-chart="alluvial"]').getByRole('button',{name:'Inspect Food',exact:true}).first().click();await ready(page);
  await page.getByRole('tab',{name:'Transactions & evidence',exact:true}).click();await ready(page);for(const key of ['category','category_mode','flow'])assert.equal(last(calls,'transactions')[key],undefined);
 });
 
@@ -117,7 +118,7 @@ test('payroll drill uses the actual linked record posted date and clears unrelat
  const payroll={payroll_id:'synthetic-payroll',pay_date:'2024-01-01',currency:bank.currency,gross_minor:500000,net_minor:350000};
  const links=[{payroll_id:payroll.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched',linked_record:{record_id:bank.record_id,date:bank.date,account:bank.account,currency:bank.currency,dataset:bank.dataset}},{payroll_id:payroll.payroll_id,code:'SAVINGS',event_id:'synthetic-event',status:'recorded',linked_record:null},{payroll_id:payroll.payroll_id,code:'MISSING',tx_id:'synthetic-missing',linked_record:null},{payroll_id:payroll.payroll_id,code:'LEGACY',tx_id:'synthetic-legacy'}];
  const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation:()=>({payroll:[payroll],links})}});
- await page.goto(url);await ready(page);await page.getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('investment');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
+ await page.goto(url);await ready(page);await page.locator('#filters').getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('investment');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
  await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  const linkTable=page.getByRole('table',{name:'Payroll links'});await linkTable.getByText('synthetic-event',{exact:true}).waitFor();await linkTable.getByText('synthetic-missing',{exact:true}).waitFor();await linkTable.getByText('synthetic-legacy',{exact:true}).waitFor();assert.equal(await linkTable.getByRole('button').count(),1);
  await linkTable.getByRole('button',{name:'Inspect linked entry'}).click();await ready(page);

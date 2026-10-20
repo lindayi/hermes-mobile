@@ -335,6 +335,11 @@ _ISSUE122_FINANCE_FIXTURE = {
 }
 
 
+_ISSUE124_MONEY_MAP_FIXTURE = {
+    'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
+}
+
+
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
             | _PENDING_PR25_NATIVE_NOTIFICATION_FIXTURE
@@ -355,7 +360,7 @@ def _source_files():
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
             | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
-            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE)
+            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE)
 
 
 def _source_ci():
@@ -915,7 +920,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
         ).items() if path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     }
-    for path, digest in (_PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE).items():
+    for path, digest in (_PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -946,7 +951,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
                          | _ISSUE98_PHOTO_POLICY_FIXTURE
                          | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
-                         | _ISSUE122_FINANCE_FIXTURE).items():
+                         | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -1138,13 +1143,27 @@ def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, pat
     assert evidence == before
 
 
+@pytest.mark.parametrize('phase', PHASES)
+def test_issue124_money_map_source_pin_supersedes_only_finance(phase):
+    from deploy.autonomy_policy import ISSUE124_MONEY_MAP_OVERLAY
+    assert set(_ISSUE124_MONEY_MAP_FIXTURE) == {'backend/finance.py'}
+    assert ISSUE124_MONEY_MAP_OVERLAY == _ISSUE124_MONEY_MAP_FIXTURE
+    root = Path(__file__).resolve().parents[1]
+    for path, digest in _ISSUE124_MONEY_MAP_FIXTURE.items():
+        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+    evidence = _phase_evidence(phase)
+    assert _blockers(evidence, phase) == set()
+    evidence['main']['files']['backend/finance.py'] = _ISSUE122_FINANCE_FIXTURE['backend/finance.py']
+    assert _blockers(evidence, phase) == {'execution-source-contract'}
+
+
 def test_issue122_finance_source_family_is_complete_and_independent():
     assert set(_ISSUE122_FINANCE_FIXTURE) == {
         'backend/app.py', 'backend/finance.py', 'backend/finance_market.py',
         'deploy/frontend_release.py',
     }
     assert {path: SOURCE_FINGERPRINTS[path] for path in _ISSUE122_FINANCE_FIXTURE} == (
-        _ISSUE122_FINANCE_FIXTURE
+        _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
     )
     assert set(_ISSUE122_FINANCE_FIXTURE) <= SOURCE_CONTROL_PYTHON_FILES
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract'

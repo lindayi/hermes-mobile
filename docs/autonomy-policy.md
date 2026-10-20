@@ -126,9 +126,11 @@ retain independent literal digests and reject missing, malformed, mutated, or
 superseded source pins in every transition phase. Earlier app/build literals and
 `SOURCE_BASELINES` remain historical provenance, not current candidate values.
 These pins establish source consistency only: they do not establish exact-head
-Copilot review, hosted CI, merge authorization, or deployment evidence. Refresh
-the issue #122 policy and independent fixture literals together after source
-changes; never derive expected digests from candidate files at test runtime.
+Copilot review, hosted CI, merge authorization, or deployment evidence. Issue #124
+adds a later finance-only overlay for the explorable money map, preserving issue
+#122's literal history. Refresh the current policy and independent fixture literals
+together after source changes; never derive expected digests from candidate files
+at test runtime. No review, CI, authorization or deployment policy is changed.
 
 ### Historical issue #100 authorization and rendered-review candidate
 
