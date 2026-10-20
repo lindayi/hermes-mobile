@@ -95,7 +95,7 @@ const filters = new Set(['transfer_status','direction','source_account','target_
 export function financeAPI(fetcher=globalThis.fetch.bind(globalThis),timeout=15000) {
  return async (endpoint, query={}, signal) => {
   if (!endpoints.has(endpoint)) throw new Error('Invalid finance endpoint');
-  const params=new URLSearchParams(Object.entries(query).filter(([key,value])=>filters.has(key)&&value!==''&&value!=null));
+  const params=new URLSearchParams(Object.entries(query).filter(([key,value])=>filters.has(key)&&value!=null&&(value!==''||(key==='category'&&query.category_mode==='exact'))));
   const local=new AbortController(),abort=()=>local.abort();let timedOut=false;
   if(signal?.aborted)throw new DOMException('Aborted','AbortError');
   signal?.addEventListener('abort',abort,{once:true});

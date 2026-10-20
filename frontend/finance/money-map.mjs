@@ -30,11 +30,34 @@ export function moneyMap(data,{inspect=()=>{},retry=()=>{},viewport={x:0,y:0,k:1
  groups.forEach((items,col)=>items.forEach((n,i)=>{const internal=col===1,cols=internal?columns:1,rows=Math.ceil(items.length/cols),w=compact?92:internal&&columns===4?102:156;positions.set(n.id,{x:compact?[52,180,308][col]:internal?(columns===4?386+(i%4)*116:(i%2?676:444)):col===0?130:990,y:130+Math.floor(i/cols)*Math.min(125,(height-200)/Math.max(1,rows-1)),w,n});}));
  for(const [x,text,note] of [[compact?7:34,'Income',compact?'IN':'FROM OUTSIDE'],[compact?128:352,'Your accounts',compact?'WITHIN':'MOVING WITHIN YOUR REALM'],[compact?270:866,'Spending',compact?'OUT':'TO THE WORLD']])scene.append(svg('text',{x,y:30,class:'map-zone','font-size':compact?15:22},text),svg('text',{x,y:51,class:'map-zone-note'},note));
  const max=Math.max(1,...edges.map(e=>e.amount_minor));
+ // Reciprocal and parallel routes share a hit area. Keep every rendered band and
+ // exact selector, but offer all coincident streams before opening evidence.
+ const routeKey=edge=>JSON.stringify([...new Set([edge.source,edge.target])].sort());
+ const routes=new Map();
+ for(const edge of edges){const key=routeKey(edge);if(!routes.has(key))routes.set(key,[]);routes.get(key).push(edge);}
+ const inspectRoute=edge=>{
+  const overlaps=routes.get(routeKey(edge));if(overlaps.length===1){inspect(edge);return;}
+  region.querySelector('[data-stream-chooser]')?.remove();
+  const members=overlaps.flatMap(e=>e.members||[e]),close=()=>{chooser.remove();[...scene.querySelectorAll('[data-edge]')].find(node=>node.dataset.edge===edge.id)?.focus({preventScroll:true});};
+  let offset=0;
+  const body=el('div',{class:'inspector-body'}),previous=action('Previous streams',()=>{offset-=25;renderChoices();}),next=action('Next streams',()=>{offset+=25;renderChoices();});
+  const chooser=el('aside',{class:'flow-inspector','data-stream-chooser':'',role:'complementary','aria-label':'Overlapping streams',tabindex:-1},
+   el('header',{},el('div',{},el('h3',{},'Overlapping streams')),action('Close stream chooser',close,'Close')),body,
+   el('div',{class:'pager inspector-body'},previous,next));
+  const renderChoices=()=>{
+   body.replaceChildren(el('p',{},`These streams share a route. Choose the exact movement to inspect. ${offset+1}–${Math.min(offset+25,members.length)} of ${members.length} streams.`),...members.slice(offset,offset+25).map(member=>{const button=action('Inspect '+member.label,()=>{chooser.remove();inspect(member);},`${member.label} · ${money(member.amount_minor,member.currency)}`);button.className='stream-member';return button;}));
+   previous.disabled=offset===0;next.disabled=offset+25>=members.length;body.scrollTop=0;
+  };
+  renderChoices();
+  chooser.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close();}});
+  region.append(chooser);chooser.focus({preventScroll:true});
+ };
  for(const edge of edges){const a=positions.get(edge.source),b=positions.get(edge.target);if(!a||!b)continue;const outgoing=b.x>=a.x,sx=a.x+(outgoing?a.w/2:-a.w/2),tx=b.x+(outgoing?-b.w/2:b.w/2);let d=`M${sx} ${a.y} C${(sx+tx)/2} ${a.y} ${(sx+tx)/2} ${b.y} ${tx} ${b.y}`;
- if(a===b)d=`M${a.x} ${a.y+24} C${a.x-55} ${a.y+145} ${a.x+55} ${a.y+145} ${a.x} ${a.y+24}`;else if(a.x===b.x)d=`M${a.x+76} ${a.y} C${a.x+135} ${a.y} ${b.x+135} ${b.y} ${b.x+76} ${b.y}`;
+ if(a===b)d=`M${a.x} ${a.y+24} C${a.x-55} ${a.y+145} ${a.x+55} ${a.y+145} ${a.x} ${a.y+24}`;
+ else if(a.x===b.x){const direction=Math.sign(b.y-a.y),sy=a.y+direction*24,ty=b.y-direction*24,bend=Math.min(a.w,b.w)/4;d=`M${a.x} ${sy} C${a.x+bend} ${(sy+ty)/2} ${b.x+bend} ${(sy+ty)/2} ${b.x} ${ty}`;}
  const color=colors[edge.kind]||colors.unresolved;
  const g=svg('g',{'data-edge':edge.id,'data-edge-kind':edge.kind,role:'button',tabindex:0,'aria-label':`Inspect ${edge.label}`,class:'money-edge'},svg('title',{},`${edge.label} · ${money(edge.amount_minor,edge.currency)} · ${edge.count} records`),svg('path',{d,fill:'none',stroke:color,'stroke-width':edge.amount_minor/max*34,opacity:.3,class:'amount-band'}),svg('path',{d,fill:'none',stroke:'transparent','stroke-width':44,'vector-effect':'non-scaling-stroke',class:'edge-hit'}));
- g.addEventListener('click',()=>{if(!dragged)inspect(edge);});g.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();e.stopPropagation();inspect(edge);}});
+ g.addEventListener('click',()=>{if(!dragged)inspectRoute(edge);});g.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();e.stopPropagation();inspect(edge);}});
  // Direction is explicit even for refunds and income reversals.
  const mx=a===b?a.x:(sx+tx)/2,my=a===b?a.y+105:(a.y+b.y)/2;g.append(svg('text',{x:mx,y:my+5,fill:color,'text-anchor':'middle',class:'edge-arrow','pointer-events':'none'},outgoing?'›':'‹'));scene.append(g);
  }

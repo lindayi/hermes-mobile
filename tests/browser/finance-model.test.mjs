@@ -98,6 +98,19 @@ test('flow API forwards bounded selector field allowlist without accepting arbit
  await api('flow',{direction:'incoming',source_account:'A',target_account:'B',link_type:'own_cash',transfer_status:'unmatched',evil:'no'});
  assert.equal(url,'/hermes/app-api/finance/flow?direction=incoming&source_account=A&target_account=B&link_type=own_cash&transfer_status=unmatched');
 });
+test('empty exact category survives transport while ordinary empty filters stay omitted',async()=>{
+ const {financeAPI}=await import(moduleURL);let url;
+ const api=financeAPI(async u=>{url=new URL(u,'https://synthetic.invalid');return {ok:true,json:async()=>({})};});
+ await api('transactions',{account:'Synthetic cash',category:'',category_mode:'exact',flow:'expense',direction:'outgoing',q:''});
+ assert.equal(url.searchParams.has('category'),true,'An explicit empty exact category must not widen to all categories');
+ assert.equal(url.searchParams.get('category'),'');
+ assert.equal(url.searchParams.get('category_mode'),'exact');
+ assert.equal(url.searchParams.has('q'),false);
+ await api('transactions',{account:'',category:'',category_mode:'prefix',q:''});
+ assert.equal(url.searchParams.has('category'),false);
+ assert.equal(url.searchParams.has('account'),false);
+ assert.equal(url.searchParams.has('q'),false);
+});
 const moduleURL = new URL('../../frontend/finance/model.mjs', import.meta.url);
 test('finance API is fixed-origin, no-store and refuses unknown endpoints', async () => {
  const {financeAPI}=await import(moduleURL);
