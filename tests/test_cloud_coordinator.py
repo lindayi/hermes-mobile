@@ -315,6 +315,14 @@ def _accepted_compacted_receipt_case(tmp_path, issue=16, *, legacy_v1=True):
                 route = route.replace(f"/pulls/{issue}", "/pulls/16")
                 route = route.replace(f"/issues/{issue}/comments", "/issues/16/comments")
                 response = _original(route, *args, **kwargs)
+                if (_name == "get_all"
+                        and original_route.startswith(
+                            f"repos/lindayi/hermes-mobile/issues/{issue}/comments")):
+                    expected_url = (
+                        f"https://api.github.com/repos/lindayi/hermes-mobile/issues/{issue}"
+                    )
+                    response = [comment for comment in api.comments
+                                if comment.get("issue_url", expected_url) == expected_url]
                 if (_name == "write" and issue == 1
                         and original_route.endswith(f"/issues/{issue}/comments")
                         and isinstance(response, dict)
@@ -2359,6 +2367,18 @@ def _seed_historical_unanchored_source_action(api, store, action):
     return action
 
 
+def _assert_only_source_anchor_written(api, writes_before, issue=16):
+    assert api.writes[:len(writes_before)] == writes_before
+    [(route, payload)] = api.writes[len(writes_before):]
+    assert route == f"repos/lindayi/hermes-mobile/issues/{issue}/comments"
+    assert payload["body"].startswith("hermes-coordinator-source-receipt:")
+    [comment] = [comment for comment in api.comments_for_issue(issue)
+                 if comment.get("body") == payload["body"]]
+    assert comment["user"]["id"] == OWNER
+    assert comment["created_at"] == comment["updated_at"]
+    assert api.get(f"repos/lindayi/hermes-mobile/issues/comments/{comment['id']}") == comment
+
+
 def _claimable_source_action(store, key, attempt, **changes):
     action = {
         "key": key, "kind": "fix", "task_type": "source", "issue": 16,
@@ -3342,6 +3362,15 @@ class FakeApi:
             return self.rules[(page - 1) * size:page * size]
         raise AssertionError(f"Unexpected API read: {route}")
 
+    def comments_for_issue(self, issue):
+        # Seeded comments without a URL belong to the original PR16. Posted
+        # comments retain the issue URL from their write route.
+        return [
+            comment for comment in self.comments
+            if comment.get("issue_url", "https://api.github.com/repos/lindayi/hermes-mobile/issues/16")
+            == f"https://api.github.com/repos/lindayi/hermes-mobile/issues/{issue}"
+        ]
+
     def get_all(self, route, *, collection=None):
         if route.startswith("agents/repos/lindayi/hermes-mobile/tasks?"):
             self.task_reads += 1
@@ -3356,7 +3385,7 @@ class FakeApi:
             if self.fail:
                 raise ApiError("rate limited", status=429)
             self.comment_reads += 1
-            values = list(self.comments)
+            values = self.comments_for_issue(16)
             if self.late_enrollment and self.comment_reads == 1:
                 self.comments.append(self.late_comment)
                 values = values
@@ -7045,7 +7074,7 @@ def _owner_continuation_two_pull_case(tmp_path):
 
     def list_with_unrelated_pull(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
-            return []
+            return api.comments_for_issue(17)
         if route.endswith("/pulls/17/files?per_page=100"):
             return list(api.review_pull_files())
         if route.endswith("/pulls/17/reviews?per_page=100"):
@@ -7156,7 +7185,7 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
 
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
-            return [receipt, *newer_processed]
+            return [*api.comments_for_issue(17), *newer_processed]
         if (mutation in {"unrelated-compaction", "fence-other-deferred"}
                 and route.startswith("repos/lindayi/hermes-mobile/issues?")):
             return original_get_all(route, collection=collection) + [{
@@ -7506,13 +7535,13 @@ def test_owner_continuation_rebuild_retains_unrelated_ready_receipt(
         if key != other["key"]
     }
     _, authorized, _ = _authorized_result_heads(
-        17, after["enrollments"]["17"], without_action, [receipt], main,
+        17, after["enrollments"]["17"], without_action, api.comments_for_issue(17), main,
     )
     assert result_head in authorized
     without_proofs = deepcopy(after["enrollments"]["17"])
     without_proofs["receipt_proofs"] = []
     _, unauthorized, _ = _authorized_result_heads(
-        17, without_proofs, without_action, [receipt], main,
+        17, without_proofs, without_action, api.comments_for_issue(17), main,
     )
     assert result_head not in unauthorized
     lifecycle = deepcopy(after["lifecycle_events"])
@@ -10779,7 +10808,10 @@ def test_owner_abandonment_replacement_identity_blocks_lifecycle_fences(
 
     assert injected == [stage]
     assert api.task_posts == posts_before
-    assert api.writes == writes_before
+    if stage == "source-fence":
+        _assert_only_source_anchor_written(api, writes_before)
+    else:
+        assert api.writes == writes_before
     state = StateStore(store.path).snapshot()
     assert state["actions"][abandoned["key"]] == abandoned_reservation
     assert state["enrollments"]["16"]["receipt_proofs"] == proofs_at_injection
@@ -11090,7 +11122,7 @@ def test_owner_abandonment_keyless_retained_successor_apply_restart(
         tmp_path, publication, key_state):
     (
         api, store, abandoned, reservation, recovery, _, source, _, head, _,
-    ) = _owner_abandonment_transitive_case(tmp_path)
+    ) = _owner_abandonment_transitive_case(tmp_path, legacy_source=True)
     StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
 
     def configure_proofs(state):
@@ -12351,7 +12383,7 @@ def test_owner_abandonment_apply_requires_exact_retained_proof_issue(
     (
         api, store, abandoned, reservation, recovery, neutral, source,
         _, source_head, _,
-    ) = _owner_abandonment_transitive_case(tmp_path, bare=True)
+    ) = _owner_abandonment_transitive_case(tmp_path, bare=True, legacy_source=True)
     api.review_state = "APPROVED"
     api.review_sha = source_head
     Coordinator(
@@ -13275,7 +13307,8 @@ def _add_unrelated_enrolled_pull(api, store):
         if route.startswith("repos/lindayi/hermes-mobile/issues?"):
             return [api.issue, issue]
         route = route.replace("/pulls/17/", "/pulls/16/")
-        route = route.replace("/issues/17/comments", "/issues/16/comments")
+        if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments"):
+            return api.comments_for_issue(17)
         return original_get_all(route, collection=collection)
 
     api.get = get
@@ -13660,10 +13693,14 @@ def test_identity_isolated_mixed_roots_defer_commands_and_progress_other_pr(tmp_
     assert after["pending_events"] == ["7783"]
     assert not StateStore(store.path).event_seen(7783)
     assert api.task_posts == posts + 1
-    assert len(api.writes[writes:]) == 1
-    route, body = api.writes[writes]
-    assert route == "agents/repos/lindayi/hermes-mobile/tasks"
-    assert "PR #17" in body["prompt"]
+    assert [route for route, _ in api.writes[writes:]] == [
+        "repos/lindayi/hermes-mobile/issues/17/comments",
+        "agents/repos/lindayi/hermes-mobile/tasks",
+    ]
+    [claim] = [action for action in after["actions"].values()
+               if action.get("kind") == "fix" and action.get("issue") == 17]
+    assert api.writes[writes][1]["body"] == claim["receipt_anchor_body"]
+    assert "PR #17" in api.writes[writes + 1][1]["prompt"]
     assert api.graphql_writes[graphql_writes:] == []
     accepted_other = _pull_issue_state(after, 17)
     other_action = next(iter(accepted_other["actions"].values()))
@@ -13778,8 +13815,14 @@ def test_null_receipt_proof_container_blocks_only_that_pr_after_restart(
     assert plans[17]["repair_requested"] is True
     assert _pull_issue_state(after, 16) == before_issue
     assert api.task_posts == posts + 1
-    assert len(api.writes[writes:]) == 1
-    assert "PR #17" in api.writes[writes][1]["prompt"]
+    assert [route for route, _ in api.writes[writes:]] == [
+        "repos/lindayi/hermes-mobile/issues/17/comments",
+        "agents/repos/lindayi/hermes-mobile/tasks",
+    ]
+    [claim] = [action for action in after["actions"].values()
+               if action.get("kind") == "fix" and action.get("issue") == 17]
+    assert api.writes[writes][1]["body"] == claim["receipt_anchor_body"]
+    assert "PR #17" in api.writes[writes + 1][1]["prompt"]
     assert api.graphql_writes[graphql_writes:] == []
     accepted_other = _pull_issue_state(after, 17)
     writes = deepcopy(api.writes)
@@ -13847,9 +13890,14 @@ def test_owner_recovery_identity_swap_isolated_and_command_rechecked(
     assert not StateStore(store.path).event_seen(7771)
     assert api.task_posts == before_posts + 1
     new_writes = api.writes[before_writes:]
-    assert len(new_writes) == 1
-    assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
-    assert "PR #17" in new_writes[0][1]["prompt"]
+    assert [route for route, _ in new_writes] == [
+        "repos/lindayi/hermes-mobile/issues/17/comments",
+        "agents/repos/lindayi/hermes-mobile/tasks",
+    ]
+    [claim] = [action for action in state["actions"].values()
+               if action.get("kind") == "fix" and action.get("issue") == 17]
+    assert new_writes[0][1]["body"] == claim["receipt_anchor_body"]
+    assert "PR #17" in new_writes[1][1]["prompt"]
     assert api.graphql_writes[before_graphql_writes:] == []
 
     retry_writes = len(api.writes)
@@ -13932,9 +13980,14 @@ def test_prepared_action_transition_isolated_after_identity_swap(tmp_path):
     assert state["actions"][neutral["key"]] == before_action
     assert api.task_posts == before_posts + 1
     new_writes = api.writes[before_writes:]
-    assert len(new_writes) == 1
-    assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
-    assert "PR #17" in new_writes[0][1]["prompt"]
+    assert [route for route, _ in new_writes] == [
+        "repos/lindayi/hermes-mobile/issues/17/comments",
+        "agents/repos/lindayi/hermes-mobile/tasks",
+    ]
+    [claim] = [action for action in state["actions"].values()
+               if action.get("kind") == "fix" and action.get("issue") == 17]
+    assert new_writes[0][1]["body"] == claim["receipt_anchor_body"]
+    assert "PR #17" in new_writes[1][1]["prompt"]
 
 
 @pytest.mark.parametrize("identity_swap", [False, True], ids=["unchanged", "replacement"])
@@ -14073,7 +14126,7 @@ def test_identity_blocked_commands_do_not_defer_other_pr_consumption(
 
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments"):
-            return deepcopy(commands)
+            return [*deepcopy(commands), *api.comments_for_issue(17)]
         return original_get_all(route, collection=collection)
 
     api.get_all = get_all
@@ -14141,7 +14194,7 @@ def test_identity_blocked_owner_command_survives_event_compaction_and_cold_resta
 
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments"):
-            return deepcopy(unrelated_commands)
+            return [*deepcopy(unrelated_commands), *api.comments_for_issue(17)]
         return original_get_all(route, collection=collection)
 
     api.get_all = get_all
@@ -14231,7 +14284,7 @@ def test_no_source_identity_fence_defers_owner_recovery_and_consumes_other_pr_co
 
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments"):
-            return deepcopy(commands)
+            return [*deepcopy(commands), *api.comments_for_issue(17)]
         return original_get_all(route, collection=collection)
 
     api.get_all = get_all
@@ -14271,9 +14324,14 @@ def test_no_source_identity_fence_defers_owner_recovery_and_consumes_other_pr_co
     assert not StateStore(store.path).event_seen(7771)
     assert all(StateStore(store.path).event_seen(item["id"]) for item in commands)
     new_writes = api.writes[before_writes:]
-    assert len(new_writes) == 1
-    assert new_writes[0][0] == "agents/repos/lindayi/hermes-mobile/tasks"
-    assert "PR #17" in new_writes[0][1]["prompt"]
+    assert [route for route, _ in new_writes] == [
+        "repos/lindayi/hermes-mobile/issues/17/comments",
+        "agents/repos/lindayi/hermes-mobile/tasks",
+    ]
+    [claim] = [action for action in state["actions"].values()
+               if action.get("kind") == "fix" and action.get("issue") == 17]
+    assert new_writes[0][1]["body"] == claim["receipt_anchor_body"]
+    assert "PR #17" in new_writes[1][1]["prompt"]
     assert len(api.graphql_writes) == before_graphql_writes
 
     retry_writes = len(api.writes)
@@ -14884,7 +14942,7 @@ def test_reviewer_publication_fences_late_owner_continuation_removal(
 def test_final_publication_fence_follows_last_legacy_task_read(
         tmp_path, monkeypatch, path, race):
     api, store, abandoned, _, _, _, _, _, source_head, _ = (
-        _owner_abandonment_transitive_case(tmp_path)
+        _owner_abandonment_transitive_case(tmp_path, legacy_source=True)
     )
     if path == "source":
         api.source_failure = True
@@ -15036,7 +15094,7 @@ def test_final_publication_fence_follows_last_legacy_task_read(
 def test_final_publication_fence_rejects_numeric_identity_alias(
         tmp_path, monkeypatch, snapshot_number, target, field):
     api, store, _, _, _, _, _, _, source_head, _ = (
-        _owner_abandonment_transitive_case(tmp_path)
+        _owner_abandonment_transitive_case(tmp_path, legacy_source=True)
     )
     api.source_failure = True
     api.source_failure_sha = source_head
@@ -15107,13 +15165,13 @@ def test_final_publication_fence_rejects_numeric_identity_alias(
 
     assert publication_reads[0] >= snapshot_number
     assert api.task_posts == posts_before
-    assert api.writes == writes_before
+    _assert_only_source_anchor_written(api, writes_before)
 
 
 def test_final_publication_fence_rejects_late_receipt_body_only_action(
         tmp_path, monkeypatch):
     api, store, _, _, _, _, _, _, source_head, _ = (
-        _owner_abandonment_transitive_case(tmp_path)
+        _owner_abandonment_transitive_case(tmp_path, legacy_source=True)
     )
     api.source_failure = True
     api.source_failure_sha = source_head
@@ -15161,7 +15219,7 @@ def test_final_publication_fence_rejects_late_receipt_body_only_action(
 
     assert publication_reads[0] >= 1
     assert api.task_posts == posts_before
-    assert api.writes == writes_before
+    _assert_only_source_anchor_written(api, writes_before)
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
@@ -15243,7 +15301,10 @@ def test_final_publication_projection_rejects_late_embedded_authority_key_action
 
     assert injected == [True]
     assert api.task_posts == posts_before
-    assert api.writes == writes_before
+    if path == "source":
+        _assert_only_source_anchor_written(api, writes_before)
+    else:
+        assert api.writes == writes_before
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
@@ -15299,7 +15360,10 @@ def test_final_publication_projection_rejects_late_malformed_same_issue_key(
 
     assert injected == [True]
     assert api.task_posts == posts_before
-    assert api.writes == writes_before
+    if path == "source":
+        _assert_only_source_anchor_written(api, writes_before)
+    else:
+        assert api.writes == writes_before
 
 
 @pytest.mark.parametrize("path", ["source", "reviewer"])
@@ -15386,7 +15450,10 @@ def test_final_publication_projection_rejects_late_abandoned_task_alias(
 
     assert injected == [True]
     assert api.task_posts == posts_before
-    assert api.writes == writes_before
+    if path == "source":
+        _assert_only_source_anchor_written(api, writes_before)
+    else:
+        assert api.writes == writes_before
 
 
 def test_final_reviewer_fence_distinguishes_missing_receipt_proofs_from_null(
@@ -16752,7 +16819,7 @@ def test_stale_owner_abandonment_command_is_consumed_once_without_blocking_unrel
 
     def list_with_unrelated_pull(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?per_page=100"):
-            return []
+            return api.comments_for_issue(17)
         if route.endswith("/pulls/17/files?per_page=100"):
             return list(api.review_pull_files())
         if route.endswith("/pulls/17/reviews?per_page=100"):
@@ -16916,7 +16983,7 @@ def test_current_head_unusable_owner_abandonment_command_is_consumed_once_withou
 
     def list_with_unrelated_pull(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?per_page=100"):
-            return []
+            return api.comments_for_issue(17)
         if route.endswith("/pulls/17/files?per_page=100"):
             return list(api.review_pull_files())
         if route.endswith("/pulls/17/reviews?per_page=100"):
@@ -17786,7 +17853,7 @@ def test_malformed_inline_discussion_id_preserves_independent_pr(
 
     def get_all(route, *, collection=None):
         if route.startswith("repos/lindayi/hermes-mobile/issues/17/comments?"):
-            return []
+            return api.comments_for_issue(17)
         if route.endswith("/pulls/17/files?per_page=100"):
             return list(api.review_pull_files())
         if route.endswith("/pulls/17/reviews?per_page=100"):
@@ -20288,6 +20355,8 @@ def test_capped_reordered_inventory_waits_through_real_coordinator(tmp_path, sta
     path = tmp_path / "state.json"
     Coordinator(api, StateStore(path), clock=lambda: 1790856660).run(apply=True)
     source = next(a for a in StateStore(path).actions().values() if a["kind"] == "fix")
+    source = _seed_historical_unanchored_source_action(api, StateStore(path), source)
+
     def prior_streak(state):
         state["enrollments"]["16"]["attempts"] = 3
         state["actions"][source["key"]]["attempt"] = 3
@@ -22591,7 +22660,14 @@ def test_workflow_inventory_alone_fences_repairs(tmp_path, fresh_only, changes, 
         "pull_requests": [],
     } | changes
 
+    inventory_at_writes = []
+
     class WorkflowInventory(FakeApi):
+        def write(self, route, body):
+            inventory_at_writes.append((route.rsplit("/", 1)[-1],
+                                        self.workflow_reads, self.task_reads))
+            return super().write(route, body)
+
         def get_all(self, route, *, collection=None):
             if collection == "workflow_runs":
                 self.workflow_reads += 1
@@ -22618,7 +22694,14 @@ def test_workflow_inventory_alone_fences_repairs(tmp_path, fresh_only, changes, 
         assert not any(action["kind"] == "fix" for action in store.actions().values())
         assert not result[0]["repair_requested"]
     if fresh_only:
-        assert api.workflow_reads == 2 and api.task_reads == 2
+        # Busy inventory stops at the dispatch fence. Free inventory is checked
+        # again before the anchor POST, before claim, and after claim.
+        expected_reads = 2 if busy else 5
+        assert api.workflow_reads == expected_reads
+        assert api.task_reads == expected_reads
+        assert inventory_at_writes == ([] if busy else [
+            ("comments", 3, 3), ("tasks", 5, 5),
+        ])
 
 
 def test_response_uncertain_agent_dispatch_is_reconciled_never_retried(tmp_path):
@@ -27151,13 +27234,7 @@ class RecordingApi(FakeApi):
             return list(self.status_log.get(sha, []))
         return super().get_all(route, collection=collection)
 
-    def write(self, route, body):
-        response = super().write(route, body)
-        if route.endswith("/issues/16/comments"):
-            self.comments.append({"id": 10_000 + len(self.writes), "user": {"id": OWNER},
-                                  "body": body["body"], "updated_at": "2026-10-01T11:00:00Z"})
-        return response
-
+    # FakeApi.write already persists each posted comment exactly once.
     def move_head(self, sha):
         self.head_sha = sha
         self.pull["head"]["sha"] = sha
@@ -27245,7 +27322,12 @@ def test_closed_pull_retires_terminal_records_but_keeps_unresolved_claims(tmp_pa
     assert state["enrollments"]["16"]["attempts"] == 1
     assert state["enrollments"]["16"]["comment"] == 123
     assert list(state["actions"].values()) == [fix]
-    assert not state["outbox"]
+    # The sent anchor remains remote evidence for the unresolved claim.
+    assert list(state["outbox"]) == [fix["receipt_anchor_key"]]
+    anchor = state["outbox"][fix["receipt_anchor_key"]]
+    assert anchor["status"] == "sent"
+    assert anchor["comment_id"] == fix["receipt_anchor_comment_id"]
+    assert anchor["body"] == fix["receipt_anchor_body"]
     posted = len(api.writes)
     api.pull["state"] = "open"
     restarted_cycle()
