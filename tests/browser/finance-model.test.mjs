@@ -73,6 +73,31 @@ test('actual decimal-text units, signed debt credits, category signs and adjacen
  assert.equal(flows[0].amount_minor,1000);assert.equal(flows[1].amount_minor,-200);assert.equal(flows[1].direction,'recovery');assert.equal(flows[2].direction,'outflow');
  assert.equal(monthlyPeriods([{account:'A',currency:'CAD',start_date:'2024-01-31',end_date:'2024-02-29'},{account:'A',currency:'CAD',start_date:'2024-02-29',end_date:'2024-03-31'}]).length,2);
 });
+test('category labels reject allocation components and ambiguous metadata',async()=>{
+ const {flowRows}=await import(moduleURL);
+ const rows=['expense.food','income.salary','expense.home_utilities','expense.travel'].map(category_id=>({category_id,amount_minor:100}));
+ const labels=[{category_id:'expense.food',label:'whole'},{category_id:'income.salary',label:'Salary'},{category_id:'expense.home_utilities',label:'whole'},{category_id:'expense.travel',label:'Trips'},{category_id:'expense.travel',label:'Other'}];
+ assert.deepEqual(flowRows(rows,labels).map(r=>r.label),['Food','Salary','Home utilities','Travel']);
+});
+test('generic category leaves retain parent context',async()=>{const {categoryLabel}=await import(moduleURL);assert.equal(categoryLabel('expense.housing.bank',[{category_id:'expense.housing.bank',label:'Bank'}]),'Housing / bank');assert.equal(categoryLabel('expense.transport.payment',[{category_id:'expense.transport.payment',label:'Payment'}]),'Transport / payment');});
+test('dense projection retains every edge, separates direction and offers exact account focus',async()=>{
+ const {mapProjection}=await import(moduleURL);assert.equal(typeof mapProjection,'function');
+ const nodes=Array.from({length:20},(_,i)=>({id:'a'+i,label:'Synthetic account '+i,account:'Synthetic account '+i,kind:'account'}));
+ const edges=[];for(let i=0;i<107;i++){nodes.push({id:'c'+i,label:'Synthetic category '+i,kind:'expense'});edges.push({id:'e'+i,source:'a'+(i%20),target:'c'+i,kind:'expense',amount_minor:100+i,count:1,currency:'CAD',selector:{endpoint:'transactions',filters:{account:'Synthetic account '+(i%20),category:'expense.group'+(i%7)+'.item'+i,direction:'outgoing',category_mode:'exact',flow:'expense'}}});}
+ const data={nodes,edges},result=mapProjection(data);
+ assert.ok(result.nodes.length<=40);assert.ok(result.edges.length<=107);
+ assert.equal(result.nodes.filter(n=>n.kind==='account').length,20,'Owned accounts remain individually visible in the realm');
+ assert.equal(result.edges.reduce((n,e)=>n+e.amount_minor,0),edges.reduce((n,e)=>n+e.amount_minor,0));
+ assert.deepEqual(result.edges.flatMap(e=>e.members||[e]).map(e=>e.id).sort(),edges.map(e=>e.id).sort());
+ const focused=mapProjection(data,'Synthetic account 0');assert.equal(focused.edges.flatMap(e=>e.members||[e]).length,edges.filter(e=>e.source==='a0').length);
+ assert.ok(focused.nodes.some(n=>n.account==='Synthetic account 0'));
+});
+test('flow API forwards bounded selector field allowlist without accepting arbitrary paths',async()=>{
+ const {financeAPI}=await import(moduleURL);let url;
+ const api=financeAPI(async u=>{url=u;return {ok:true,json:async()=>({})};});
+ await api('flow',{direction:'incoming',source_account:'A',target_account:'B',link_type:'own_cash',transfer_status:'unmatched',evil:'no'});
+ assert.equal(url,'/hermes/app-api/finance/flow?direction=incoming&source_account=A&target_account=B&link_type=own_cash&transfer_status=unmatched');
+});
 const moduleURL = new URL('../../frontend/finance/model.mjs', import.meta.url);
 test('finance API is fixed-origin, no-store and refuses unknown endpoints', async () => {
  const {financeAPI}=await import(moduleURL);

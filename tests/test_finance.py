@@ -755,7 +755,7 @@ def test_missing_database_schema_and_readonly(env):
     assert not path.exists()
 
 
-@pytest.mark.parametrize('route', ['meta','overview','transactions','transfers','investments','compensation','obligations'])
+@pytest.mark.parametrize('route', ['meta','overview','flow','transactions','transfers','investments','compensation','obligations'])
 @pytest.mark.parametrize('change,code', [
     ('anonymous', 401), ('member', 403), ('profile', 403), ('provisioning', 403),
     ('disabled', 401), ('revoked', 401), ('recovery', 401), ('expired', 401),

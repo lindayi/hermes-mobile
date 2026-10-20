@@ -276,6 +276,11 @@ ISSUE122_FINANCE_OVERLAY = {
     'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
 }
 SOURCE_FINGERPRINTS.update(ISSUE122_FINANCE_OVERLAY)
+# Issue #124 adds the read-only money map; historical source pins remain above.
+ISSUE124_MONEY_MAP_OVERLAY = {
+    'backend/finance.py': 'b8b54f604c6d2d327386220356deeb5b262a3bf565a162716d3f14f323c542ca',
+}
+SOURCE_FINGERPRINTS.update(ISSUE124_MONEY_MAP_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
