@@ -385,11 +385,18 @@ def query_compensation(db, f):
         where += ' AND payroll_id IN (SELECT l.payroll_id FROM payroll_component_links l JOIN hierarchical_transactions t ON t.tx_id=l.tx_id OR t.event_id=l.event_id WHERE t.account=?)'
         args.append(f.account)
     result['payroll'], result['coverage']['payroll'] = select_bounded(db, 'payroll_cashflow_bridge', PAYROLL_FIELDS, where, args, 'ORDER BY pay_date DESC,payroll_id')
+    selected_payroll_id = result['payroll'][0]['payroll_id'] if result['payroll'] else None
+    result['coverage']['selected_payroll_id'] = selected_payroll_id
+    result['warnings'].append('Components and links cover only the selected payroll sample (newest pay date, then payroll ID); the payroll list retains bounded reference history.')
     for key, table, fields in (
         ('components','payroll_components','payroll_id code kind amount_minor ytd_minor cash_effect_minor'),
         ('links','payroll_component_links','payroll_id code tx_id event_id status evidence'),
     ):
-        result[key], result['coverage'][key] = select_bounded(db, table, fields.split(), f'payroll_id IN (SELECT payroll_id FROM payroll_cashflow_bridge WHERE {where})', args, 'ORDER BY payroll_id,code')
+        result[key], result['coverage'][key] = select_bounded(db, table, fields.split(), 'payroll_id=?', [selected_payroll_id], 'ORDER BY code')
+    if not result['coverage']['components']['complete']:
+        result['components'] = []
+        result['coverage']['components'].update(returned=0, omitted=result['coverage']['components']['total'])
+        result['warnings'].append('Payroll breakdown unavailable: the selected sample exceeds the component limit and is withheld in full, never shown as a partial waterfall.')
     # Resolve only returned IDs in one hierarchy read, independent of payroll dates.
     endpoint_fields = ('record_id', 'date', 'account', 'currency', 'dataset')
     endpoint_where, endpoint_args = [], []

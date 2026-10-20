@@ -426,6 +426,73 @@ def test_payroll_link_resolution_reads_hierarchy_once_for_returned_ids(env, monk
     assert len(hierarchy_reads) == 1, hierarchy_reads
 
 
+def test_compensation_children_only_cover_newest_payroll_not_lexical_first(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        for i in range(41):
+            payroll_id = f'pay-{i:02}'
+            insert(db, 'payroll_cashflow_bridge', payroll_id=payroll_id,
+                   pay_date='2025-02-01' if i == 40 else '2025-01-01', currency='CAD')
+            for j in range(25):
+                insert(db, 'payroll_components', payroll_id=payroll_id, code=f'C{j:02}', amount_minor=100)
+                insert(db, 'payroll_component_links', payroll_id=payroll_id, code=f'C{j:02}', tx_id=payroll_id)
+        tx(db, 'bank:newest', tx_id='pay-40', date='2025-02-02')
+    response = client.get(BASE + '/compensation')
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['payroll'][0]['payroll_id'] == 'pay-40'
+    assert len(result['payroll']) == 41
+    assert result['coverage']['payroll'] == {'total': 41, 'returned': 41, 'omitted': 0, 'complete': True}
+    for key in ('components', 'links'):
+        assert {r['payroll_id'] for r in result[key]} == {'pay-40'}
+        assert len(result[key]) == 25
+        assert result['coverage'][key] == {'total': 25, 'returned': 25, 'omitted': 0, 'complete': True}
+    assert result['coverage']['selected_payroll_id'] == 'pay-40'
+    assert all(link['linked_record']['record_id'] == 'bank:newest' for link in result['links'])
+    assert any('Components and links' in warning and 'selected payroll sample' in warning for warning in result['warnings'])
+    # The server's date-descending, ID-ascending order also selects ties deterministically.
+    older = client.get(BASE + '/compensation?end=2025-01-01').json()
+    assert older['coverage']['selected_payroll_id'] == older['payroll'][0]['payroll_id'] == 'pay-00'
+    for key in ('components', 'links'):
+        assert {r['payroll_id'] for r in older[key]} == {'pay-00'}
+    empty = client.get(BASE + '/compensation?currency=USD').json()
+    assert empty['coverage']['selected_payroll_id'] is None
+    assert empty['payroll'] == empty['components'] == empty['links'] == []
+
+
+@pytest.mark.parametrize('component_count', [1000, 1001])
+def test_compensation_oversized_selected_component_group_is_withheld(env, component_count):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        for payroll_id, pay_date in [('old', '2025-01-01'), ('selected', '2025-02-01')]:
+            insert(db, 'payroll_cashflow_bridge', payroll_id=payroll_id, pay_date=pay_date,
+                   currency='CAD', gross_minor=500000, net_minor=350000)
+        for i in range(component_count):
+            insert(db, 'payroll_components', payroll_id='selected', code=f'C{i:04}', amount_minor=100)
+        for i in range(1001):
+            insert(db, 'payroll_component_links', payroll_id='selected', code=f'L{i:04}', tx_id='posted')
+        tx(db, 'bank:posted', tx_id='posted')
+        insert(db, 'equity_awards', award_id='reference', employer='Synthetic employer', grant_currency='USD')
+    response = client.get(BASE + '/compensation')
+    assert response.status_code == 200, response.text
+    result = response.json()
+    complete = component_count <= 1000
+    assert len(result['components']) == (component_count if complete else 0)
+    assert result['coverage']['components'] == {
+        'total': component_count, 'returned': component_count if complete else 0,
+        'omitted': 0 if complete else component_count, 'complete': complete,
+    }
+    assert result['coverage']['selected_payroll_id'] == 'selected'
+    assert [r['payroll_id'] for r in result['payroll']] == ['selected', 'old']
+    assert result['payroll'][0]['net_minor'] == 350000
+    assert result['awards'][0]['award_id'] == 'reference'
+    assert result['coverage']['links'] == {'total': 1001, 'returned': 1000, 'omitted': 1, 'complete': False}
+    assert len(result['links']) == 1000
+    assert all(link['linked_record']['record_id'] == 'bank:posted' for link in result['links'])
+    if not complete:
+        assert any('breakdown unavailable' in warning and 'withheld in full' in warning for warning in result['warnings'])
+
+
 def test_compensation_dated_awards_and_payroll_components(env):
     client, path, _, _ = env
     with sqlite3.connect(path) as db:

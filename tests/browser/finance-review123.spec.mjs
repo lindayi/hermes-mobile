@@ -126,6 +126,26 @@ test('payroll drill uses the actual linked record posted date and clears unrelat
  const ledger=page.getByRole('table',{name:'Transactions',exact:true});assert.equal(await ledger.locator('tbody tr').count(),1);await ledger.getByText(bank.description,{exact:true}).waitFor();await ledger.getByText('CAD 3,500.00',{exact:true}).waitFor();assert.equal(await page.locator('[data-page-status]').textContent(),'1–1 of 1 records');
 });
 
+test('incomplete selected payroll component coverage hides waterfall without hiding net or linked evidence',{timeout:20000},async t=>{
+ const bank={...debit,record_id:'bank:synthetic-net',tx_id:'synthetic-net',date:'2024-01-02',flow:'income',category_id:'income.payroll',amount_minor:350000,description:'Synthetic selected payroll net'};
+ const pay={payroll_id:'z-newest',pay_date:'2024-01-01',currency:'CAD',gross_minor:500000,net_minor:350000};
+ let complete=false;
+ const compensation=()=>({payroll:[pay,{...pay,payroll_id:'a-older',pay_date:'2023-12-01',net_minor:100}],components:complete?[{payroll_id:pay.payroll_id,code:'TAX',kind:'deduction',amount_minor:150000,cash_effect_minor:-150000}]:[],links:[{payroll_id:pay.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched',linked_record:{record_id:bank.record_id,date:bank.date,account:bank.account,currency:bank.currency,dataset:bank.dataset}}],awards:[{award_id:'synthetic-grant-reference',employer:'Synthetic employer',grant_currency:'USD',grant_value_minor:100000}],coverage:{selected_payroll_id:pay.payroll_id,components:complete?{total:1,returned:1,omitted:0,complete:true}:{total:1001,returned:0,omitted:1001,complete:false}}});
+ const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation}});await page.goto(url);await ready(page);
+ await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
+ assert.equal(await page.locator('[data-chart="waterfall"]').count(),0);
+ await page.getByText('Payroll breakdown unavailable: component coverage is incomplete. Bank net and recorded evidence remain available.',{exact:true}).waitFor();
+ const sample=page.getByRole('table',{name:'Payroll sample',exact:true});await sample.getByText(pay.pay_date,{exact:true}).waitFor();await sample.getByText('CAD 3,500.00',{exact:true}).waitFor();
+ await page.getByRole('table',{name:'Grant reference values',exact:true}).getByText('USD 1,000.00',{exact:true}).waitFor();
+ await page.getByRole('table',{name:'Payroll links',exact:true}).getByRole('button',{name:'Inspect linked entry'}).click();await ready(page);
+ assert.equal(last(calls,'transactions').record_id,bank.record_id);assert.equal(last(calls,'transactions').start,bank.date);
+ await page.getByRole('table',{name:'Transactions',exact:true}).getByText(bank.description,{exact:true}).waitFor();
+ complete=true;await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
+ assert.equal(await page.locator('[data-chart="waterfall"]').count(),1);
+ assert.equal(await page.getByText('Payroll breakdown unavailable: component coverage is incomplete. Bank net and recorded evidence remain available.',{exact:true}).count(),0);
+ await page.getByRole('table',{name:'Current vs year-to-date components',exact:true}).getByText('TAX',{exact:true}).waitFor();
+});
+
 test('alluvial keeps skewed category bands, nodes and labels inside its viewBox with a twelve-category bound',{timeout:20000},async t=>{
  const categories=Array.from({length:13},(_,i)=>({category_id:`expense.item${i}`,flow:'expense',amount_minor:-(i===0?1000000:i===12?1:100),count:1}));
  const {page,url}=await fixture(t,{responses:{overview:()=>({categories})}});await page.goto(url);await ready(page);

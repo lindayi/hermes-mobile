@@ -22,6 +22,8 @@ The user confirmation and original-source review pipeline remain separate from t
 
 A category band represents an exact category and effective flow, not its entire prefix subtree. The backend preserves separate signed income/expense aggregates and the frontend carries exact category + flow into the matching transaction query. Ordinary category-prefix search remains available explicitly. Clicking a linked transfer leg visibly switches to that leg's date/account/currency and all-scope/all-dataset context; crossing a year boundary or family earmark must not make an already displayed counterpart disappear. Payroll links use the actual eligible linked transaction's date, account, currency and qualified record ID, not an inferred payslip date. Missing linked endpoints remain evidence without an invented navigation target. Each API response holds a single read transaction so concurrent ingestion cannot mix totals and detail snapshots.
 
+The payroll breakdown and links belong to the displayed newest pay-date reference, not a bounded prefix of every historical child row. Response coverage identifies that payroll; oversized component groups are unavailable in full rather than rendered as a partial waterfall.
+
 The compensation schedule has an explicit full-horizon default, separate from payroll dates. Selecting vest-date range filters scheduled events by vest date, not award date, and retains their grant-reference context. No date passage silently creates actual vested shares.
 
 ## Quotes and estimated valuations
