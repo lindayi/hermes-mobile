@@ -12,7 +12,9 @@ export function alluvial(rows,currency,inspect){
  if(!rows.length)return empty('No classified cash flows are available for this range.');
  const visible=[...rows].sort((a,b)=>Math.abs(b.amount_minor)-Math.abs(a.amount_minor)).slice(0,12), height=Math.max(390,visible.length*58+120);
  const s=chartBox('alluvial','Classified cash flows, not a balanced sources-and-uses model. Width is absolute value; signed recoveries are separate.',960,height);
- const total=visible.reduce((n,r)=>n+Math.abs(r.amount_minor),0)||1, available=height-100-visible.length*32;
+ // Reserve every label row and its gap before allocating proportional band height.
+ const rowMin=34,rowGap=12;
+ const total=visible.reduce((n,r)=>n+Math.abs(r.amount_minor),0)||1, available=height-100-visible.length*(rowMin+rowGap);
  const groups=new Map();
  visible.forEach(r=>{const key=r.direction==='recovery'?'Recovery / reversal':r.flow||r.category_id?.split(/[.:/]/)[0]||'Unresolved';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(r);});
  let left=60,right=60,index=0;
@@ -24,7 +26,7 @@ export function alluvial(rows,currency,inspect){
    const path=svg('path',{d:`M200 ${sy} C410 ${sy} 475 ${y} 680 ${y} L680 ${y+h} C475 ${y+h} 410 ${sy+h} 200 ${sy+h} Z`,fill:color,opacity:'.32',class:'flow-link',tabindex:0,role:'button','aria-label':`Inspect ${r.label}`},svg('title',{},`${r.label}: ${money(r.amount_minor,currency)} · ${r.direction}`));
    const run=()=>inspect(r);path.addEventListener('click',run);path.addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();run();}});
    s.append(path,svg('rect',{x:680,y,width:5,height:h,fill:color}),svg('text',{x:700,y:y+12,class:'chart-label'},String(r.label).slice(0,28)),svg('text',{x:700,y:y+29,class:'chart-value'},money(r.amount_minor,currency)));
-   left+=h;right+=Math.max(34,h)+12;
+   left+=h;right+=Math.max(rowMin,h)+rowGap;
   });left+=22;
  }
  s.prepend(svg('text',{x:35,y:22,class:'chart-axis'},'FLOW CLASS'),svg('text',{x:700,y:22,class:'chart-axis'},'CATEGORY / SIGNED AMOUNT'));

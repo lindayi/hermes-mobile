@@ -8,6 +8,7 @@ prices/rates are null, never zero. Quote source age >4 days and FX age >7 days
 are stale. The cache retries after 60s (15s on failure); fallback retains the
 original fetched_at and is limited to 24h since a successful provider fetch.
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 import json
 import math
@@ -238,8 +239,12 @@ def build_market_router(auth_service):
         if len(selected) > 12 or any(symbol not in SYMBOLS for symbol in selected):
             raise HTTPException(400, 'Unsupported symbols or excessive symbol count')
         selected = list(dict.fromkeys(selected))
-        values = [cache.get(symbol) for symbol in selected]
-        fx = cache.get('USDCAD')
+        # One bounded wave, including FX: provider timeouts must not add up
+        # across symbols and exceed the client's 15s request budget. Keep the
+        # per-symbol cache locks/TTLs and the requested response order intact.
+        with ThreadPoolExecutor(max_workers=len(SYMBOLS) + 1) as pool:
+            results = list(pool.map(cache.get, [*selected, 'USDCAD']))
+        values, fx = results[:-1], results[-1]
         warnings = [f"{item.get('symbol', 'USDCAD')}: {item['status']}"
                     for item in [*values, fx] if item['status'] != 'ok']
         return {'quotes': values, 'fx': fx, 'meta': {'generated_at': _iso(_now()),

@@ -329,8 +329,8 @@ _PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
 # candidate bytes at runtime. Earlier app/build overlays remain historical.
 _ISSUE122_FINANCE_FIXTURE = {
     'backend/app.py': '0140f22b01003b04bd64372991452888e5985a17b44d34b005855bbedad1a568',
-    'backend/finance.py': 'ff1d3128a032d5b4d4f1bb9ad8474d1d2b8fa9fc7b7199f6a59b809cd1a4ba54',
-    'backend/finance_market.py': '025c296b8ddd3c88a50d433634c6ff00920debb39cae9ffd92bbef9f499dcecf',
+    'backend/finance.py': '5ed4481f9932fe96ee848b48af08e39e0ac4dce65fb11a31bffd0a3f1de2e1d1',
+    'backend/finance_market.py': '4fb17c3fc66e3d094291b3192eee02366ee879da3298c027eb27e51b39e8e731',
     'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
 }
 

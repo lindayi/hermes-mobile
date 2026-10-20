@@ -48,6 +48,15 @@ function categoryOverview(q){
  const groups=new Map();for(const row of selected(categoryRows,q)){const key=row.category_id+'|'+row.flow;const group=groups.get(key)||{category_id:row.category_id,flow:row.flow,currency:row.currency,amount_minor:0,expense_minor:0,income_minor:0,count:0};for(const field of ['amount_minor','expense_minor','income_minor'])group[field]+=row[field];group.count++;groups.set(key,group);}return {categories:[...groups.values()]};
 }
 
+for(const holdings of [[],[{security_key:'SYNTHETIC_PLAN',quantity:'10',quantity_basis:'plan units',currency:'CAD'}]])test(`quote coverage replaces loading without removing caveats for ${holdings.length?'unsupported':'empty'} holdings`,{timeout:20000},async t=>{
+ const {page,calls,url}=await fixture(t,{responses:{investments:()=>({holdings})}});await page.goto(url);await ready(page);
+ await page.getByRole('tab',{name:'Investments',exact:true}).click();await ready(page);
+ await page.getByText('No supported share symbols supplied by the ledger. Market estimates unavailable.',{exact:true}).waitFor();
+ assert.equal(await page.getByText('Loading public quote coverage…',{exact:true}).count(),0);
+ await page.getByText('Separate estimates only. Public prices never overwrite ledger values. Unquoted or unsupported units are not included in current estimates.',{exact:true}).waitFor();
+ assert.equal(calls.filter(c=>c.name==='quotes').length,0);
+});
+
 test('clicked transfer counterpart replaces source-date, account and scope predicates visibly',{timeout:20000},async t=>{
  const {page,calls,url}=await fixture(t);await page.goto(url);await ready(page);
  await page.getByLabel('From',{exact:true}).fill('2023-12-31');await page.getByLabel('Through',{exact:true}).fill('2023-12-31');await page.getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('bank');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
@@ -81,18 +90,28 @@ test('category bands and table drill into exact authoritative flows with signed 
  await page.getByRole('tab',{name:'Transactions & evidence',exact:true}).click();await ready(page);for(const key of ['category','category_mode','flow'])assert.equal(last(calls,'transactions')[key],undefined);
 });
 
-test('raw payroll tx link uses its known pay date and clears unrelated ledger filters',{timeout:20000},async t=>{
+test('payroll drill uses the actual linked record posted date and clears unrelated ledger filters',{timeout:20000},async t=>{
  const bank={...credit,record_id:'bank:synthetic-paynet',tx_id:'synthetic-paynet',date:'2024-01-02',flow:'income',category_id:'income.payroll',amount_minor:350000,description:'Synthetic payroll bank net'};
- const payroll={payroll_id:'synthetic-payroll',pay_date:bank.date,currency:bank.currency,gross_minor:500000,net_minor:350000};
- const links=[{payroll_id:payroll.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched'},{payroll_id:payroll.payroll_id,code:'SAVINGS',event_id:'synthetic-event',status:'recorded'}];
+ const payroll={payroll_id:'synthetic-payroll',pay_date:'2024-01-01',currency:bank.currency,gross_minor:500000,net_minor:350000};
+ const links=[{payroll_id:payroll.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched',linked_record:{record_id:bank.record_id,date:bank.date,account:bank.account,currency:bank.currency,dataset:bank.dataset}},{payroll_id:payroll.payroll_id,code:'SAVINGS',event_id:'synthetic-event',status:'recorded',linked_record:null},{payroll_id:payroll.payroll_id,code:'MISSING',tx_id:'synthetic-missing',linked_record:null},{payroll_id:payroll.payroll_id,code:'LEGACY',tx_id:'synthetic-legacy'}];
  const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation:()=>({payroll:[payroll],links})}});
  await page.goto(url);await ready(page);await page.getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('investment');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
  await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
- const linkTable=page.getByRole('table',{name:'Payroll links'});await linkTable.getByText('synthetic-event',{exact:true}).waitFor();assert.equal(await linkTable.getByRole('button').count(),1);
+ const linkTable=page.getByRole('table',{name:'Payroll links'});await linkTable.getByText('synthetic-event',{exact:true}).waitFor();await linkTable.getByText('synthetic-missing',{exact:true}).waitFor();await linkTable.getByText('synthetic-legacy',{exact:true}).waitFor();assert.equal(await linkTable.getByRole('button').count(),1);
  await linkTable.getByRole('button',{name:'Inspect linked entry'}).click();await ready(page);
- assert.deepEqual(last(calls,'transactions'),{start:bank.date,end:bank.date,currency:bank.currency,scope:'all',dataset:'all',record_id:bank.tx_id,offset:'0',limit:'25'});
- assert.deepEqual(await formValues(page),{start:bank.date,end:bank.date,currency:bank.currency,scope:'all',dataset:'all',account:''});
+ assert.deepEqual(last(calls,'transactions'),{start:bank.date,end:bank.date,currency:bank.currency,scope:'all',account:bank.account,dataset:'all',record_id:bank.record_id,offset:'0',limit:'25'});
+ assert.deepEqual(await formValues(page),{start:bank.date,end:bank.date,currency:bank.currency,scope:'all',dataset:'all',account:bank.account});
  const ledger=page.getByRole('table',{name:'Transactions',exact:true});assert.equal(await ledger.locator('tbody tr').count(),1);await ledger.getByText(bank.description,{exact:true}).waitFor();await ledger.getByText('CAD 3,500.00',{exact:true}).waitFor();assert.equal(await page.locator('[data-page-status]').textContent(),'1–1 of 1 records');
+});
+
+test('alluvial keeps skewed category bands, nodes and labels inside its viewBox with a twelve-category bound',{timeout:20000},async t=>{
+ const categories=Array.from({length:13},(_,i)=>({category_id:`expense.item${i}`,flow:'expense',amount_minor:-(i===0?1000000:i===12?1:100),count:1}));
+ const {page,url}=await fixture(t,{responses:{overview:()=>({categories})}});await page.goto(url);await ready(page);
+ const chart=page.locator('[data-chart="alluvial"]');assert.equal(await chart.locator('path').count(),12);
+ const overflow=await chart.evaluate(s=>{const v=s.viewBox.baseVal;return [...s.querySelectorAll('rect,path,text')].flatMap(n=>{const b=n.getBBox();return b.x<v.x||b.y<v.y||b.x+b.width>v.x+v.width||b.y+b.height>v.y+v.height?[{tag:n.tagName,label:n.textContent,bounds:{x:b.x,y:b.y,width:b.width,height:b.height},viewBox:s.getAttribute('viewBox')}]:[];});});
+ assert.deepEqual(overflow,[]);
+ await page.getByText('Diagram shows the 12 largest categories by absolute materiality; the full signed table below retains every returned category.',{exact:true}).waitFor();
+ await page.getByText('Cash-flow categories · table alternative',{exact:true}).click();assert.equal(await page.getByRole('table',{name:'Cash-flow categories',exact:true}).locator('tbody tr').count(),13);
 });
 
 test('vesting policy defaults to full horizon and explicitly selects vest dates without losing grant context',{timeout:20000},async t=>{

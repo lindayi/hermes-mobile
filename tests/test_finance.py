@@ -305,6 +305,78 @@ def test_investments_preserve_unknown_basis_and_nonoverlapping_periods(env):
     assert result['warnings']
 
 
+@pytest.mark.parametrize('identifier,dataset', [('tx_id', 'bank'), ('event_id', 'investment')])
+def test_payroll_links_resolve_safe_actual_endpoint_outside_pay_date(env, identifier, dataset):
+    client, path, _, _ = env
+    raw_id = "raw-payroll' OR 1=1--"
+    expected = {'record_id': dataset + ':posted', 'date': '2026-01-02',
+                'account': 'Payroll destination', 'currency': 'USD', 'dataset': dataset}
+    with sqlite3.connect(path) as db:
+        insert(db, 'payroll_cashflow_bridge', payroll_id='pay', pay_date='2025-12-31', currency='CAD')
+        insert(db, 'payroll_component_links', payroll_id='pay', code='NET', **{identifier: raw_id})
+        tx(db, 'posted', **expected, **{identifier: raw_id},
+           source_pdf='PRIVATE PATH', description='PRIVATE DESCRIPTION')
+        tx(db, 'posted-allocation', **expected, **{identifier: raw_id}, allocation='family')
+        tx(db, 'aaa-wrong-dataset', **{identifier: raw_id},
+           dataset='investment' if dataset == 'bank' else 'bank')
+        # An unrelated earlier record must not satisfy the bound original ID.
+        tx(db, 'aaa-unrelated', **{identifier: 'unrelated'})
+        for code, invalid in [('pending', {'record_status': 'pending'}),
+                              ('duplicate', {'duplicate_of': 'posted'}),
+                              ('excluded', {'included': 0}), ('void', {'record_status': 'void'}),
+                              ('status-excluded', {'record_status': 'excluded'}),
+                              ('status-duplicate', {'record_status': 'duplicate'})]:
+            tx(db, code, dataset=dataset, **{identifier: code}, **invalid)
+            insert(db, 'payroll_component_links', payroll_id='pay', code=code, **{identifier: code})
+        insert(db, 'payroll_component_links', payroll_id='pay', code='missing', **{identifier: 'absent'})
+        insert(db, 'payroll_component_links', payroll_id='pay', code='unmatched')
+    response = client.get(BASE + '/compensation', params={'start': '2025-12-31', 'end': '2025-12-31'})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    links = {link['code']: link for link in result['links']}
+    assert links['NET'].get('linked_record') == expected
+    assert links['NET'][identifier] == raw_id
+    assert all(link['linked_record'] is None for code, link in links.items() if code != 'NET')
+    assert result['coverage']['links']['total'] == len(links) == 9
+    assert result['coverage']['links']['complete'] is True
+    assert 'PRIVATE' not in response.text and 'source_pdf' not in response.text
+    assert response.headers['cache-control'] == 'no-store'
+    endpoint = links['NET']['linked_record']
+    detail = client.get(BASE + '/transactions', params={
+        'record_id': endpoint['record_id'], 'start': endpoint['date'], 'end': endpoint['date'],
+        'account': endpoint['account'], 'currency': endpoint['currency'],
+        'dataset': endpoint['dataset'], 'scope': 'all',
+    })
+    assert detail.status_code == 200, detail.text
+    assert {item['entry_id'] for item in detail.json()['items']} == {'posted', 'posted-allocation'}
+
+
+def test_payroll_link_resolution_reads_hierarchy_once_for_returned_ids(env, monkeypatch):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        insert(db, 'payroll_cashflow_bridge', payroll_id='pay', pay_date='2025-12-31', currency='CAD')
+        for dataset, identifier in [('bank', 'tx_id'), ('investment', 'event_id')]:
+            for i in range(3):
+                raw_id = 'raw-' + str(i)
+                record_id = dataset + ':' + raw_id
+                tx(db, record_id, dataset=dataset, **{identifier: raw_id})
+                insert(db, 'payroll_component_links', payroll_id='pay', code=record_id, **{identifier: raw_id})
+    statements = []
+    connect = sqlite3.connect
+    def traced_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        db.set_trace_callback(statements.append)
+        return db
+    monkeypatch.setattr(sqlite3, 'connect', traced_connect)
+    response = client.get(BASE + '/compensation')
+    assert response.status_code == 200, response.text
+    links = response.json()['links']
+    assert len(links) == 6
+    assert all(link['linked_record']['record_id'] == link['code'] for link in links)
+    hierarchy_reads = [sql for sql in statements if 'FROM HIERARCHICAL_TRANSACTIONS' in sql.upper()]
+    assert len(hierarchy_reads) == 1, hierarchy_reads
+
+
 def test_compensation_dated_awards_and_payroll_components(env):
     client, path, _, _ = env
     with sqlite3.connect(path) as db:
@@ -503,6 +575,28 @@ def test_upcoming_tax_schedule_separate_from_filtered_paid_history(env):
 @pytest.mark.parametrize('params', ['limit=101', 'offset=-1', 'scope=other', 'currency=EUR', 'start=2025-02-30', 'start=1900-01-01&end=2025-01-01', 'start=2026-01-01&end=2025-01-01', 'q=' + 'x'*121, 'path=/tmp/other', 'sql=DROP', 'dataset=other', 'category_mode=other', 'flow=other', 'vesting_policy=other'])
 def test_invalid_filters_rejected(env, params):
     assert env[0].get(BASE + '/transactions?' + params).status_code == 422
+
+
+def test_read_connection_keeps_one_snapshot_during_concurrent_wal_commit(env):
+    _, path, _, _ = env
+    writer = sqlite3.connect(path)
+    try:
+        assert writer.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+        tx(writer, 'original', expense_minor=100)
+        writer.commit()
+        with finance_module().open_finance(path.parent.parent) as reader:
+            before = tuple(reader.execute('SELECT COUNT(*), SUM(expense_minor) FROM hierarchical_transactions').fetchone())
+            writer.execute('UPDATE hierarchical_transactions SET expense_minor=200')
+            tx(writer, 'new', expense_minor=300)
+            writer.commit()
+            after = tuple(reader.execute('SELECT COUNT(*), SUM(expense_minor) FROM hierarchical_transactions').fetchone())
+            assert before == after == (1, 100)
+            with pytest.raises(sqlite3.OperationalError, match='readonly'):
+                reader.execute('DELETE FROM hierarchical_transactions')
+        with finance_module().open_finance(path.parent.parent) as reader:
+            assert tuple(reader.execute('SELECT COUNT(*), SUM(expense_minor) FROM hierarchical_transactions').fetchone()) == (2, 500)
+    finally:
+        writer.close()
 
 
 def test_missing_database_schema_and_readonly(env):

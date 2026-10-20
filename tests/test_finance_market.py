@@ -247,6 +247,59 @@ def test_timeout_is_partial_unavailable_with_safe_error(market, auth, monkeypatc
     assert 'PRIVATE_UPSTREAM_DETAIL' not in response.text
 
 
+def test_slow_quote_batch_retains_successes_within_client_budget(market, auth, monkeypatch):
+    from threading import Barrier, BrokenBarrierError
+    import time
+
+    # All seven allowlisted lookups must start before any provider completes.
+    # This models five 4s timeouts without a flaky 20s sequential wall-clock test.
+    providers_started = Barrier(7)
+    serialized = []
+    successful_symbol = 'TDB.TO'
+
+    def handler(request):
+        try:
+            providers_started.wait(timeout=2)
+        except BrokenBarrierError:
+            serialized.append(str(request.url))
+        assert request.extensions['timeout']['read'] <= 4
+        if request.url.host == 'www.bankofcanada.ca':
+            return boc()
+        symbol = request.url.path.rsplit('/', 1)[-1]
+        if symbol == successful_symbol:
+            return yahoo(symbol)
+        raise httpx.ReadTimeout('PRIVATE_UPSTREAM_DETAIL')
+
+    requests = network(monkeypatch, market, handler)
+    client = client_for(market, auth)
+    selected = list(market.SYMBOLS)
+    started = time.monotonic()
+    response = client.get(BASE, params={'symbols': ','.join(selected)})
+    elapsed = time.monotonic() - started
+    assert not serialized, 'Provider timeouts must overlap, not accumulate across the batch'
+    assert elapsed < 15, 'Successful entries must arrive before the frontend aborts'
+    assert response.status_code == 200
+    body = response.json()
+    assert [quote['symbol'] for quote in body['quotes']] == selected
+    for quote in body['quotes']:
+        if quote['symbol'] == successful_symbol:
+            assert quote['status'] == 'ok'
+            assert quote['price'] == 123.45
+        else:
+            assert quote['status'] == 'unavailable'
+            assert quote['price'] is None
+            assert quote['error'] == 'provider_unavailable'
+    assert body['fx']['status'] == 'ok'
+    assert body['fx']['rate'] == 1.37
+    assert body['meta']['warnings'] == [f'{symbol}: unavailable' for symbol in selected[:-1]]
+    assert 'PRIVATE_UPSTREAM_DETAIL' not in response.text
+    assert len(requests) == 7
+    cached = client.get(BASE, params={'symbols': ','.join(selected)}).json()
+    assert cached['quotes'] == body['quotes']
+    assert cached['fx'] == body['fx']
+    assert len(requests) == 7, 'Parallel batches must preserve success and failure caching'
+
+
 class GuardedStream(httpx.SyncByteStream):
     def __init__(self, chunks):
         self.chunks = chunks

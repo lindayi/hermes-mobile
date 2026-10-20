@@ -32,6 +32,8 @@ def open_finance(profile_root):
         db.execute('PRAGMA query_only=ON')
         deadline = time.monotonic() + QUERY_SECONDS
         db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        # Read-only mode alone leaves SELECTs in autocommit, allowing mixed snapshots.
+        db.execute('BEGIN')
         yield db
     finally:
         db.close()
@@ -388,6 +390,27 @@ def query_compensation(db, f):
         ('links','payroll_component_links','payroll_id code tx_id event_id status evidence'),
     ):
         result[key], result['coverage'][key] = select_bounded(db, table, fields.split(), f'payroll_id IN (SELECT payroll_id FROM payroll_cashflow_bridge WHERE {where})', args, 'ORDER BY payroll_id,code')
+    # Resolve only returned IDs in one hierarchy read, independent of payroll dates.
+    endpoint_fields = ('record_id', 'date', 'account', 'currency', 'dataset')
+    endpoint_where, endpoint_args = [], []
+    for dataset, identifier in (('bank', 'tx_id'), ('investment', 'event_id')):
+        ids = list(dict.fromkeys(link[identifier] for link in result['links'] if link[identifier] is not None))
+        if ids:
+            endpoint_where.append(f"(dataset='{dataset}' AND {identifier} IN ({','.join('?' for _ in ids)}))")
+            endpoint_args.extend(ids)
+    endpoints = {}
+    if endpoint_args:
+        # Allocation rows share an endpoint; keep one per original, dataset-qualified ID.
+        linked_id = "CASE WHEN dataset='bank' THEN tx_id ELSE event_id END"
+        sql = f'''WITH ranked AS (
+            SELECT {','.join(endpoint_fields)},{linked_id} linked_id,
+                ROW_NUMBER() OVER (PARTITION BY dataset,{linked_id} ORDER BY record_id,entry_id) endpoint_rank
+            FROM hierarchical_transactions WHERE {VALID_TX} AND ({' OR '.join(endpoint_where)})
+        ) SELECT {','.join(endpoint_fields)},linked_id FROM ranked WHERE endpoint_rank=1 LIMIT ?'''
+        for endpoint in db.execute(sql, (*endpoint_args, len(endpoint_args))):
+            endpoints[(endpoint['dataset'], endpoint['linked_id'])] = {field: endpoint[field] for field in endpoint_fields}
+    for link in result['links']:
+        link['linked_record'] = endpoints.get(('bank', link['tx_id'])) or endpoints.get(('investment', link['event_id']))
     # Grants are context, not vest-date observations: never filter by award_date.
     pred, params = '1=1', []
     if f.scope == 'protected' or f.account:
