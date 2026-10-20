@@ -10156,7 +10156,8 @@ def test_owner_abandonment_distinct_receipt_reaches_review_after_restart(tmp_pat
 
 
 def _owner_abandonment_transitive_case(
-        tmp_path, lineage_hazard=None, *, bare=False, sequential_root=False):
+        tmp_path, lineage_hazard=None, *, bare=False, sequential_root=False,
+        legacy_source=False):
     neutral_head = (
         NEXT_RESULT_HEAD if lineage_hazard == "same-head-successor" else "9" * 40
     )
@@ -10260,6 +10261,8 @@ def _owner_abandonment_transitive_case(
         assert len(StateStore(store.path).snapshot()["enrollments"]["16"][
             "owner_abandonments"
         ]) == 2
+    if legacy_source:
+        source = _seed_historical_unanchored_source_action(api, store, source)
     api.complete_task(
         source["task_id"], source,
         result="policy_broken" if lineage_hazard == "non-ready" else "ready",
@@ -11161,7 +11164,10 @@ def test_owner_abandonment_legacy_lineage_seam_apply_restart(
         tmp_path, publication, shape):
     (
         api, store, abandoned, reservation, recovery, neutral, source, _, head, _,
-    ) = _owner_abandonment_transitive_case(tmp_path)
+    ) = _owner_abandonment_transitive_case(
+        tmp_path,
+        legacy_source=shape.startswith("v1-") or shape == "live-key-omitted",
+    )
     StateStore(store.path).retire(16, head, FINAL_RESULT_HEAD)
 
     def configure(state):
@@ -23216,6 +23222,7 @@ def test_retired_review_tests_are_mapped_to_collected_regressions():
     migration = (
         Path(__file__).resolve().parents[1] / "docs" / "cloud-coordinator-spec.md"
     ).read_text()
+    migration_text = " ".join(migration.split())
     replacements = (
         "test_later_review_does_not_release_active_or_uncertain_correction",
         "test_waiting_copilot_review_handoff_survives_restart_without_budget",
@@ -23229,8 +23236,14 @@ def test_retired_review_tests_are_mapped_to_collected_regressions():
         "test_completed_copilot_comment_accepts_review_without_independent_report",
     )
 
-    assert len(retired) == 60
+    assert len(retired) == 59
     assert all(f"`{name}`" in migration for name in retired)
+    assert (
+        "`review_report_findings_publish_and_trigger_bounded_followup`" in migration
+        and "`test_source_repair_from_copilot_finding_gets_bound_receipt_anchor`"
+        in migration
+        and "retired-function inventory. Many remaining cases" in migration_text
+    )
     assert all(name in migration and callable(globals().get(name)) for name in replacements)
 
 
