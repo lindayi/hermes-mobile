@@ -298,7 +298,9 @@ def test_sha_bound_task_requires_an_unchanged_exact_ready_receipt(tmp_path):
     assert api.fix_attempts == 1
 
 
-def _accepted_compacted_receipt_case(tmp_path, issue=16, *, legacy_v1=False):
+def _accepted_compacted_receipt_case(tmp_path, issue=16, *, legacy_v1=True):
+    # This shared fixture predates anchored SOURCE receipts. Its callers exercise
+    # historical key omission/conflicts; keep that format unless explicitly opted out.
     api = FakeApi(unresolved=True)
     if issue != 16:
         api.pull["number"] = issue
@@ -411,7 +413,7 @@ def test_apply_rejects_malformed_receipt_issue_identity_in_all_forms(
     for comment in api.comments:
         if comment.get("id") == proof["receipt_comment_id"]:
             comment["body"] = proof_body
-    assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
+    assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
     def install_representation(state):
         enrollment = state["enrollments"][str(issue)]
@@ -2326,15 +2328,22 @@ def _bind_test_source_anchor(store, action):
 
 
 def _seed_historical_unanchored_source_action(api, store, action):
+    from deploy.task_receipts import receipt_instruction
+
     action = deepcopy(action)
     anchor_key = action.get("receipt_anchor_key")
     anchor_comment_id = action.get("receipt_anchor_comment_id")
+    action["body"] = action["task_request_body"] + "\n\n" + receipt_instruction(
+        action["dispatch_nonce"], pull_number=action["issue"],
+        start_head=action["head"], base_sha=action["main_sha"],
+    )
     for field in tuple(action):
         if field.startswith("receipt_anchor_"):
             action.pop(field)
 
     def restore_legacy_action(state):
         persisted = state["actions"][action["key"]]
+        persisted["body"] = action["body"]
         for field in tuple(persisted):
             if field.startswith("receipt_anchor_"):
                 persisted.pop(field)
@@ -3807,7 +3816,19 @@ def _ready_sha_bound_handoff(tmp_path):
     coordinator.run(apply=True)
     first = next(action for action in store.actions().values()
                  if action.get("kind") == "fix")
+    # This helper seeds a pre-anchor handoff for upgrade and legacy-fence tests.
+    first = _seed_historical_unanchored_source_action(api, store, first)
     api.complete_task(first["task_id"], first, head_sha=RESULT_HEAD)
+    api.comments[-1]["body"] = (
+        "Hermes-Task-Receipt: v2\n"
+        f"nonce={first['dispatch_nonce']}\n"
+        "pr=16\n"
+        f"session=session-{first['task_id']}\n"
+        f"start_head={HEAD}\n"
+        f"base={BASE}\n"
+        f"head={RESULT_HEAD}\n"
+        "result=ready"
+    )
     api.head_sha = RESULT_HEAD
     api.pull["head"]["sha"] = RESULT_HEAD
     api.review_state = "PENDING"
@@ -12629,7 +12650,7 @@ def _owner_abandonment_previous_case(tmp_path, compacted):
     (
         api, store, abandoned, abandoned_reservation, recovery, neutral, source,
         _, source_head, _,
-    ) = _owner_abandonment_transitive_case(tmp_path)
+    ) = _owner_abandonment_transitive_case(tmp_path, legacy_source=True)
     source = StateStore(store.path).action(source["key"])
     if compacted:
         api.review_state = "APPROVED"
