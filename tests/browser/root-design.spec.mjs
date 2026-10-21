@@ -32,7 +32,7 @@ async function fixture(){
     let data={items:[]};
     if(endpoint==='/auth/me')data={user:{id:`synthetic-${state.role}`,role:state.role,status:state.status},csrf_token:'fixture-csrf'};
     else if(endpoint==='/sessions')data={deletion_available:true,items:[{id:'s1',title:'Synthetic root chat',run_status:'idle',source:'web'}],total:1};
-    else if(endpoint==='/sessions/s1/messages')data={items:[{role:'user',content:'Synthetic question.'},{role:'assistant',content:'Synthetic answer.'}],run:null};
+    else if(endpoint==='/sessions/s1/messages')data={items:[{role:'user',content:'Synthetic question. [Example](https://example.com)'},{role:'assistant',content:'Synthetic answer.'}],run:null};
     else if(endpoint==='/sessions/s1/model-options')data={available:true,models:[{id:'fixture-model',provider:'fixture',label:'Synthetic model',reasoning_efforts:[]}]};
     else if(endpoint==='/push/preferences')data={revision:0,enabled:false,categories:{completion:true,approval:true,attention:true,scheduled:true,operational:true},hide_details:false};
     else if(endpoint==='/jobs')data={items:[]};
@@ -89,6 +89,19 @@ test('selected navigation and filters meet normal-text contrast in both themes',
     const colors=await target.evaluate(node=>{const style=getComputedStyle(node);return [style.color,style.backgroundColor];});
     assert.ok(contrast(...colors)>=4.5,`${selector} ${width}px ${theme} normal-text contrast ${contrast(...colors).toFixed(3)} is below 4.5:1`);
    }
+  }
+ }finally{await h.close();}
+});
+
+test('user message links retain readable contrast in both themes', {timeout:45000}, async()=>{
+ const h=await fixture(),{page}=h;
+ try{
+  await page.getByRole('button',{name:'Synthetic root chat',exact:true}).click();
+  const link=page.locator('.user-message a');await link.waitFor({state:'visible'});
+  for(const theme of ['light','dark']){
+   await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);
+   const colors=await link.evaluate(node=>[getComputedStyle(node).color,getComputedStyle(node.closest('.user-message')).backgroundColor]);
+   assert.ok(contrast(...colors)>=4.5,`user message link ${theme} contrast ${contrast(...colors).toFixed(3)} is below 4.5:1`);
   }
  }finally{await h.close();}
 });

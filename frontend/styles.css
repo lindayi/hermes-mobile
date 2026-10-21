@@ -199,7 +199,7 @@ details[open]>summary .disclosure-icon{transform:rotate(90deg)}
 .approval-card .review-payload{max-height:35dvh;overflow:auto}
 .approval-card .review-payload:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 .approval-card .actions button{flex:1 1 120px;white-space:normal}
-.nav-item[aria-current=page],.filter-segment[aria-pressed=true],.filter-toggle[data-active=true]{color:var(--accent-hover)}
+.nav-item[aria-current=page],.filter-segment[aria-pressed=true],.filter-toggle[data-active=true],.user-message a{color:var(--accent-hover)}
 h1{font-family:Georgia,"Times New Roman",serif}
 h2,h3,.brand{font-family:"Helvetica Neue",Arial,sans-serif;letter-spacing:-.015em}
 .card{padding:18px 16px;border-radius:14px}
