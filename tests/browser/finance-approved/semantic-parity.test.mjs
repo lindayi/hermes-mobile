@@ -1,0 +1,15 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {createModel,ranked} from '../../../frontend/finance/approved/live-model.mjs';
+test('unidentified receipts and payments cannot form a matched return path through a shared category',()=>{
+ const raw={currency:'CAD',nodes:[{id:'bank',kind:'account',account:'Checking',label:'Checking'},{id:'in',kind:'transfer',label:'Unknown'},{id:'out',kind:'transfer',label:'Unknown'}],edges:[{id:'in',source:'in',target:'bank',kind:'transfer',amount_minor:90,selector:{endpoint:'transactions',filters:{category:'transfer.unallocated.incoming.unknown'}}},{id:'out',source:'bank',target:'out',kind:'transfer',amount_minor:50,selector:{endpoint:'transactions',filters:{category:'transfer.unallocated.outgoing.unknown'}}}]};
+ const p=createModel(raw).project(),a=p.edges.find(e=>e.members[0].id==='in'),b=p.edges.find(e=>e.members[0].id==='out');assert.notEqual(a.source,b.target,'Unknown endpoints must not imply one circulation');
+});
+test('explicit semantic source labels do not offer a pointless repeated-label breakdown',()=>{
+ const raw={currency:'CAD',nodes:[{id:'bank',kind:'account',account:'Checking',label:'Checking'},{id:'pay',kind:'transfer',label:'Member'}],edges:[{id:'pay',source:'pay',target:'bank',kind:'transfer',displayKind:'payroll-saving',displayLabel:'Payroll RRSP withheld',amount_minor:5000,selector:{endpoint:'transactions',filters:{category:'transfer.contribution.member'}}}]};const p=createModel(raw).project();assert.equal(p.nodes.find(n=>n.kind==='payroll-saving').expandable,false);
+});
+test('folded investment group distinguishes money crossing its boundary from internal migration',()=>{
+ const raw={currency:'CAD',nodes:[{id:'a',account:'a',label:'A',kind:'account',accountGroup:'investments'},{id:'b',account:'b',label:'B',kind:'account',accountGroup:'investments'},{id:'income',kind:'income',label:'Interest'}],edges:[{id:'move',source:'a',target:'b',kind:'transfer',amount_minor:10000},{id:'income',source:'income',target:'b',kind:'income',amount_minor:10,selector:{filters:{category:'income.interest'}}}]};const p=createModel(raw).project([],[JSON.stringify(['account-group','investments'])]),g=p.nodes.find(n=>n.kind==='account-group');assert.equal(g.externalIncoming,10);assert.equal(g.externalOutgoing,0);assert.equal(g.internalAmount,10000);assert.equal(p.internalEdges.length,1);
+});
+test('property tax is spending; payroll withholding is not silently confused with that source category',()=>{
+ const raw={currency:'CAD',nodes:[{id:'bank',kind:'account',account:'Checking',label:'Checking'},{id:'property',kind:'expense',label:'Property tax'},{id:'tax',kind:'tax',semantic:true,label:'Payroll withholding'}],edges:[{id:'property',source:'bank',target:'property',kind:'expense',amount_minor:10000,currency:'CAD',selector:{endpoint:'transactions',filters:{category:'expense.tax.property'}}},{id:'tax',source:'bank',target:'tax',kind:'tax',amount_minor:20000,currency:'CAD',inlineRows:[]}]};
+ const m=createModel(raw);assert.equal(ranked(m.project()).reduce((s,r)=>s+r.amount,0),m.totals().spending);assert.equal(ranked(m.project())[0].amount,10000);
+});

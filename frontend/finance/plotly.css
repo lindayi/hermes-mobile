@@ -1,0 +1,21 @@
+.money-sankey .js-plotly-plot,.money-sankey .plot-container,.money-sankey .svg-container{width:100%;height:100%}
+.money-sankey .sankey-node,.money-sankey .sankey-link{transition:opacity .12s ease}
+.money-sankey .sankey-node.is-dim,.money-sankey .sankey-link.is-dim{opacity:.12!important}
+.money-sankey .sankey-link.is-selected{fill-opacity:.78!important;stroke-opacity:.78!important}
+.money-sankey-bands{position:absolute;inset:0;pointer-events:none;z-index:2}
+.money-sankey-chart{position:relative}
+.money-sankey-band{position:absolute;display:flex;align-items:flex-start;justify-content:space-between;gap:4px;pointer-events:auto;z-index:2}
+.money-sankey-band button{min-height:44px;background:var(--panel);font-size:11px}
+.money-sankey-band button:first-child{max-width:calc(100% - 48px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.money-sankey-enclosure{position:absolute;border:1px solid var(--border);border-radius:9px;background:color-mix(in srgb,var(--tint) 24%,transparent);pointer-events:none}
+.money-sankey-group{display:flex;gap:5px;margin:0 0 6px}
+.money-sankey-group button{min-height:44px;font-size:11px}
+.money-sankey-group button:first-child{flex:1;text-align:left}
+.money-sankey-toggle{width:44px;padding:0}
+.money-sankey-controls{display:flex;flex-wrap:wrap;gap:6px}
+.money-sankey-status{min-height:24px;color:var(--muted);font-size:11px;padding:8px 14px}
+.money-sankey{position:relative;max-height:62vh;min-height:360px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.money-sankey-chart{position:relative}
+.money-sankey .sankey-node,.money-sankey .sankey-link{cursor:pointer}
+@media(max-width:600px){.money-sankey{max-height:55vh;min-height:320px}.money-sankey-group{flex:1 1 100%}}
+@media(prefers-reduced-motion:reduce){.money-sankey .sankey-node,.money-sankey .sankey-link{transition:none}}
