@@ -478,6 +478,16 @@ writer, anchor, and saved-prompt fence runs before the task POST. The prompt
 binds the explicit comment ID and anchor body. Only after that verified anchor
 does the neutral attempt consume its existing budget.
 
+Every newly dispatched owner-enrolled source or review-followup repair also reserves
+one owner-authored receipt anchor before task creation. Its marker binds the exact
+repair reservation, PR, head, dispatch main SHA, attempt, and nonce. The existing
+outbox publish/readback and uncertain-response reconciliation prevent duplicate
+anchors; the exact comment ID and body are included in the task's receipt instructions.
+The worker publishes its single v2 receipt by replying to that comment with the
+existing supported reply transport. The anchor does not add authorization: enrollment,
+current-head, ownership, active-task, final-dispatch and immutable-receipt checks still
+apply. Existing unanchored v1/v2 receipts remain readable without rewriting history.
+
 Preclaim publication has a separate lifetime bound of three neutral receipt-anchor
 reservations per enrollment, charged atomically when a new outbox entry is added.
 The durable `neutral_anchor_reservations` count survives restart, main/head changes,
@@ -1962,6 +1972,30 @@ Positively completed `inventory_blocked` fixer handoffs are terminal too and are
 retired by the same head-change/inactive contract; active, current-head, and
 uncertain work and pending outbox posts remain retained. Their retirement comparison
 uses the authenticated `receipt_head` when available, not the dispatch head.
+Source receipt-anchor publication has its own durable reservation counter, capped
+at the source-repair limit. The reservation is charged atomically before posting,
+survives restart and re-enrollment, and is not charged again when recovering an
+existing anchor. Therefore main changes before task claim cannot create an
+unbounded sequence of owner comments. An exhausted source-anchor counter blocks a
+new reservation in planning and emits the existing budget outcome once; it must
+not report a repair as started. An already-reserved matching anchor remains
+recoverable at the ceiling under the same identity checks. If capacity changes
+between planning and dispatch, the apply summary reports `source-anchor-budget`
+and clears `repair_requested`; the next scan emits its normal deduplicated budget
+outcome. Uncertain anchor publication likewise clears `repair_requested` without
+pretending that a source task was dispatched.
+Re-enrollment planning preserves the same lifetime attempts, anchor reservations,
+and no-progress history as the atomic commit. It must plan the next unused
+attempt and anchor, not replay attempt one's reservation. Three unchanged
+no-progress results still block; demonstrated source progress permits a later
+attempt without resetting any lifetime count.
+
+Live and retained ordinary SOURCE receipts treat any retained anchor role, key,
+creation time, comment ID, or body as requiring complete anchor validation.
+Dropping the ID and body cannot turn partially anchored state into historical
+unanchored evidence. Edited/deleted anchors fail closed after restart; genuine
+historical receipts with no anchor metadata retain their existing compatibility.
+
 Compaction preserves every action correlated by map key, embedded reservation key,
 or task ID to a retained abandonment root, and conflicting copies of retained
 receipt proofs. Missing or foreign issue fields never sever that correlation.
@@ -2053,15 +2087,18 @@ evidence and owner-enrollment/receipt provenance, and keep guarded deployment se
 
 ### Issue #92 coordinator test migration
 
-The prior coordinator suite had 60 test functions renamed with the `_legacy_`
-prefix. Their former names are inventoried below. Many asserted independent-review
+The prior coordinator suite had 59 test functions renamed with the `_legacy_`
+prefix. Their former names are inventoried below. The former
+`review_report_findings_publish_and_trigger_bounded_followup` helper was replaced by
+`test_source_repair_from_copilot_finding_gets_bound_receipt_anchor` and is not part
+of the retired-function inventory. Many remaining cases asserted independent-review
 report, correction-task, or `agent-review` status publication, which issue #92
 retires. The collected replacements instead exercise the retained behavior,
 including active and uncertain historical occupancy and malformed task identity:
 
 | Formerly collected test names | Collected replacement coverage |
 | --- | --- |
-| `ambiguous_corrective_review_creation_is_never_reposted`, `completed_partial_review_report_persists_error_and_retries_once`, `completed_report_correction_repairs_parent_after_publication_crash`, `correction_anchor_identity_changes_if_main_advances_before_claim`, `failed_correction_child_write_recovers_reserved_parent_after_reload`, `historical_correction_publication_stops_when_dirty`, `historical_dirty_keeps_active_correction_occupied`, `historical_dirty_plan_ignores_existing_correction_anchor`, `historical_dirty_report_failure_plans_only_one_neutral`, `historical_report_correction_never_dispatches_on_dirty_base`, `historical_report_correction_yields_if_dirty_before_plan_writes`, `historical_report_failure_rejects_unconfirmed_reconciliation`, `historical_report_recovery_uses_fresh_main_and_keeps_retry_separate`, `invalid_formal_review_id_stays_uncertain_until_authenticated_readback`, `later_bound_review_supersedes_malformed_parent_without_correction`, `later_review_before_malformed_parent_anchor_skips_correction`, `later_review_does_not_release_active_or_uncertain_correction`, `lost_correction_post_is_rejected_after_delayed_readback_and_reload`, `malformed_terminal_task_containers_are_diagnosed_and_recover`, `new_bound_review_is_rechecked_before_correction_task_claim`, `nonobject_review_task_response_stays_unresolved_until_terminal_evidence`, `obsolete_sent_preclaim_correction_anchors_remain_bounded`, `pending_correction_publication_rechecks_live_reservation`, `pending_correction_replay_rechecks_fresh_main_before_publication`, `pending_historical_correction_anchor_never_publishes_when_dirty`, `pending_historical_correction_anchor_resumes_after_transient_fence`, `report_correction_is_not_published_after_its_snapshot_advances`, `review_report_correction_rejects_reused_task_id_without_reposting`, `review_report_correction_requires_authenticated_terminal_task_metadata`, `review_report_dispatch_and_publication_complete_handoff`, `review_report_findings_publish_and_trigger_bounded_followup`, `review_report_observation_does_not_suppress_terminal_diagnosis`, `review_report_recovery_bounds_external_session_metadata`, `review_report_rejects_findings_outside_complete_changed_inventory`, `review_report_rejects_forged_file_sha256_inventory`, `stale_correction_is_rejected_at_fresh_merge_fences`, `stale_correction_rejection_binds_exact_selected_publication`, `stale_negative_correction_cannot_dispatch_fixer_after_reload`, `stale_pass_cannot_complete_handoff_after_reload`, `terminal_review_report_outcome_remains_deduplicated`, `uncertain_correction_review_publication_reads_back_without_reposting`, `unrepresentable_review_inventory_persists_one_deduplicated_blocker` | `test_later_review_does_not_release_active_or_uncertain_correction` checks persisted sent/uncertain records (including malformed task identity), no task/status publication, and no occupancy release. `test_waiting_copilot_review_handoff_survives_restart_without_budget` and `test_completed_task_handoff_waits_for_copilot_without_independent_dispatch` cover retained handoff locks and only the genuine Copilot request. |
+| `ambiguous_corrective_review_creation_is_never_reposted`, `completed_partial_review_report_persists_error_and_retries_once`, `completed_report_correction_repairs_parent_after_publication_crash`, `correction_anchor_identity_changes_if_main_advances_before_claim`, `failed_correction_child_write_recovers_reserved_parent_after_reload`, `historical_correction_publication_stops_when_dirty`, `historical_dirty_keeps_active_correction_occupied`, `historical_dirty_plan_ignores_existing_correction_anchor`, `historical_dirty_report_failure_plans_only_one_neutral`, `historical_report_correction_never_dispatches_on_dirty_base`, `historical_report_correction_yields_if_dirty_before_plan_writes`, `historical_report_failure_rejects_unconfirmed_reconciliation`, `historical_report_recovery_uses_fresh_main_and_keeps_retry_separate`, `invalid_formal_review_id_stays_uncertain_until_authenticated_readback`, `later_bound_review_supersedes_malformed_parent_without_correction`, `later_review_before_malformed_parent_anchor_skips_correction`, `later_review_does_not_release_active_or_uncertain_correction`, `lost_correction_post_is_rejected_after_delayed_readback_and_reload`, `malformed_terminal_task_containers_are_diagnosed_and_recover`, `new_bound_review_is_rechecked_before_correction_task_claim`, `nonobject_review_task_response_stays_unresolved_until_terminal_evidence`, `obsolete_sent_preclaim_correction_anchors_remain_bounded`, `pending_correction_publication_rechecks_live_reservation`, `pending_correction_replay_rechecks_fresh_main_before_publication`, `pending_historical_correction_anchor_never_publishes_when_dirty`, `pending_historical_correction_anchor_resumes_after_transient_fence`, `report_correction_is_not_published_after_its_snapshot_advances`, `review_report_correction_rejects_reused_task_id_without_reposting`, `review_report_correction_requires_authenticated_terminal_task_metadata`, `review_report_dispatch_and_publication_complete_handoff`, `review_report_observation_does_not_suppress_terminal_diagnosis`, `review_report_recovery_bounds_external_session_metadata`, `review_report_rejects_findings_outside_complete_changed_inventory`, `review_report_rejects_forged_file_sha256_inventory`, `stale_correction_is_rejected_at_fresh_merge_fences`, `stale_correction_rejection_binds_exact_selected_publication`, `stale_negative_correction_cannot_dispatch_fixer_after_reload`, `stale_pass_cannot_complete_handoff_after_reload`, `terminal_review_report_outcome_remains_deduplicated`, `uncertain_correction_review_publication_reads_back_without_reposting`, `unrepresentable_review_inventory_persists_one_deduplicated_blocker` | `test_later_review_does_not_release_active_or_uncertain_correction` checks persisted sent/uncertain records (including malformed task identity), no task/status publication, and no occupancy release. `test_waiting_copilot_review_handoff_survives_restart_without_budget` and `test_completed_task_handoff_waits_for_copilot_without_independent_dispatch` cover retained handoff locks and only the genuine Copilot request. |
 | `clipped_or_redacted_target_is_unresolvable_in_real_review`, `completed_negative_review_evaluates_only_complete_terminal_checks`, `current_independent_review_completes_handoff_without_copilot`, `invalid_review_timestamp_revokes_owned_success_on_same_head`, `mapped_partial_resolution_through_real_report_and_restart`, `negative_review_cannot_clear_incomplete_inventory`, `real_negative_review_source_evaluation`, `resolution_disposition_is_bound_to_real_report_envelope`, `terminal_source_waits_for_evaluation_then_resumes_once` | `test_current_copilot_rejection_advances_progress_but_cannot_merge`, `test_commented_copilot_findings_are_negative_progress_not_review_approval`, `test_commented_findings_evaluate_completed_receipt_and_resume_once`, `test_rejecting_review_progress_uses_non_review_checks_in_the_planner`, and the completed/current-head Copilot handoff tests cover bounded evaluation separately from review approval and merge acceptance. |
 | `incomplete_preclaim_status_inventory_cannot_claim_or_post`, `new_head_publishes_status_in_first_cycle`, `rejected_status_generation_fails_cycle_instead_of_reporting_transition`, `returning_head_revokes_success_in_first_cycle`, `status_claim_never_invents_a_watermark`, `status_reconciliation_requires_durable_preclaim_id_watermark`, `status_transitions_can_repeat_on_same_head`, `uncertain_status_is_bound_to_generation_and_head`, `uncertain_status_reconciles_only_new_owned_remote_generation` | `test_foreign_retired_review_status_is_not_merge_authority`, `test_auto_merge_uses_current_three_checks_without_cloud_review`, and `test_required_policy_accepts_only_current_three_contexts_and_apps` cover the active check contract and reject retired review-status authority. No coordinator status is emitted for the retired context. |
 | `current_independent_review_completes_handoff_without_copilot`, `invalid_review_timestamp_revokes_owned_success_on_same_head`, `same_head_handoff_uses_independent_review_not_copilot`, `structured_owner_comment_accepts_review_without_copilot_approval`, `waiting_independent_review_handoff_survives_restart_without_budget` | `test_completed_copilot_review_completes_handoff_without_independent_report`, `test_completed_copilot_comment_accepts_review_without_independent_report`, `test_waiting_copilot_review_handoff_survives_restart_without_budget`, and `test_completed_task_handoff_waits_for_copilot_without_independent_dispatch` cover current Copilot identity, state, head, and durable handoff behavior. |

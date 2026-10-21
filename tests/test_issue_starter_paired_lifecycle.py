@@ -11,6 +11,7 @@ from test_cloud_coordinator import (
     BASE, HEAD, OWNER, COPILOT_AGENT, COPILOT_REVIEWER, Coordinator, FakeApi, StateStore,
     _compare_result,
     _progress_review,
+    _seed_historical_unanchored_source_action,
     refresh_owner_review,
 )
 
@@ -94,6 +95,13 @@ def test_dispatch_prompt_supplies_v2_bindings_without_child_task_discovery(tmp_p
 def finish(api, action, *, result="ready"):
     api.head_sha = RESULT_HEAD
     api.pull["head"]["sha"] = RESULT_HEAD
+    api.complete_task(action["task_id"], action, result=result, head_sha=RESULT_HEAD)
+
+
+def finish_legacy_v1(api, store, action, *, result="ready"):
+    api.head_sha = RESULT_HEAD
+    api.pull["head"]["sha"] = RESULT_HEAD
+    action = _seed_historical_unanchored_source_action(api, store, action)
     api.complete_task(action["task_id"], action, result=result, head_sha=RESULT_HEAD)
 
 
@@ -254,7 +262,10 @@ def test_deferred_handoff_rechecks_unchanged_bound_receipt_after_scan_commit(tmp
     finish(api, action)
     api.review_sha = HEAD
     api.pull["draft"] = draft
-    receipt = next(c for c in api.comments if c["body"].startswith("Hermes-Task-Receipt:"))
+    receipt = next(
+        c for c in api.comments
+        if "Hermes-Task-Receipt: v2\n" in c["body"]
+    )
     original_commit = store.commit_scan
 
     def edit_after_commit(*args, **kwargs):
@@ -1153,7 +1164,10 @@ def test_v2_moving_main_does_not_waive_live_reconciliation_fences(tmp_path, chan
 ])
 def test_compacted_receipt_metadata_must_match_canonical_body(tmp_path, version, field):
     api, store, worker, action = bound_worker(tmp_path)
-    (finish_v2 if version == "v2" else finish)(api, action)
+    if version == "v2":
+        finish_v2(api, action)
+    else:
+        finish_legacy_v1(api, store, action)
     api.unresolved = False
     refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
@@ -1198,7 +1212,10 @@ def test_compacted_receipt_metadata_must_match_canonical_body(tmp_path, version,
 ])
 def test_restart_revalidates_unique_unchanged_strict_numeric_receipt(tmp_path, version, change):
     api, store, worker, action = bound_worker(tmp_path)
-    (finish_v2 if version == "v2" else finish)(api, action)
+    if version == "v2":
+        finish_v2(api, action)
+    else:
+        finish_legacy_v1(api, store, action)
     api.unresolved = False
     refresh_owner_review(api, RESULT_HEAD)
     api.pending_required = True
@@ -1241,9 +1258,15 @@ def test_restart_revalidates_unique_unchanged_strict_numeric_receipt(tmp_path, v
 ])
 def test_bound_consumer_rejects_unverified_task_session_and_receipt_identity(tmp_path, change, version):
     api, store, worker, action = bound_worker(tmp_path)
-    (finish_v2 if version == "v2" else finish)(api, action)
+    if version == "v2":
+        finish_v2(api, action)
+    else:
+        finish_legacy_v1(api, store, action)
     task = api.tasks[action["task_id"]]
-    receipt = next(c for c in api.comments if c["body"].startswith("Hermes-Task-Receipt:"))
+    receipt = next(
+        c for c in api.comments
+        if f"Hermes-Task-Receipt: {version}\n" in c["body"]
+    )
     if change.startswith("task_"):
         task[change.removeprefix("task_")] = {"id": 99}
     elif change == "session_id":
@@ -2073,9 +2096,10 @@ def test_source_less_enrollment_history_blocks_only_active_work(tmp_path, kind, 
     api.review_state = "PENDING"
     store = StateStore(tmp_path / "history" / "state.json")
     Coordinator(api, store, clock=lambda: NOW).run(apply=True)
-    assert store.claim_action("history", {
-        "kind": kind, "issue": 16, "head": HEAD, "head_ref": "topic",
-    })
+    store._mutate(lambda state: state["actions"].__setitem__("history", {
+        "key": "history", "kind": kind, "status": "sending", "issue": 16,
+        "head": HEAD, "head_ref": "topic",
+    }))
     store.update_action("history", status, publication_state="done")
     for _ in range(3):
         result = Coordinator(api, StateStore(store.path), clock=lambda: NOW).run(apply=False)["pull_requests"][0]

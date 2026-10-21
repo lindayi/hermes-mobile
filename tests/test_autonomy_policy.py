@@ -254,11 +254,17 @@ _ISSUE111_OWNER_CONTINUATION_FIXTURE = {
 
 _ISSUE108_PR109_PR112_MERGED_FIXTURE = {
     'deploy/cloud_coordinator.py': '3c0e922cfb1ac77c4935fef2ca45fb2e75194d629e077533e740a4c05c358ec9',
+    'deploy/task_receipts.py': '72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5',
 }
 
 _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE = {
     'deploy/cloud_coordinator.py': '672ee5b7072f4ed7221b39a8242cc9a0971f14d637a833029e7ad4989f590f45',
     'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
+}
+
+_ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE = {
+    'deploy/cloud_coordinator.py': 'd422fed47784f44f1d995abfe96dee01312d552aa1ef93313f0c70c2b7fb9f95',
+    'deploy/task_receipts.py': '66be8dd702a71c8b3fabaa213455c20b8eeaedaec2466aa28b2299b68737deac',
 }
 
 _PENDING_ISSUE59_PUBLIC_HTTP_FIXTURE = {
@@ -360,7 +366,9 @@ def _source_files():
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
             | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
-            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE)
+            | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
+            | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
+            | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE)
 
 
 def _source_ci():
@@ -805,19 +813,27 @@ def test_merged_candidate_table_preserves_historical_source_pins():
     )[1].split('### Retained merged source and deliberate native refreshes', 1)[0]
     for path, digest in _ISSUE108_PR109_PR112_MERGED_FIXTURE.items():
         assert f'| `{path}` | `{digest}` |' in section
-    receipt_actual = hashlib.sha256((root / 'deploy/task_receipts.py').read_bytes()).hexdigest()
     assert [line for line in section.splitlines()
             if line.startswith('| `deploy/task_receipts.py` |')] == [
-        f'| `deploy/task_receipts.py` | `{receipt_actual}` |',
+        f'| `deploy/task_receipts.py` | '
+        f'`{_ISSUE108_PR109_PR112_MERGED_FIXTURE["deploy/task_receipts.py"]}` |',
     ]
 
 
-def test_issue115_candidate_table_matches_source_bytes():
-    root = Path(__file__).resolve().parents[1]
-    docs = (root / 'docs/autonomy-policy.md').read_text()
-    section = docs.split('### Issue #115 current coordinator source pin', 1)[1].split(
+def test_historical_issue115_candidate_table_preserves_source_pins():
+    docs = (Path(__file__).resolve().parents[1] / 'docs/autonomy-policy.md').read_text()
+    section = docs.split('### Historical Issue #115 coordinator source pin', 1)[1].split(
         '\n### ', 1)[0]
     for path, digest in _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE.items():
+        assert f'| `{path}` | `{digest}` |' in section
+
+
+def test_issue120_current_source_table_matches_source_bytes():
+    root = Path(__file__).resolve().parents[1]
+    docs = (root / 'docs/autonomy-policy.md').read_text()
+    section = docs.split('### Issue #120 current ordinary-repair source pins', 1)[1].split(
+        '\n### ', 1)[0]
+    for path, digest in _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE.items():
         assert digest == hashlib.sha256((root / path).read_bytes()).hexdigest()
         assert f'| `{path}` | `{digest}` |' in section
 
@@ -839,6 +855,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE98_PHOTO_POLICY_FIXTURE)
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
     pending |= set(_PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
+    pending |= set(_ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE)
     pending |= set(_ISSUE122_FINANCE_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -857,9 +874,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in {'deploy/cloud_coordinator.py', 'deploy/issue_starter.py',
-                    'deploy/review_evidence.py'}
+                    'deploy/review_evidence.py', 'deploy/task_receipts.py'}
     } == {
-        'deploy/cloud_coordinator.py': _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE[
+        'deploy/cloud_coordinator.py': _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE[
             'deploy/cloud_coordinator.py'
         ],
         'deploy/issue_starter.py': _ISSUE83_INITIAL_REVIEW_FIXTURE[
@@ -867,6 +884,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         ],
         'deploy/review_evidence.py': _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE[
             'deploy/review_evidence.py'
+        ],
+        'deploy/task_receipts.py': _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE[
+            'deploy/task_receipts.py'
         ],
     }
     assert {
@@ -902,6 +922,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             | _ISSUE111_OWNER_CONTINUATION_FIXTURE
             | _ISSUE108_PR109_PR112_MERGED_FIXTURE
             | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
+            | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
         ).items()
         if path in _PENDING_ISSUE50_RECEIPT_FIXTURE
     }
@@ -964,7 +985,8 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
           | _PR105_OWNER_ABANDONMENT_FIXTURE
           | _ISSUE111_OWNER_CONTINUATION_FIXTURE
           | _ISSUE108_PR109_PR112_MERGED_FIXTURE
-          | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE)
+          | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
+          | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE)
     for path, digest in (_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE
                          | _ISSUE92_COPILOT_REVIEW_FIXTURE
                          | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE
@@ -973,7 +995,8 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
                          | _PR105_OWNER_ABANDONMENT_FIXTURE
                          | _ISSUE111_OWNER_CONTINUATION_FIXTURE
                          | _ISSUE108_PR109_PR112_MERGED_FIXTURE
-                         | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE).items():
+                         | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
+                         | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE).items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert set(SOURCE_FINGERPRINTS) == set(REQUIRED_FILES)
@@ -1031,7 +1054,8 @@ def test_issue43_launch_pin_matches_actual_candidate_bytes(pins, path):
     | _PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE | _ISSUE92_COPILOT_REVIEW_FIXTURE
     | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
     | _PR105_OWNER_ABANDONMENT_FIXTURE | _ISSUE111_OWNER_CONTINUATION_FIXTURE
-    | _ISSUE108_PR109_PR112_MERGED_FIXTURE | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE,
+    | _ISSUE108_PR109_PR112_MERGED_FIXTURE | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
+    | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE50_RECEIPT_FIXTURE))
 def test_receipt_overlay_pin_matches_actual_candidate_bytes(path, pins):
@@ -1056,7 +1080,7 @@ def test_issue83_initial_review_pin_matches_actual_candidate_bytes(path, pins):
     | _ISSUE100_SENSITIVE_AUTHORIZATION_FIXTURE | _ISSUE106_COMMENTED_PROGRESS_FIXTURE
     | _ISSUE106_REVIEW_SUMMARY_FIXTURE | _PR105_OWNER_ABANDONMENT_FIXTURE
     | _ISSUE111_OWNER_CONTINUATION_FIXTURE | _ISSUE108_PR109_PR112_MERGED_FIXTURE
-    | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE,
+    | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE,
 ], ids=['policy', 'independent-fixture'])
 @pytest.mark.parametrize('path', sorted(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE))
 def test_issue87_bounded_repair_pin_matches_actual_candidate_bytes(path, pins):

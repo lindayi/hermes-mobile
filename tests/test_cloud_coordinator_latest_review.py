@@ -375,8 +375,13 @@ def test_legacy_enrollment_reports_unsupported_upgrade_without_changing_state(tm
     store.enroll({"issue": 16, "comment": 123, "head": HEAD, "base": BASE})
     # Preserve outstanding claims and command fences; fresh enrollment is not recovery.
     store.record_event("123")
-    store.claim_action("legacy-uncertain", {"kind": "fix", "issue": 16})
+    # This pre-anchor record is historical input, not a valid new claim.
+    store._mutate(lambda state: state["actions"].__setitem__(
+        "legacy-uncertain", {"kind": "fix", "issue": 16, "status": "pending"},
+    ))
+    assert store.action("legacy-uncertain")["status"] == "pending"
     store.mark_uncertain("legacy-uncertain")
+    assert store.action("legacy-uncertain")["status"] == "uncertain"
     before = store.path.read_bytes()
     with pytest.raises(CoordinatorError, match=(
         "Unsupported legacy enrollment: missing pull/repository identity; "

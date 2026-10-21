@@ -418,6 +418,9 @@ def _renewed_bound_enrollment(prior, incoming):
             "neutral_attempts_unknown",
             "neutral_attempts" not in prior,
         ),
+        "source_anchor_reservations": prior.get(
+            "source_anchor_reservations", prior.get("attempts", 0),
+        ),
         "repair_progress": deepcopy(prior.get(
             "repair_progress", _new_repair_progress(legacy_unknown=True),
         )),
@@ -985,8 +988,6 @@ def _source_receipt_anchor_request(action, nonce):
     )
     if (action.get("kind") != "fix"
             or action.get("task_type") not in {None, "source", "review-followup"}
-            or not isinstance(binding, dict)
-            or binding.get("version") != 1
             or not isinstance(action.get("key"), str)
             or type(action.get("issue")) is not int
             or type(action.get("attempt")) is not int
@@ -997,23 +998,46 @@ def _source_receipt_anchor_request(action, nonce):
             or not isinstance(action.get("head_ref"), str)
             or not isinstance(nonce, str) or not 1 <= len(nonce) <= 128):
         return None
-    request = {
-        "kind": "continuation-source-receipt-anchor",
-        "key": f"continuation-source-receipt-anchor:{_canonical_sha256(binding)}",
-        "task_key": action["key"], "issue": action["issue"],
-        "head": action["head"], "main_sha": action["main_sha"],
-        "head_ref": action["head_ref"], "attempt": action["attempt"],
-        "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
-        "owner_continuation_binding": binding, "nonce": nonce,
-        "request_sha256": _canonical_sha256(
-            action.get("task_request_body", action.get("body")),
-        ),
-    }
-    cohort = _owner_continuation_bindings(action, allow_intent=True)
-    if cohort is None:
-        return None
-    if len(cohort) > 1:
-        request["owner_continuation_companion_bindings"] = cohort[1:]
+    if binding is None:
+        if "owner_continuation_companions" in action:
+            return None
+        request_binding = {
+            "task_key": action["key"], "issue": action["issue"],
+            "head": action["head"], "main_sha": action["main_sha"],
+            "head_ref": action["head_ref"], "attempt": action["attempt"],
+            "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
+            "request_sha256": _canonical_sha256(
+               action.get("task_request_body", action.get("body")),
+            ),
+        }
+        request = {
+            "kind": "continuation-source-receipt-anchor",
+            "key": (
+               "continuation-source-receipt-anchor:"
+               f"{_canonical_sha256(request_binding)}"
+            ),
+            **request_binding, "nonce": nonce,
+        }
+    else:
+        if not isinstance(binding, dict) or binding.get("version") != 1:
+            return None
+        request = {
+            "kind": "continuation-source-receipt-anchor",
+            "key": f"continuation-source-receipt-anchor:{_canonical_sha256(binding)}",
+            "task_key": action["key"], "issue": action["issue"],
+            "head": action["head"], "main_sha": action["main_sha"],
+            "head_ref": action["head_ref"], "attempt": action["attempt"],
+            "pull_id": action["pull_id"], "pull_node_id": action["pull_node_id"],
+            "owner_continuation_binding": binding, "nonce": nonce,
+            "request_sha256": _canonical_sha256(
+               action.get("task_request_body", action.get("body")),
+            ),
+        }
+        cohort = _owner_continuation_bindings(action, allow_intent=True)
+        if cohort is None:
+            return None
+        if len(cohort) > 1:
+            request["owner_continuation_companion_bindings"] = cohort[1:]
     marker = "hermes-coordinator-source-receipt:" + _canonical_sha256(request)[:20]
     return request | {"marker": marker, "body": marker}
 
@@ -3400,9 +3424,11 @@ def _valid_receipt_proof(action, comments):
             or "owner_continuation_companions" in action
         )
     )
-    if (source_continuation
-            or "receipt_anchor_comment_id" in action
-            or "receipt_anchor_body" in action):
+    if source_continuation or any(
+            field in action for field in (
+                "receipt_anchor_role", "receipt_anchor_key", "receipt_anchor_created_at",
+                "receipt_anchor_comment_id", "receipt_anchor_body",
+            )):
         anchor_id = action.get("receipt_anchor_comment_id")
         if ((action.get("task_type") != "neutral"
              and not source_receipt_anchor_valid(action, comments)) or version != "v2"
@@ -5327,8 +5353,13 @@ class Coordinator:
                         "active": True,
                     }
                     if prior:
+                        # Planning must use the same lifetime accounting that
+                        # commit_scan preserves when re-enrolling a closed PR.
+                        # Otherwise it tries to reuse attempt one's old anchor.
                         for field in (
-                                "receipt_proofs", "owner_abandonments",
+                                "attempts", "neutral_attempts", "neutral_attempts_unknown",
+                                "neutral_anchor_reservations", "source_anchor_reservations",
+                                "repair_progress", "receipt_proofs", "owner_abandonments",
                                 "owner_continuations"):
                             if field in prior:
                                 candidate[field] = deepcopy(prior[field])
@@ -7879,11 +7910,15 @@ class Coordinator:
                 )
             )
         )
+        source_anchor_budget_stop = self._source_anchor_capacity_exhausted(repair)
+        if source_anchor_budget_stop:
+            repair = None
         source_budget_stop = (
             not needs_reconciliation
             and budget_needed
             and snapshot["enrollment"].get("neutral_attempts_unknown") is not True
-            and (attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT)
+            and (attempts >= REPAIR_LIMIT or no_progress >= NO_PROGRESS_LIMIT
+                 or source_anchor_budget_stop)
         )
         neutral_budget_stop = (
             needs_reconciliation and budget_needed
@@ -7907,7 +7942,15 @@ class Coordinator:
             subject = f"PR #{number}"
             if type(linked_issue) is int:
                 subject += f" (linked issue #{linked_issue})"
-            if no_progress >= NO_PROGRESS_LIMIT:
+            if source_anchor_budget_stop:
+                reservations = snapshot["enrollment"]["source_anchor_reservations"]
+                message = (
+                    f"Source repair stopped for {subject}: receipt-anchor capacity "
+                    f"is exhausted ({reservations}/{REPAIR_LIMIT} reservations). "
+                    "No new task was started; existing anchors and history are retained."
+                )
+                snapshot["budget_incident"] = f"source-anchor-limit-{reservations}"
+            elif no_progress >= NO_PROGRESS_LIMIT:
                 message = (
                     f"Source repair stopped for {subject} after {no_progress} consecutive "
                     f"completed attempts showed no verified forward progress "
@@ -9816,6 +9859,19 @@ class Coordinator:
             and not _cloud_agent_active(workflows, action["head_ref"])
         )
 
+    def _source_anchor_capacity_exhausted(self, action):
+        if (not isinstance(action, dict) or action.get("kind") != "fix"
+                or action.get("task_type") not in {None, "source", "review-followup"}):
+            return False
+        state = self.store.snapshot()
+        enrollment = state["enrollments"].get(str(action.get("issue")), {})
+        if enrollment.get("source_anchor_reservations", 0) < REPAIR_LIMIT:
+            return False
+        request = _source_receipt_anchor_request(action, "reservation")
+        # Existing reservations still use normal immutable-anchor validation;
+        # reaching the cap only prevents creating another anchor.
+        return request is not None and request["key"] not in state["outbox"]
+
     def _ensure_neutral_receipt_anchor(self, action):
         return self._ensure_receipt_anchor(action, source=False)
 
@@ -9976,7 +10032,10 @@ class Coordinator:
                 "owner_continuation_binding", action.get("owner_continuation_intent"),
             )
         ), None)
-        source_anchor = not neutral and owner_continuation_record is not None
+        source_anchor = (
+            not neutral and action.get("kind") == "fix"
+            and action.get("task_type") in {None, "source", "review-followup"}
+        )
         if source_anchor:
             action = action | {"receipt_anchor_role": "continuation-source"}
         current = self._fence_pull(
@@ -10155,11 +10214,15 @@ class Coordinator:
                 or _cloud_agent_active(workflows, branch)):
             return "agent-running"
         if neutral or source_anchor:
+            if source_anchor and self._source_anchor_capacity_exhausted(action):
+                return "source-anchor-budget"
             anchor = (
                 self._ensure_receipt_anchor(action, source=True) if source_anchor
                 else self._ensure_neutral_receipt_anchor(action)
             )
             if not isinstance(anchor, dict) or anchor.get("status") != "sent":
+                if source_anchor and self._source_anchor_capacity_exhausted(action):
+                    return "source-anchor-budget"
                 return "receipt-anchor-uncertain"
             action = action | {
                 "dispatch_nonce": anchor["nonce"],
@@ -10218,7 +10281,7 @@ class Coordinator:
                     f"{claimed_action['task_request_body']}\n\n{expected_instruction}"):
                 self.store.update_action(key, "superseded")
                 return "superseded"
-        if neutral or recovered_claims:
+        if neutral or source_anchor or recovered_claims:
             try:
                 current = self._fence_pull(
                     claimed_action["issue"], claimed_action["head"],
@@ -11184,7 +11247,8 @@ class Coordinator:
             if action:
                 result = self._dispatch_task(action)
                 if result in {"agent-running", "superseded", "conflict", "behind", "draft",
-                              "mergeability-unknown"}:
+                              "mergeability-unknown", "source-anchor-budget",
+                              "receipt-anchor-uncertain"}:
                     pr_plan["repair"] = None
                     if result == "mergeability-unknown":
                         pr_plan["reasons"] = [reason for reason in pr_plan["reasons"]
@@ -11706,6 +11770,8 @@ class StateStore:
                     or type(enrollment["neutral_attempts_unknown"]) is not bool
                     or type(enrollment.get("neutral_anchor_reservations", 0)) is not int
                     or not 0 <= enrollment.get("neutral_anchor_reservations", 0) <= 2**31 - 1
+                    or type(enrollment.get("source_anchor_reservations", 0)) is not int
+                    or not 0 <= enrollment.get("source_anchor_reservations", 0) <= 2**31 - 1
                     or ("repair_progress" in enrollment
                         and not _repair_progress_valid(enrollment["repair_progress"]))):
                 raise CoordinatorError("Repair budget or progress history is invalid")
@@ -11715,6 +11781,16 @@ class StateStore:
                     if not enrollment["neutral_attempts_unknown"] else 0,
                     sum(
                         entry.get("kind") == "neutral-receipt-anchor"
+                        and str(entry.get("issue")) == issue_key
+                        for entry in data["outbox"].values()
+                        if isinstance(entry, dict)
+                    ),
+                )
+            if "source_anchor_reservations" not in enrollment:
+                enrollment["source_anchor_reservations"] = max(
+                    enrollment["attempts"],
+                    sum(
+                        entry.get("kind") == "continuation-source-receipt-anchor"
                         and str(entry.get("issue")) == issue_key
                         for entry in data["outbox"].values()
                         if isinstance(entry, dict)
@@ -12074,6 +12150,10 @@ class StateStore:
                         "neutral_anchor_reservations": previous.get(
                             "neutral_anchor_reservations", 0,
                         ),
+                        "source_anchor_reservations": previous.get(
+                            "source_anchor_reservations",
+                            previous.get("attempts", 0),
+                        ),
                         "repair_progress": repair_progress,
                         "sensitive_sha": None, "active": True,
                     }
@@ -12214,6 +12294,7 @@ class StateStore:
                 return False
             data["enrollments"][key] = {
                 **enrollment, "attempts": 0, "neutral_attempts": 0,
+                "source_anchor_reservations": 0,
                 "repair_progress": _new_repair_progress(),
                 "sensitive_sha": None,
                 "sensitive_authorization": None, "targeted_review": None,
@@ -12424,7 +12505,9 @@ class StateStore:
                         return False
                 neutral = claimed.get("task_type") == "neutral"
                 source_anchor = (
-                    not neutral and owner_continuation_record is not None
+                    not neutral and claimed.get("kind") == "fix"
+                    and claimed.get("task_type")
+                        in {None, "source", "review-followup"}
                 )
                 anchored = neutral or source_anchor
                 if (not anchored and any(
@@ -12856,17 +12939,60 @@ class StateStore:
                 enrollment["neutral_anchor_reservations"] += 1
             if entry.get("kind") == "continuation-source-receipt-anchor":
                 enrollment = data["enrollments"].get(str(entry.get("issue")), {})
-                records = _valid_owner_continuation_claims(enrollment, data["actions"])
                 if (not enrollment.get("active")
-                        or not any(
-                            _owner_continuation_binding(record)
-                                == entry.get("owner_continuation_binding")
-                            and not _owner_continuation_has_successor(
-                                record, data["actions"], enrollment,
-                            )
-                            for _, record in records
-                        )):
+                        or enrollment["source_anchor_reservations"] >= REPAIR_LIMIT):
                     return False
+                if "owner_continuation_binding" in entry:
+                    records = _valid_owner_continuation_claims(
+                        enrollment, data["actions"],
+                    )
+                    if (not enrollment.get("active")
+                            or not any(
+                                _owner_continuation_binding(record)
+                                    == entry.get("owner_continuation_binding")
+                                and not _owner_continuation_has_successor(
+                                    record, data["actions"], enrollment,
+                                )
+                                for _, record in records
+                            )):
+                        return False
+                else:
+                    action = data["actions"].get(entry.get("task_key"))
+                    expected = (
+                        _source_receipt_anchor_request(action, entry.get("nonce"))
+                        if isinstance(action, dict) else None
+                    )
+                    if (
+                            not enrollment.get("active")
+                            or type(entry.get("issue")) is not int
+                            or entry["issue"] != enrollment.get("issue")
+                            or type(entry.get("attempt")) is not int
+                            or entry["attempt"] != enrollment.get("attempts", 0) + 1
+                            or not _is_sha(entry.get("head"))
+                            or not _is_sha(entry.get("main_sha"))
+                            or entry.get("task_type")
+                                not in {None, "source", "review-followup"}
+                            or not isinstance(entry.get("task_key"), str)
+                            or not entry["task_key"].startswith(
+                                f"fix:{entry['issue']}:",
+                            )
+                            or (
+                                action is not None
+                                and (
+                                    action.get("kind") != "fix"
+                                    or action.get("status") != "pending"
+                                    or action.get("task_id") is not None
+                                    or action.get("attempt")
+                                        != enrollment.get("attempts", 0) + 1
+                                    or "owner_continuation_binding" in action
+                                    or "owner_continuation_companions" in action
+                                    or expected is None
+                                    or any(entry.get(field) != value
+                                           for field, value in expected.items())
+                                )
+                            )):
+                        return False
+                enrollment["source_anchor_reservations"] += 1
             data["outbox"][key] = {**entry, "status": "pending"}
             return True
         return self._mutate(add)
@@ -12878,8 +13004,12 @@ class StateStore:
 
         def update(data):
             enrollment = data["enrollments"].get(key)
-            if not isinstance(enrollment, dict) or not enrollment.get("active"):
+            if not isinstance(enrollment, dict):
                 return False
+            # A positively completed task can be scored while a previously
+            # closed PR is being re-enrolled. Persist that accounting before
+            # commit_scan compacts the terminal claim; this grants no authority
+            # and never changes active state or lifetime attempt counters.
             enrollment["repair_progress"] = deepcopy(progress)
             return True
         return self._mutate(update)

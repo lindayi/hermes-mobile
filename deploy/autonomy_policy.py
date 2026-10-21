@@ -190,8 +190,8 @@ SOURCE_FINGERPRINTS = {
     'patches/cron-delivery.patch': '444af4887abcea020baaf8c8cfbf4679670d38cdc2fc302a97ad5c54d68fc1ff',
     'patches/native-compat-baseline.json': '2daf996adbcab86d8ad5f1a3e15bd5ea26134ea116662b451cd09429c3ebc862',
     'patches/cron-delivery-baseline.json': '988ff4bda29998ce0f0743950e491f86e2b9d434e9da57c40aee5a5e06895af1',
-    # Issue #115 removes the separate sensitive-change owner-authorization gate.
-    'deploy/cloud_coordinator.py': '672ee5b7072f4ed7221b39a8242cc9a0971f14d637a833029e7ad4989f590f45',
+    # Issue #120 ordinary repair tasks use owner-authored receipt anchors.
+    'deploy/cloud_coordinator.py': 'd422fed47784f44f1d995abfe96dee01312d552aa1ef93313f0c70c2b7fb9f95',
     # Issue #43 launch/authority candidates; final assembled review remains required.
     # PR57 paired admission fence and issue #63 fail-closed recovery boundary.
     'deploy/issue_starter.py': '6c4f645544119c3b317548ef01391edcce37af0bac02c2ed69cbdf714d97419a',
@@ -200,8 +200,8 @@ SOURCE_FINGERPRINTS = {
     # Accepted PR29/PR40/PR42 source lineage retained from main5316; see
     # docs/autonomy-policy.md. Not final issue43 assembly or operational approval.
     # Issue #65 producer-only overlay; historical receipt hashes remain documented.
-    # PR #105 receipt-only neutral transport candidate; prior receipt pins remain historical.
-    'deploy/task_receipts.py': '72615884d5e61a51f6fd8d9527774fc4982ebd66f98e5bd4b84a640404fccbe5',
+    # Issue #120 ordinary repair receipt anchors; prior receipt pins remain historical.
+    'deploy/task_receipts.py': '66be8dd702a71c8b3fabaa213455c20b8eeaedaec2466aa28b2299b68737deac',
     # Issue #87 bounded-repair lifecycle overlay; earlier hashes remain historical.
     'deploy/workflow_events.py': '63d4066774e276d668d493a69d55e5cb03e4e13c02ab52d1a6dd726098d9b79e',
     'deploy/workflow_lifecycle.py': 'f8ecf4fa881d907d41a3f8482fa60f1166591dd51e75108aaa4d31f4f2df65b0',

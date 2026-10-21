@@ -178,23 +178,35 @@ def _neutral_receipt_body_matches(body, anchor_body):
 
 
 def source_receipt_anchor_valid(action, comments):
-    """Authenticate the immutable anchor retained by a continuation SOURCE claim."""
+    """Authenticate the immutable anchor retained by a source task claim."""
     anchor_id = action.get("receipt_anchor_comment_id")
     body = action.get("receipt_anchor_body")
     if (action.get("receipt_anchor_role") != "continuation-source"
             or action.get("task_type") not in {None, "source", "review-followup"}
-            or not isinstance(action.get("owner_continuation_binding"), dict)
-            or action["owner_continuation_binding"].get("version") != 1
+            or action.get("kind") != "fix"
             or type(anchor_id) is not int or not 0 < anchor_id <= 2**63 - 1
             or not _neutral_anchor_body_valid(body)
             or not isinstance(comments, list)):
         return False
-    binding = action["owner_continuation_binding"]
-    if any(binding.get(field) != action.get(target) for field, target in (
-        ("current_head_sha", "head"), ("current_main_sha", "main_sha"),
-        ("pull_id", "pull_id"), ("pull_node_id", "pull_node_id"),
-        ("head_ref", "head_ref"),
-    )):
+    binding = action.get("owner_continuation_binding")
+    if binding is not None:
+        if (not isinstance(binding, dict) or binding.get("version") != 1
+                or any(binding.get(field) != action.get(target) for field, target in (
+                    ("current_head_sha", "head"), ("current_main_sha", "main_sha"),
+                    ("pull_id", "pull_id"), ("pull_node_id", "pull_node_id"),
+                    ("head_ref", "head_ref"),
+                ))):
+            return False
+    elif (
+            "owner_continuation_companions" in action
+            or not isinstance(action.get("key"), str)
+            or type(action.get("attempt")) is not int or action["attempt"] < 1
+            or type(action.get("issue")) is not int
+            or type(action.get("pull_id")) is not int
+            or not isinstance(action.get("pull_node_id"), str)
+            or not action["pull_node_id"]
+            or not isinstance(action.get("head_ref"), str)
+            or not action["head_ref"]):
         return False
     try:
         _time(action.get("receipt_anchor_created_at"))
@@ -895,9 +907,11 @@ def validate_task_receipt(task, action, pull, comments, *, now):
             or "owner_continuation_companions" in action
         )
     )
-    anchored = source_continuation or (
-        "receipt_anchor_comment_id" in action
-        or "receipt_anchor_body" in action
+    anchored = source_continuation or any(
+        field in action for field in (
+            "receipt_anchor_role", "receipt_anchor_key", "receipt_anchor_created_at",
+            "receipt_anchor_comment_id", "receipt_anchor_body",
+        )
     )
     anchored_neutral = anchored and action.get("task_type") == "neutral"
     if anchored:
