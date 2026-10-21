@@ -4104,6 +4104,10 @@ def test_superseded_stale_handoffs_retire_before_reenrollment(tmp_path):
                    if action.get("task_type") == "neutral")
     api.tasks[neutral["task_id"]]["state"] = "completed"
     store.update_action(neutral["key"], "completed", handoff_state="done")
+    # Model the completed reconciliation, not a still-behind PR requiring a
+    # second neutral task when the lifetime counters are correctly preserved.
+    api.pull["base"]["sha"] = CURRENT_MAIN
+    api.pull.update(mergeable=True, mergeable_state="clean")
     receipt_proofs = store.snapshot()["enrollments"]["16"]["receipt_proofs"]
 
     api.pull["state"] = "closed"
