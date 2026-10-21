@@ -2,17 +2,16 @@ import {generatedAssets} from './generated-assets.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {readFile,mkdtemp,rm,mkdir} from 'node:fs/promises';
+import {readFile,mkdtemp,rm,mkdir,copyFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createRequire} from 'node:module';
 
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
-const proof='/tmp/hermes-issue128-review';
 
 async function fixture(){
  const temporary=await mkdtemp(join(tmpdir(),'root-design-'));let server,browser;
- const state={authenticated:true,role:'owner',calls:[],errors:[]};
+ const state={authenticated:true,role:'owner',status:'ready',calls:[],errors:[]};
  const close=async()=>{
   try{await browser?.close();}finally{
    if(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
@@ -31,7 +30,7 @@ async function fixture(){
      res.writeHead(401,{'Content-Type':'application/json'}).end('{"detail":"Synthetic sign-in required"}');return;
     }
     let data={items:[]};
-    if(endpoint==='/auth/me')data={user:{id:'synthetic-owner',role:state.role,status:'ready'},csrf_token:'fixture-csrf'};
+    if(endpoint==='/auth/me')data={user:{id:`synthetic-${state.role}`,role:state.role,status:state.status},csrf_token:'fixture-csrf'};
     else if(endpoint==='/sessions')data={deletion_available:true,items:[{id:'s1',title:'Synthetic root chat',run_status:'idle',source:'web'}],total:1};
     else if(endpoint==='/sessions/s1/messages')data={items:[{role:'user',content:'Synthetic question.'},{role:'assistant',content:'Synthetic answer.'}],run:null};
     else if(endpoint==='/sessions/s1/model-options')data={available:true,models:[{id:'fixture-model',provider:'fixture',label:'Synthetic model',reasoning_efforts:[]}]};
@@ -50,7 +49,7 @@ async function fixture(){
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage'],env:{...process.env,TMPDIR:temporary}});
-  const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,serviceWorkers:'block'});
+  const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,reducedMotion:'reduce',serviceWorkers:'block'});
   const page=await context.newPage();page.setDefaultTimeout(7000);page.on('pageerror',error=>state.errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
   await page.getByRole('button',{name:'Synthetic root chat',exact:true}).waitFor();
@@ -59,8 +58,15 @@ async function fixture(){
 }
 
 async function screenshot(page,name){
- await mkdir(proof,{recursive:true,mode:0o700});
- await page.screenshot({path:join(proof,name+'.png')});
+ const artifacts=process.env.HERMES_TEST_ARTIFACT_DIR;
+ assert.ok(artifacts,'Managed browser artifact directory is required');
+ await mkdir(artifacts,{recursive:true,mode:0o700});
+ const path=join(artifacts,name+'.png');
+ await page.screenshot({path});
+ if(process.env.HERMES_DESIGN_PROOF_DIR){
+  await mkdir(process.env.HERMES_DESIGN_PROOF_DIR,{recursive:true,mode:0o700});
+  await copyFile(path,join(process.env.HERMES_DESIGN_PROOF_DIR,name+'.png'));
+ }
 }
 
 test('generated root routes share the calm design and retain their controls', {timeout:90000}, async()=>{
@@ -74,10 +80,21 @@ test('generated root routes share the calm design and retain their controls', {t
      const style=getComputedStyle(document.documentElement);
      return ['--bg','--surface','--text','--muted','--border','--accent'].map(name=>style.getPropertyValue(name).trim());
     }),['#f4f3ee','#fffefa','#22332f','#616d67','#d7dcd3','#327b65']);
+   assert.equal(await page.locator('meta[name=theme-color]').getAttribute('content'),'#f4f3ee');
+    const fonts=await page.evaluate(()=>[
+     getComputedStyle(document.body).fontFamily,
+     getComputedStyle(document.querySelector('.page-heading h1')).fontFamily
+    ]);
+    assert.match(fonts[0],/Arial/);
+    assert.match(fonts[1],/Georgia/);
    }else{
     assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
    }
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${width}px ${theme} Sessions has no horizontal overflow`);
+   for(const name of ['Search conversations','Filter conversations','New chat']){
+    const target=page.getByRole('button',{name,exact:true}),box=await target.boundingBox();
+    assert.ok(box.width>=44&&box.height>=44,`${width}px ${theme} ${name} remains reachable`);
+   }
    await screenshot(page,`sessions-${width}-${theme}`);
    for(const [label,heading] of [['Inbox','Inbox'],['Jobs','Scheduled jobs'],['Settings','Settings']]){
     const navigation=page.getByRole('button',{name:label,exact:true});
@@ -90,7 +107,9 @@ test('generated root routes share the calm design and retain their controls', {t
      await page.locator('[data-section=devices]').waitFor();
      assert.equal(await page.locator('.notification-settings').count(),1);
      assert.equal(await page.locator('.push-preferences').isVisible(),false);
-     assert.equal(await page.locator('.account-finance-link').getAttribute('href'),'/hermes/finance/');
+     const finance=page.locator('.account-finance-link');
+     assert.equal(await finance.getAttribute('href'),'/hermes/finance/');
+     assert.ok((await finance.boundingBox()).height>=44);
     }
     await screenshot(page,`${label.toLowerCase()}-${width}-${theme}`);
    }
@@ -99,22 +118,48 @@ test('generated root routes share the calm design and retain their controls', {t
    const row=page.getByRole('button',{name:'Synthetic root chat',exact:true});
    if(width<760)await row.tap();else await row.click();
    await page.getByRole('combobox',{name:'Model',exact:true}).waitFor();
-   assert.equal(await page.getByRole('textbox',{name:'Message Hermes'}).isVisible(),true);
+   const draft=page.getByRole('textbox',{name:'Message Hermes'});
+   assert.equal(await draft.isVisible(),true);
    assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isVisible(),true);
-   assert.equal(await page.getByRole('button',{name:'Expand editor',exact:true}).isVisible(),true);
+   const expand=page.getByRole('button',{name:'Expand editor',exact:true});
+   assert.equal(await expand.isVisible(),true);
+   await draft.fill('Synthetic draft stays in the composer.');
+   await expand.click();
+   assert.equal(await page.getByRole('dialog',{name:'Message editor'}).isVisible(),true);
+   assert.equal(await draft.inputValue(),'Synthetic draft stays in the composer.');
+   await page.getByRole('button',{name:'Done',exact:true}).click();
+   assert.equal(await draft.inputValue(),'Synthetic draft stays in the composer.');
    assert.match(await page.locator('.messages').innerText(),/Synthetic answer/);
+   assert.doesNotMatch(await page.locator('.conversation-head h1').evaluate(element=>getComputedStyle(element).fontFamily),/Georgia/);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${width}px ${theme} active chat has no horizontal overflow`);
    await screenshot(page,`chat-${width}-${theme}`);
+   await page.getByRole('button',{name:'Back to chats',exact:true}).click();
+   await page.getByRole('heading',{name:'Sessions',exact:true}).waitFor();
   }
+  await page.emulateMedia({colorScheme:'dark'});
+  await page.evaluate(()=>document.documentElement.dataset.theme='system');
+  assert.deepEqual(await page.evaluate(()=>{
+   const style=getComputedStyle(document.documentElement);
+   return [style.colorScheme,style.getPropertyValue('--bg').trim(),style.getPropertyValue('--accent').trim()];
+  }),['dark','#202824','#8fbea4']);
+  await page.emulateMedia({colorScheme:'light'});
   state.authenticated=false;
+  await page.setViewportSize({width:390,height:844});
   await page.reload();
+  await page.evaluate(()=>document.documentElement.dataset.theme='light');
   await page.getByRole('button',{name:'Use an invitation',exact:true}).waitFor();
   assert.equal(await page.getByRole('heading',{name:'Sign in',exact:true}).isVisible(),true);
+  await screenshot(page,'signin-390-light');
   await page.getByRole('button',{name:'Use an invitation',exact:true}).click();
   assert.equal(await page.getByRole('heading',{name:'Create account',exact:true}).isVisible(),true);
   assert.match(await page.locator('.auth-card').innerText(),/separate account/);
   await screenshot(page,'enrollment-390-light');
-  state.authenticated=true;state.role='member';
+  state.authenticated=true;state.role='owner';state.status='pending';state.calls.length=0;
+  await page.reload();
+  await page.getByRole('button',{name:'Settings',exact:true}).click();
+  await page.locator('[data-section=devices]').waitFor();
+  assert.equal(await page.locator('.account-finance-link').count(),0,'pending owners do not get the ready-only link');
+  state.role='member';state.status='ready';state.calls.length=0;
   await page.reload();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
   await page.locator('[data-section=devices]').waitFor();

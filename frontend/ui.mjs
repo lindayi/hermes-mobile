@@ -239,7 +239,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let savedTheme='system';try{savedTheme=win.localStorage.getItem('hermes:theme') || 'system';}catch{}
     theme.value=savedTheme;
     theme.addEventListener('change',()=>{doc.documentElement.dataset.theme=theme.value;try{win.localStorage.setItem('hermes:theme',theme.value);}catch{}});
-    const sections=h('div',{class:'settings-grid'},h('section',{class:'card'},h('h2',{},'Account'),h('p',{class:'muted'},`Account: ${state.user.role || 'member'} · ${state.user.status}`),h('label',{class:'field'},h('span',{},'Appearance'),theme)));
+    const sections=h('div',{class:'settings-grid'},h('section',{class:'card'},h('h2',{},'Account'),h('p',{class:'muted'},`Account: ${state.user.role || 'member'} · ${state.user.status}`),h('label',{class:'field'},h('span',{},'Appearance'),theme),state.user.role==='owner' && state.user.status==='ready' ? h('a',{class:'account-finance-link',href:'/hermes/finance/'},'Finance') : null));
     const endpoints=state.user.role==='owner' ? ['/devices','/passkeys','/invites','/members'] : ['/devices','/passkeys'];
     const results=await Promise.allSettled(endpoints.map(path=>api.request(path)));
     if(version!==routeVersion)return;
