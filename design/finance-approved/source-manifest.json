@@ -2,7 +2,7 @@
   "public/app.mjs": "8e4e952d9b0a95e488ab17fe3506766f6eadcb5c03963b8ba31f9b13f1b384f8",
   "public/finance-client.mjs": "4e44e6e6dbf662e660108a3c4a376ded16787a9728fbdb28b6d5308625d310b0",
   "public/cad-view.mjs": "081a63e039fde05c81cbfec3d2b46bc6a02ee84d4e3ecd761f15bd155db7d11b",
-  "public/semantics.mjs": "e1b106fbd2c6a4c50ed721bcc6190f1d34f2454f8463c6b35c9401fd2719cfb5",
+  "public/semantics.mjs": "6e8ff434aa79b278e0e254eb6abe97173f188bd42aa121fb4f91dd6efb0308ff",
   "public/products.mjs": "8cd64d4847c33bec2979c4607eccc0aff637862bafc04e37f3d7574e1ae67e5a",
   "public/live-model.mjs": "9ee3c9d880201e6b247ed8ac433253e1fb8fa5e91886f6d4877727b65818659e",
   "public/layout.mjs": "316c6e1673d6c8cc783db7fc416f4391688dff73d07f2ac96ba63905704154dd",
