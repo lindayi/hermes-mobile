@@ -16,6 +16,7 @@ async function fixture(t,{rows=transactionRows,responses={}}={}){
  const calls=[];
  const server=createServer(async(req,res)=>{
   const url=new URL(req.url,'http://synthetic');
+  if(url.pathname==='/hermes/app-api/auth/me'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({user:{id:'synthetic-owner',role:'owner',profile:'default',status:'ready'}}));return;}
   if(url.pathname.startsWith('/hermes/app-api/finance/')){
    const name=url.pathname.split('/').pop(),q=Object.fromEntries(url.searchParams);calls.push({name,query:q});
    res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');

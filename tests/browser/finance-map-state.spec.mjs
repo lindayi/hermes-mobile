@@ -14,6 +14,7 @@ async function fixture(t){
  const calls=[];let graph=structuredClone(baseFlow);
  const server=createServer(async(req,res)=>{
   const u=new URL(req.url,'http://fixture');
+  if(u.pathname==='/hermes/app-api/auth/me'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({user:{id:'synthetic-owner',role:'owner',profile:'default',status:'ready'}}));return;}
   if(u.pathname.startsWith('/hermes/app-api/finance/')){
    const name=u.pathname.split('/').pop(),q=Object.fromEntries(u.searchParams);calls.push({name,q});
    let data={...common};
