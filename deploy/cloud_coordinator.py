@@ -3424,9 +3424,11 @@ def _valid_receipt_proof(action, comments):
             or "owner_continuation_companions" in action
         )
     )
-    if (source_continuation
-            or "receipt_anchor_comment_id" in action
-            or "receipt_anchor_body" in action):
+    if source_continuation or any(
+            field in action for field in (
+                "receipt_anchor_role", "receipt_anchor_key", "receipt_anchor_created_at",
+                "receipt_anchor_comment_id", "receipt_anchor_body",
+            )):
         anchor_id = action.get("receipt_anchor_comment_id")
         if ((action.get("task_type") != "neutral"
              and not source_receipt_anchor_valid(action, comments)) or version != "v2"
@@ -5351,8 +5353,13 @@ class Coordinator:
                         "active": True,
                     }
                     if prior:
+                        # Planning must use the same lifetime accounting that
+                        # commit_scan preserves when re-enrolling a closed PR.
+                        # Otherwise it tries to reuse attempt one's old anchor.
                         for field in (
-                                "receipt_proofs", "owner_abandonments",
+                                "attempts", "neutral_attempts", "neutral_attempts_unknown",
+                                "neutral_anchor_reservations", "source_anchor_reservations",
+                                "repair_progress", "receipt_proofs", "owner_abandonments",
                                 "owner_continuations"):
                             if field in prior:
                                 candidate[field] = deepcopy(prior[field])
@@ -12997,8 +13004,12 @@ class StateStore:
 
         def update(data):
             enrollment = data["enrollments"].get(key)
-            if not isinstance(enrollment, dict) or not enrollment.get("active"):
+            if not isinstance(enrollment, dict):
                 return False
+            # A positively completed task can be scored while a previously
+            # closed PR is being re-enrolled. Persist that accounting before
+            # commit_scan compacts the terminal claim; this grants no authority
+            # and never changes active state or lifetime attempt counters.
             enrollment["repair_progress"] = deepcopy(progress)
             return True
         return self._mutate(update)

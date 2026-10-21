@@ -6649,6 +6649,59 @@ def test_owner_continuation_source_proof_requires_omitted_anchor_fields(
     assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
 
 
+@pytest.mark.parametrize("consumer", ["live", "retained"])
+@pytest.mark.parametrize("anchor_change", ["edited", "deleted"])
+@pytest.mark.parametrize("remaining_field", [
+    "receipt_anchor_role", "receipt_anchor_key", "receipt_anchor_created_at",
+])
+def test_ordinary_receipt_partial_anchor_metadata_fails_closed_after_restart(
+        tmp_path, consumer, anchor_change, remaining_field):
+    from deploy.task_receipts import ReceiptError, validate_task_receipt
+
+    api = FakeApi(source_failure=True)
+    api.comments[0]["body"] = f"/hermes enroll {HEAD}"
+    store = StateStore(tmp_path / "state.json")
+    Coordinator(api, store, clock=lambda: 1790856540).run(apply=True)
+    action = next(a for a in store.actions().values() if a["kind"] == "fix")
+    assert "owner_continuation_binding" not in action
+    api.complete_task(action["task_id"], action)
+    now = datetime.fromtimestamp(1790856540, timezone.utc)
+    assert validate_task_receipt(
+        api.tasks[action["task_id"]], action, api.pull, api.comments, now=now,
+    )["result"] == "ready"
+    anchor = next(c for c in api.comments if c["id"] == action["receipt_anchor_comment_id"])
+    if consumer == "retained":
+        api.unresolved = api.source_failure = False
+        Coordinator(api, StateStore(store.path), clock=lambda: 1790856540).run(apply=True)
+        StateStore(store.path).retire(16, HEAD, BASE)
+        proof = StateStore(store.path).snapshot()["enrollments"]["16"]["receipt_proofs"][0]
+        assert cloud_coordinator._valid_receipt_proof(proof, api.comments)
+
+    def remove_anchor_fields(state):
+        record = (state["actions"][action["key"]] if consumer == "live"
+                  else state["enrollments"]["16"]["receipt_proofs"][0])
+        assert remaining_field in record
+        for field in list(record):
+            if field.startswith("receipt_anchor_") and field != remaining_field:
+                record.pop(field)
+
+    store._mutate(remove_anchor_fields)
+    if anchor_change == "edited":
+        anchor["body"] += " changed"
+    else:
+        api.comments.remove(anchor)
+    restarted = StateStore(store.path)
+    if consumer == "live":
+        with pytest.raises(ReceiptError):
+            validate_task_receipt(
+                api.tasks[action["task_id"]], restarted.action(action["key"]),
+                api.pull, api.comments, now=now,
+            )
+    else:
+        proof = restarted.snapshot()["enrollments"]["16"]["receipt_proofs"][0]
+        assert not cloud_coordinator._valid_receipt_proof(proof, api.comments)
+
+
 def test_owner_continuation_rejects_a_blocked_intermediate_receipt(tmp_path):
     api, store, _, _, continued_main = _owner_continuation_advanced_case(tmp_path)
     Coordinator(
@@ -22806,8 +22859,11 @@ def test_reenrollment_preserves_unresolved_fixer_with_empty_task_list(
         assert api.fix_attempts == 1
 
 
-def test_reenrollment_preserves_lifetime_budget_after_old_task_completion(tmp_path):
-    api = FakeApi(source_failure=True)
+@pytest.mark.parametrize("made_progress", [False, True])
+def test_reenrollment_preserves_lifetime_budget_after_old_task_completion(
+        tmp_path, made_progress):
+    # Re-enrollment preserves both lifetime attempts and no-progress history.
+    api = FakeApi(source_failure=True, unresolved=made_progress)
     path = tmp_path / "state.json"
     store = StateStore(path)
 
@@ -22821,6 +22877,11 @@ def test_reenrollment_preserves_lifetime_budget_after_old_task_completion(tmp_pa
             task_id = f"task-{attempt + 1}"
             action = next(item for item in store.actions().values()
                           if item.get("task_id") == task_id)
+            if attempt == 0 and made_progress:
+                # A changed source head plus the resolved review target is
+                # positive progress, independent of the lifetime attempt count.
+                api.head_sha = api.pull["head"]["sha"] = "c" * 40
+                api.source_failure_sha = api.head_sha
             api.complete_task(task_id, action)
             api.unresolved = False
     old_fix = next(action for action in store.actions().values()
@@ -22838,7 +22899,17 @@ def test_reenrollment_preserves_lifetime_budget_after_old_task_completion(tmp_pa
     api.complete_task("task-3", old_fix)
     api.comments.append({"id": 126, "user": {"id": OWNER},
                          "body": "/hermes enroll", "updated_at": "2026-10-01T12:10:00Z"})
-    restarted_cycle()
+    outcome = restarted_cycle()
+    if not made_progress:
+        assert api.fix_attempts == 3
+        assert outcome["pull_requests"][0]["reasons"] == ["budget"]
+        enrollment = store.snapshot()["enrollments"]["16"]
+        assert enrollment["comment"] == 126 and enrollment["active"] is True
+        assert enrollment["attempts"] == 3
+        assert enrollment["source_anchor_reservations"] == 3
+        restarted_cycle()
+        assert api.fix_attempts == 3
+        return
     assert api.fix_attempts == 4
     enrollment = store.snapshot()["enrollments"]["16"]
     assert enrollment["comment"] == 126 and enrollment["active"] is True
@@ -22848,6 +22919,11 @@ def test_reenrollment_preserves_lifetime_budget_after_old_task_completion(tmp_pa
     fixes = [action for action in store.actions().values() if action["kind"] == "fix"]
     assert len(fixes) == 1
     assert fixes[0]["task_id"] == "task-4" and fixes[0]["attempt"] == 4
+    assert fixes[0]["receipt_anchor_key"] != old_fix["receipt_anchor_key"]
+    assert enrollment["source_anchor_reservations"] == 4
+    assert store.snapshot()["outbox"][old_fix["receipt_anchor_key"]]["comment_id"] == (
+        old_fix["receipt_anchor_comment_id"]
+    )
     restarted_cycle()
     assert api.fix_attempts == 4
 

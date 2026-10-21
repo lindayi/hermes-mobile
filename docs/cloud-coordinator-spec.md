@@ -1984,6 +1984,18 @@ between planning and dispatch, the apply summary reports `source-anchor-budget`
 and clears `repair_requested`; the next scan emits its normal deduplicated budget
 outcome. Uncertain anchor publication likewise clears `repair_requested` without
 pretending that a source task was dispatched.
+Re-enrollment planning preserves the same lifetime attempts, anchor reservations,
+and no-progress history as the atomic commit. It must plan the next unused
+attempt and anchor, not replay attempt one's reservation. Three unchanged
+no-progress results still block; demonstrated source progress permits a later
+attempt without resetting any lifetime count.
+
+Live and retained ordinary SOURCE receipts treat any retained anchor role, key,
+creation time, comment ID, or body as requiring complete anchor validation.
+Dropping the ID and body cannot turn partially anchored state into historical
+unanchored evidence. Edited/deleted anchors fail closed after restart; genuine
+historical receipts with no anchor metadata retain their existing compatibility.
+
 Compaction preserves every action correlated by map key, embedded reservation key,
 or task ID to a retained abandonment root, and conflicting copies of retained
 receipt proofs. Missing or foreign issue fields never sever that correlation.

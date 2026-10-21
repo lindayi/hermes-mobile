@@ -882,8 +882,8 @@ evidence.
 
 | Issue #120 candidate path | SHA-256 |
 | --- | --- |
-| `deploy/cloud_coordinator.py` | `9fd27a8a0725f4e6176b42bd9aecd7fbde25d55ced87acbe39356bd1887c0f55` |
-| `deploy/task_receipts.py` | `5b8ab1e609f3febf3f8f20dd35da3b3521b1d9513ecdc3555eb466e4bf660a5a` |
+| `deploy/cloud_coordinator.py` | `d422fed47784f44f1d995abfe96dee01312d552aa1ef93313f0c70c2b7fb9f95` |
+| `deploy/task_receipts.py` | `66be8dd702a71c8b3fabaa213455c20b8eeaedaec2466aa28b2299b68737deac` |
 
 ## Policy phases and activation
 

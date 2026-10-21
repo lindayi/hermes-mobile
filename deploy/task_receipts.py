@@ -907,9 +907,11 @@ def validate_task_receipt(task, action, pull, comments, *, now):
             or "owner_continuation_companions" in action
         )
     )
-    anchored = source_continuation or (
-        "receipt_anchor_comment_id" in action
-        or "receipt_anchor_body" in action
+    anchored = source_continuation or any(
+        field in action for field in (
+            "receipt_anchor_role", "receipt_anchor_key", "receipt_anchor_created_at",
+            "receipt_anchor_comment_id", "receipt_anchor_body",
+        )
     )
     anchored_neutral = anchored and action.get("task_type") == "neutral"
     if anchored:
