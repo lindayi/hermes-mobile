@@ -19,3 +19,22 @@
 .money-sankey .sankey-node,.money-sankey .sankey-link{cursor:pointer}
 @media(max-width:600px){.money-sankey{max-height:55vh;min-height:320px}.money-sankey-group{flex:1 1 100%}}
 @media(prefers-reduced-motion:reduce){.money-sankey .sankey-node,.money-sankey .sankey-link{transition:none}}
+:root{--bg:#f4f3ee;--panel:#fffefa;--rail:#efeee7;--text:#22332f;--muted:#616d67;--border:#d7dcd3;--teal:#327b65;--amber:#b36d45;--blue:#647f9f;--tint:#edf2e9}
+@media(prefers-color-scheme:dark){:root{--bg:#171d1b;--panel:#202724;--rail:#141a18;--text:#e3e9e3;--muted:#a0aaa1;--border:#37413a;--teal:#8bc1a4;--amber:#e4ad76;--blue:#9dbfcb;--tint:#29382f}}
+.private-paused #content{visibility:hidden;pointer-events:none}
+.private-pause{align-items:center;justify-content:space-between;gap:12px;padding:12px 0;color:var(--muted);font-size:11px}
+.private-pause button{min-height:44px}
+.money-sankey-view-controls{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:8px 0}
+.money-sankey-view-controls button{min-width:44px;min-height:44px;padding:8px;font-size:12px}
+.money-sankey-view-controls output{min-width:46px;text-align:center;font-size:11px;font-variant-numeric:tabular-nums}
+.money-sankey-stream-finder{margin:8px 0}
+.money-sankey-stream-finder>summary{padding:10px 12px;min-height:44px;border:1px solid var(--border);border-radius:6px;background:var(--panel)}
+.money-sankey-stream-finder>input{width:min(100%,420px);margin:8px 0}
+.money-sankey-stream-finder>[role=status]{font-size:11px;color:var(--muted)}
+.money-sankey-stream-results{display:grid;gap:5px;max-height:260px;overflow:auto}
+.money-sankey-stream-results button{min-height:44px;text-align:left;overflow-wrap:anywhere}
+.money-sankey-canvas{position:relative;min-width:100%;min-height:280px}
+.money-sankey-layer{position:absolute;left:0;top:0;transform-origin:top left}
+.money-sankey{width:100%}
+.money-sankey .money-sankey-chart{flex:none}
+@media(max-width:600px){.money-sankey-view-controls button{flex:1 1 44px}.private-pause{align-items:flex-start;flex-direction:column}}

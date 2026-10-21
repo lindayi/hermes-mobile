@@ -9,13 +9,22 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  if(!Plotly)throw new Error('Finance Sankey renderer is unavailable');
  const model=createModel(raw),expanded=[],collapsed=model.project().accountGroups.map(group=>group.id),anchors={};
  const stage=document.createElement('div');stage.className='money-sankey';
+ const canvas=document.createElement('div');canvas.className='money-sankey-canvas';
+ const layer=document.createElement('div');layer.className='money-sankey-layer';
  const chart=document.createElement('div');chart.className='money-sankey-chart';chart.setAttribute('role','group');chart.setAttribute('aria-label','Recorded money movement Sankey');
  const bands=document.createElement('div');bands.className='money-sankey-bands';bands.setAttribute('aria-label','Account role groups');
  const controls=document.createElement('div');controls.className='money-sankey-controls';
+ const viewControls=document.createElement('div');viewControls.className='money-sankey-view-controls';viewControls.setAttribute('role','group');viewControls.setAttribute('aria-label','Map view controls');
  const jump=document.createElement('select');jump.setAttribute('aria-label','Jump to account group');
+ const finder=document.createElement('details');finder.className='money-sankey-stream-finder';
+ const finderSummary=document.createElement('summary');finderSummary.textContent='Find an exact movement';
+ const finderInput=document.createElement('input');finderInput.type='search';finderInput.maxLength=120;finderInput.placeholder='Search movement labels';finderInput.setAttribute('aria-label','Search exact movements');
+ const finderStatus=document.createElement('p');finderStatus.setAttribute('role','status');
+ const finderResults=document.createElement('div');finderResults.className='money-sankey-stream-results';
+ finder.append(finderSummary,finderInput,finderStatus,finderResults);
  const status=document.createElement('p');status.className='money-sankey-status';status.setAttribute('role','status');
- stage.append(chart,bands);root.replaceChildren(controls,jump,stage,status);
- let directory,p,geometry,disposed=false,selected=null;
+ layer.append(chart,bands);canvas.append(layer);stage.append(canvas);root.replaceChildren(viewControls,controls,jump,finder,stage,status);
+ let directory,p,geometry,disposed=false,selected=null,zoom=1;
  const sheet=[...document.styleSheets].find(item=>item.href&&new URL(item.href).pathname.endsWith('/plotly.css'));
  if(!sheet)throw new Error('Finance Sankey stylesheet is unavailable');
  const styleRules=[];let styleNumber=0;
@@ -25,6 +34,13 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   styleRules.push(sheet.cssRules.length);sheet.insertRule(`.${name}{${declarations}}`,sheet.cssRules.length);
  };
  const clearLayoutStyles=()=>{for(const index of styleRules.splice(0).reverse())sheet.deleteRule(index);styleNumber=0;};
+ const control=(label,action,ariaLabel=label)=>{const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('aria-label',ariaLabel);button.addEventListener('click',action);return button;};
+ const zoomOut=control('−',()=>{zoom=Math.max(.65,Math.round((zoom-.15)*100)/100);void draw();},'Zoom out');
+ const zoomLabel=document.createElement('output');zoomLabel.setAttribute('aria-live','polite');
+ const zoomIn=control('+',()=>{zoom=Math.min(1.5,Math.round((zoom+.15)*100)/100);void draw();},'Zoom in');
+ const fit=control('Fit',()=>{zoom=1;stage.scrollTo({left:0,top:0});void draw();},'Fit map to view');
+ const pan=(label,left,top)=>control(label,()=>stage.scrollBy({left,top,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'}),`Pan ${label==='←'?'left':label==='→'?'right':label==='↑'?'up':'down'}`);
+ viewControls.append(zoomOut,zoomLabel,zoomIn,fit,pan('←',-180,0),pan('↑',0,-180),pan('↓',0,180),pan('→',180,0));
  const membersFor=selection=>selectionMembers(selection.view||p,selection);
  const chooseGroup=(id,label)=>{const selectedGroup={group:id,label};select(selectedGroup);open(membersFor(selectedGroup));};
  const select=next=>{
@@ -61,18 +77,26 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
    if(!band.collapsed){const box=document.createElement('div');box.className='money-sankey-enclosure';box.dataset.role=band.role;layoutStyle(box,{left:`${Math.max(0,12+band.x*(geometry.width-24)-18)}px`,top:`${band.top}px`,width:`${Math.max(180,(band.right-band.x)*(geometry.width-24)+30)}px`,height:`${band.bottom-band.top}px`});bands.append(box);}
    jump.append(new Option(`${band.label}${band.active?'':' · no movement'}`,band.id));
   }
-  jump.onchange=()=>{const band=geometry.bands.find(item=>item.id===jump.value);if(band)stage.scrollTo({top:band.top,behavior:'smooth'});};
+  jump.onchange=()=>{const band=geometry.bands.find(item=>item.id===jump.value);if(band)stage.scrollTo({top:band.top*zoom,left:band.x*geometry.width*zoom,behavior:'smooth'});};
  };
+ const renderFinder=()=>{
+  const term=finderInput.value.trim().toLocaleLowerCase(),streams=[...new Map(p.edges.flatMap(edge=>edge.members||[edge]).map(edge=>[edge.id,edge])).values()],matches=term?streams.filter(edge=>`${edge.label} ${edge.source} ${edge.target}`.toLocaleLowerCase().includes(term)):[],shown=matches.slice(0,25);
+  finderStatus.textContent=term?`${shown.length} of ${matches.length} matching movements shown.`:'Search to choose an exact movement when streams are hard to distinguish.';
+  finderResults.replaceChildren(...shown.map(edge=>control(`${edge.label||'Recorded movement'} · ${new Intl.NumberFormat('en-CA',{style:'currency',currency:edge.currency}).format(edge.amount_minor/100)}`,()=>{select({edges:[edge.id],label:edge.label});open([edge]);},`Inspect ${edge.label||'recorded movement'}`)));
+ };
+ finderInput.addEventListener('input',renderFinder);
  async function draw(){
   if(disposed)return;clearLayoutStyles();
   directory=model.project(expanded,[]);p=model.project(expanded,collapsed);
   const active=new Set(p.edges.flatMap(edge=>[edge.source,edge.target])),nodes=p.nodes.filter(node=>active.has(node.id));
-  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';renderBands();groupControls();return;}
+  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();zoomLabel.textContent='100%';return;}
   const projected={...p,nodes},width=Math.max(720,stage.clientWidth||900);
   geometry=groupedLayout(projected,{width,anchors});
   const height=geometry.height,index=new Map(nodes.map((node,i)=>[node.id,i]));
+  layoutStyle(canvas,{width:`${width*zoom}px`,height:`${height*zoom}px`});
+  layoutStyle(layer,{width:`${width}px`,height:`${height}px`,transform:`scale(${zoom})`});
   layoutStyle(chart,{width:`${width}px`,height:`${height}px`});
-  renderBands();groupControls();
+  renderBands();groupControls();renderFinder();zoomLabel.textContent=`${Math.round(zoom*100)}%`;
   const labels=nodes.map(node=>`${html(node.label)}<br>${account(node)?'Account':html(node.kind.replaceAll('-',' '))}<br>${html(new Intl.NumberFormat('en-CA',{style:'currency',currency:raw.currency}).format((node.value??Math.max(node.incoming,node.outgoing))/100))}`);
   const trace={type:'sankey',arrangement:'fixed',orientation:'h',valueformat:'.2f',valueprefix:raw.currency+' ',textfont:{family:'system-ui, sans-serif',size:12,color:'#22332f'},node:{x:nodes.map(node=>geometry.slots[node.id].x),y:nodes.map(node=>(geometry.slots[node.id].top+geometry.slots[node.id].bottom)/(2*height)),align:'left',pad:4,thickness:16,line:{width:0},label:labels,color:nodes.map(node=>color[node.displayKind||node.kind]||color.unresolved),customdata:nodes.map(node=>[node.id,html(node.label)]),hovertemplate:'%{customdata[1]}<extra></extra>'},link:{source:p.edges.map(edge=>index.get(edge.source)),target:p.edges.map(edge=>index.get(edge.target)),value:p.edges.map(edge=>edge.amount/100),color:p.edges.map(edge=>`${color[edge.displayKind||edge.type]||color.unresolved}55`),customdata:p.edges.map(edge=>[edge.id,html((nodes[index.get(edge.source)]?.label||'')+' → '+(nodes[index.get(edge.target)]?.label||''))]),hovertemplate:'%{customdata[1]}<extra></extra>'}};
   const layout={width,height,margin:{l:12,r:12,t:12,b:12},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'system-ui, sans-serif',color:'#202b2b'}};
