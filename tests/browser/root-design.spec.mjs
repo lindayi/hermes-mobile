@@ -69,6 +69,30 @@ async function screenshot(page,name){
  }
 }
 
+function contrast(foreground,background){
+ const luminance=value=>{const rgb=value.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4);return rgb.reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);};
+ const values=[luminance(foreground),luminance(background)].sort((a,b)=>a-b);
+ return (values[1]+0.05)/(values[0]+0.05);
+}
+
+test('selected navigation and filters meet normal-text contrast in both themes', {timeout:45000}, async()=>{
+ const h=await fixture(),{page}=h;
+ try{
+  await page.getByRole('button',{name:'Filter conversations',exact:true}).click();
+  await page.locator('.filter-segment[data-kind=chats]').click();
+  await page.getByRole('button',{name:'Filter conversations',exact:true}).click();
+  for(const width of [390,1280])for(const theme of ['light','dark']){
+   await page.setViewportSize({width,height:844});
+   await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);
+   for(const selector of ['.nav-item[aria-current=page]','.filter-segment[aria-pressed=true]','.filter-toggle[data-active=true]']){
+    const target=page.locator(selector);await target.waitFor({state:'visible'});
+    const colors=await target.evaluate(node=>{const style=getComputedStyle(node);return [style.color,style.backgroundColor];});
+    assert.ok(contrast(...colors)>=4.5,`${selector} ${width}px ${theme} normal-text contrast ${contrast(...colors).toFixed(3)} is below 4.5:1`);
+   }
+  }
+ }finally{await h.close();}
+});
+
 test('generated root routes share the calm design and retain their controls', {timeout:90000}, async()=>{
  const h=await fixture(),{page,state}=h;
  try{
