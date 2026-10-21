@@ -1,5 +1,6 @@
 import {createModel,selectionMembers} from './live-model.mjs';
 import {groupedLayout} from './layout.mjs';
+import {ranked} from './live-model.mjs';
 
 const account=node=>node?.kind==='account'||node?.kind==='account-group';
 const color={income:'#327b65','employer-match':'#367662','payroll-saving':'#796496','portfolio-trade':'#75678f',tax:'#b18655','payroll-deduction':'#ad8766','payroll-net':'#397f79',reimbursement:'#548d78',payroll:'#327b65','investment-income':'#327b65',recovery:'#548d78',transfer:'#69849c',expense:'#b36d45',investment:'#7a7c9c',financing:'#8f7470',adjustment:'#9a8e6c',unresolved:'#929292'};
@@ -14,6 +15,11 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  const chart=document.createElement('div');chart.className='money-sankey-chart';chart.setAttribute('role','group');chart.setAttribute('aria-label','Recorded money movement Sankey');
  const bands=document.createElement('div');bands.className='money-sankey-bands';bands.setAttribute('aria-label','Account role groups');
  const controls=document.createElement('div');controls.className='money-sankey-controls';
+ const explore=document.createElement('details');explore.className='money-sankey-explore';
+ const exploreSummary=document.createElement('summary');exploreSummary.textContent='Explore accounts, spending and categories';
+ const exploreTabs=document.createElement('div');exploreTabs.className='money-sankey-explore-tabs';exploreTabs.setAttribute('role','tablist');exploreTabs.setAttribute('aria-label','Money map lists');
+ const exploreList=document.createElement('div');exploreList.className='money-sankey-explore-list';exploreList.setAttribute('role','region');exploreList.setAttribute('aria-label','Money map list');
+ explore.append(exploreSummary,exploreTabs,exploreList);
  const viewControls=document.createElement('div');viewControls.className='money-sankey-view-controls';viewControls.setAttribute('role','group');viewControls.setAttribute('aria-label','Map view controls');
  const jump=document.createElement('select');jump.setAttribute('aria-label','Jump to account group');
  const finder=document.createElement('details');finder.className='money-sankey-stream-finder';
@@ -23,9 +29,9 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  const finderResults=document.createElement('div');finderResults.className='money-sankey-stream-results';
  finder.append(finderSummary,finderInput,finderStatus,finderResults);
  const status=document.createElement('p');status.className='money-sankey-status';status.setAttribute('role','status');
- layer.append(chart,bands);canvas.append(layer);stage.append(canvas);root.replaceChildren(viewControls,controls,jump,finder,stage,status);
+ layer.append(chart,bands);canvas.append(layer);stage.append(canvas);root.replaceChildren(viewControls,controls,jump,explore,finder,stage,status);
  let directory,p,geometry,disposed=false,selected=null,zoom=1;
- const sheet=[...document.styleSheets].find(item=>item.href&&new URL(item.href).pathname.endsWith('/plotly.css'));
+ const sheet=[...document.styleSheets].find(item=>item.ownerNode?.id==='plotly.js-style-global');
  if(!sheet)throw new Error('Finance Sankey stylesheet is unavailable');
  const styleRules=[];let styleNumber=0;
  const layoutStyle=(node,properties)=>{
@@ -42,6 +48,32 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  const pan=(label,left,top)=>control(label,()=>stage.scrollBy({left,top,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'}),`Pan ${label==='←'?'left':label==='→'?'right':label==='↑'?'up':'down'}`);
  viewControls.append(zoomOut,zoomLabel,zoomIn,fit,pan('←',-180,0),pan('↑',0,-180),pan('↓',0,180),pan('→',180,0));
  const membersFor=selection=>selectionMembers(selection.view||p,selection);
+ const toggleNode=node=>{
+  if(!node?.expandable)return;
+  const anchor=geometry?.bands.find(band=>band.id===node.groupId);if(anchor)anchors[node.groupId]=anchor.top;
+  const keep=selected;expanded.splice(0,expanded.length,...model.toggle(expanded,node.id));
+  void draw().then(()=>{if(keep)select(keep);});
+ };
+ let exploreMode='spending';
+ const renderExplore=()=>{
+  const modes=[['accounts','Accounts'],['spending','Spending'],['categories','All categories']];
+  exploreTabs.replaceChildren(...modes.map(([id,label])=>{const tab=control(label,()=>{exploreMode=id;renderExplore();},label);tab.setAttribute('role','tab');tab.setAttribute('aria-selected',String(id===exploreMode));return tab;}));
+  const list=[];
+  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.groupId===group.id))list.push(control(node.label,()=>{const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id);select({node:node.id,label:node.label});open(edges);},`Inspect account ${node.label}`));
+  if(exploreMode==='spending')for(const row of ranked(p)){
+   const currency=raw.currency,fmt=value=>new Intl.NumberFormat('en-CA',{style:'currency',currency}).format(value/100),edges=p.edges.filter(edge=>edge.members?.some(member=>row.edges.some(source=>source.id===member.id)));
+   const button=control(`${row.label} · ${fmt(row.net)} net`,()=>{select({edges:edges.map(edge=>edge.id),label:row.label});open(edges);},`Inspect net spending ${row.label} · gross ${fmt(row.gross)} · refunds ${fmt(row.offset)}`);
+   button.title=`Gross ${fmt(row.gross)} · refunds ${fmt(row.offset)} · net ${fmt(row.net)}`;
+   button.dataset.gross=String(row.gross);button.dataset.offset=String(row.offset);list.push(button);
+  }
+  if(exploreMode==='categories')for(const node of p.nodes.filter(n=>!account(n))){
+   const row=document.createElement('div');row.className='money-sankey-explore-row';
+   row.append(control(`${node.label} · ${node.kind.replaceAll('-',' ')}`,()=>{const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id);select({node:node.id,label:node.label});open(edges);},`Inspect ${node.label}`));
+   if(node.expandable){const toggle=control(node.expanded?'Fold':'Expand',()=>toggleNode(node),`${node.expanded?'Fold':'Expand'} ${node.label}`);toggle.setAttribute('aria-expanded',String(!!node.expanded));row.append(toggle);}
+   list.push(row);
+  }
+  exploreList.replaceChildren(...list);
+ };
  const chooseGroup=(id,label)=>{const selectedGroup={group:id,label};select(selectedGroup);open(membersFor(selectedGroup));};
  const select=next=>{
   selected=next;
@@ -89,29 +121,30 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   if(disposed)return;clearLayoutStyles();
   directory=model.project(expanded,[]);p=model.project(expanded,collapsed);
   const active=new Set(p.edges.flatMap(edge=>[edge.source,edge.target])),nodes=p.nodes.filter(node=>active.has(node.id));
-  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();zoomLabel.textContent='100%';return;}
+  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;return;}
   const projected={...p,nodes},width=Math.max(720,stage.clientWidth||900);
   geometry=groupedLayout(projected,{width,anchors});
   const height=geometry.height,index=new Map(nodes.map((node,i)=>[node.id,i]));
   layoutStyle(canvas,{width:`${width*zoom}px`,height:`${height*zoom}px`});
   layoutStyle(layer,{width:`${width}px`,height:`${height}px`,transform:`scale(${zoom})`});
   layoutStyle(chart,{width:`${width}px`,height:`${height}px`});
-  renderBands();groupControls();renderFinder();zoomLabel.textContent=`${Math.round(zoom*100)}%`;
+  renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;
   const labels=nodes.map(node=>`${html(node.label)}<br>${account(node)?'Account':html(node.kind.replaceAll('-',' '))}<br>${html(new Intl.NumberFormat('en-CA',{style:'currency',currency:raw.currency}).format((node.value??Math.max(node.incoming,node.outgoing))/100))}`);
   const trace={type:'sankey',arrangement:'fixed',orientation:'h',valueformat:'.2f',valueprefix:raw.currency+' ',textfont:{family:'system-ui, sans-serif',size:12,color:'#22332f'},node:{x:nodes.map(node=>geometry.slots[node.id].x),y:nodes.map(node=>(geometry.slots[node.id].top+geometry.slots[node.id].bottom)/(2*height)),align:'left',pad:4,thickness:16,line:{width:0},label:labels,color:nodes.map(node=>color[node.displayKind||node.kind]||color.unresolved),customdata:nodes.map(node=>[node.id,html(node.label)]),hovertemplate:'%{customdata[1]}<extra></extra>'},link:{source:p.edges.map(edge=>index.get(edge.source)),target:p.edges.map(edge=>index.get(edge.target)),value:p.edges.map(edge=>edge.amount/100),color:p.edges.map(edge=>`${color[edge.displayKind||edge.type]||color.unresolved}55`),customdata:p.edges.map(edge=>[edge.id,html((nodes[index.get(edge.source)]?.label||'')+' → '+(nodes[index.get(edge.target)]?.label||''))]),hovertemplate:'%{customdata[1]}<extra></extra>'}};
   const layout={width,height,margin:{l:12,r:12,t:12,b:12},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'system-ui, sans-serif',color:'#202b2b'}};
   await Plotly.react(chart,[trace],layout,{displayModeBar:false,responsive:false});
   if(disposed)return;
   chart.removeAllListeners?.('plotly_click');
+  let lastNodeTap=null;
   chart.on('plotly_click',event=>{
    const point=event.points?.[0];if(!point)return;
    if(point.source!==undefined){const edge=p.edges.find(item=>item.id===point.customdata?.[0]);if(edge){select({edges:[edge.id],label:edge.label});open([edge]);}return;}
-   const node=p.nodes.find(item=>item.id===point.customdata?.[0]);if(node){const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id);select({node:node.id,label:node.label});open(edges);}
+   const node=p.nodes.find(item=>item.id===point.customdata?.[0]);if(node){const doubleTap=point.originalEvent?.detail>=2||(lastNodeTap?.id===node.id&&Date.now()-lastNodeTap.at<380);lastNodeTap={id:node.id,at:Date.now()};if(node.expandable&&doubleTap){toggleNode(node);return;}const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id);select({node:node.id,label:node.label});open(edges);}
   });
   chart.querySelectorAll('.sankey-link').forEach((link,index)=>{const edge=p.edges[index];if(!edge)return;link.dataset.edge=edge.id;link.setAttribute('tabindex','0');link.setAttribute('role','button');link.setAttribute('aria-label',`Inspect ${edge.label||'recorded movement'}`);link.addEventListener('keydown',event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();select({edges:[edge.id],label:edge.label});open([edge]);}});});
   chart.querySelectorAll('.sankey-node').forEach((node,index)=>{const item=nodes[index];if(!item)return;node.dataset.node=item.id;node.setAttribute('tabindex','0');node.setAttribute('role','button');node.setAttribute('aria-label',`Inspect ${item.label}`);node.addEventListener('keydown',event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===item.id||edge.target===item.id);select({node:item.id,label:item.label});open(edges);}});});
   if(selected)select(selected);
  }
  const onResize=()=>{if(!disposed)void draw();};window.addEventListener('resize',onResize);void draw();
- return {model,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select};
+ return {model,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select,snapshot(){return {expanded:[...expanded],collapsed:[...collapsed],anchors:{...anchors},zoom,exploreMode,selected:selected?{...selected}:null,exploreOpen:explore.open,finderOpen:finder.open,finderQuery:finderInput.value,scrollTop:stage.scrollTop,scrollLeft:stage.scrollLeft};},restore(state){if(!state||disposed)return;expanded.splice(0,expanded.length,...(Array.isArray(state.expanded)?state.expanded:[]));const groups=new Set(model.project().accountGroups.map(group=>group.id));collapsed.splice(0,collapsed.length,...(Array.isArray(state.collapsed)?state.collapsed.filter(id=>groups.has(id)):[]));for(const [id,top] of Object.entries(state.anchors||{}))if(groups.has(id)&&Number.isFinite(top))anchors[id]=top;zoom=Number.isFinite(state.zoom)?Math.min(1.5,Math.max(.65,state.zoom)):1;exploreMode=['accounts','spending','categories'].includes(state.exploreMode)?state.exploreMode:'spending';explore.open=!!state.exploreOpen;finder.open=!!state.finderOpen;finderInput.value=typeof state.finderQuery==='string'?state.finderQuery:'';selected=state.selected||null;void draw().then(()=>{stage.scrollTop=Number.isFinite(state.scrollTop)?state.scrollTop:0;stage.scrollLeft=Number.isFinite(state.scrollLeft)?state.scrollLeft:0;});}};
 }
