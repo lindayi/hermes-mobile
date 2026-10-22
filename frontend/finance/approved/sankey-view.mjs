@@ -47,7 +47,15 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  const fit=control('Fit',()=>{zoom=1;stage.scrollTo({left:0,top:0});void draw();},'Fit map to view');
  const pan=(label,left,top)=>control(label,()=>stage.scrollBy({left,top,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'}),`Pan ${label==='←'?'left':label==='→'?'right':label==='↑'?'up':'down'}`);
  viewControls.append(zoomOut,zoomLabel,zoomIn,fit,pan('←',-180,0),pan('↑',0,-180),pan('↓',0,180),pan('→',180,0));
- const membersFor=selection=>selectionMembers(selection.view||p,selection);
+ const membersFor=selection=>{
+  if(Array.isArray(selection?.memberIds)){
+   const wanted=new Set(selection.memberIds),found=new Map();
+   const visit=member=>{if(!member||found.has(member.id))return;if(wanted.has(member.id))found.set(member.id,member);for(const nested of member.members||[])visit(nested);};
+   for(const edge of [...p.edges,...p.internalEdges])for(const member of edge.members||[])visit(member);
+   return [...found.values()];
+  }
+  return selectionMembers(selection.view||p,selection);
+ };
  const toggleNode=node=>{
   if(!node?.expandable)return;
   const anchor=geometry?.bands.find(band=>band.id===node.groupId);if(anchor)anchors[node.groupId]=anchor.top;
@@ -59,10 +67,10 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   const modes=[['accounts','Accounts'],['spending','Spending'],['categories','All categories']];
   exploreTabs.replaceChildren(...modes.map(([id,label])=>{const tab=control(label,()=>{exploreMode=id;renderExplore();},label);tab.setAttribute('role','tab');tab.setAttribute('aria-selected',String(id===exploreMode));return tab;}));
   const list=[];
-  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.groupId===group.id))list.push(control(node.label,()=>{const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id);select({node:node.id,label:node.label});open(edges);},`Inspect account ${node.label}`));
+  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.groupId===group.id))list.push(control(node.label,()=>{const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id||edge.members?.some(member=>member.source===node.id||member.target===node.id));select({edges:edges.map(edge=>edge.id),label:node.label});open(edges);},`Inspect account ${node.label}`));
   if(exploreMode==='spending')for(const row of ranked(p)){
-   const currency=raw.currency,fmt=value=>new Intl.NumberFormat('en-CA',{style:'currency',currency}).format(value/100),edges=p.edges.filter(edge=>edge.members?.some(member=>row.edges.some(source=>source.id===member.id)));
-   const button=control(`${row.label} · ${fmt(row.net)} net`,()=>{select({edges:edges.map(edge=>edge.id),label:row.label});open(edges);},`Inspect net spending ${row.label} · gross ${fmt(row.gross)} · refunds ${fmt(row.offset)}`);
+   const currency=raw.currency,fmt=value=>new Intl.NumberFormat('en-CA',{style:'currency',currency}).format(value/100);
+   const button=control(`${row.label} · ${fmt(row.net)} net`,()=>{select({edges:row.edges.map(edge=>edge.id),label:row.label});open(row.edges);},`Inspect net spending ${row.label} · gross ${fmt(row.gross)} · refunds ${fmt(row.offset)}`);
    button.title=`Gross ${fmt(row.gross)} · refunds ${fmt(row.offset)} · net ${fmt(row.net)}`;
    button.dataset.gross=String(row.gross);button.dataset.offset=String(row.offset);list.push(button);
   }
@@ -76,17 +84,18 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  };
  const chooseGroup=(id,label)=>{const selectedGroup={group:id,label};select(selectedGroup);open(membersFor(selectedGroup));};
  const select=next=>{
-  selected=next;
+  selected=next?{...next,memberIds:membersFor(next).map(member=>member.id)}:null;
   status.textContent=next?.label||'';
-  bands.querySelectorAll('[data-group-select]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.groupSelect===next?.group)));
-  const memberIds=new Set(next?membersFor(next).map(member=>member.id):[]),edges=p.edges.filter(edge=>edge.members?.some(member=>memberIds.has(member.id))),edgeIds=new Set(edges.map(edge=>edge.id)),nodeIds=new Set(edges.flatMap(edge=>[edge.source,edge.target]));
+  bands.querySelectorAll('[data-group-select]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.groupSelect===selected?.group)));
+  const memberIds=new Set(selected?membersFor(selected).map(member=>member.id):[]),edges=p.edges.filter(edge=>edge.members?.some(member=>memberIds.has(member.id))),edgeIds=new Set(edges.map(edge=>edge.id)),nodeIds=new Set(edges.flatMap(edge=>[edge.source,edge.target]));
   chart.querySelectorAll('.sankey-node').forEach(node=>node.classList.toggle('is-dim',!!next&&!nodeIds.has(node.dataset.node)));
-  chart.querySelectorAll('.sankey-link').forEach(link=>link.classList.toggle('is-selected',!!next&&edgeIds.has(link.dataset.edge)));
+  chart.querySelectorAll('.sankey-link').forEach(link=>link.classList.toggle('is-selected',!!selected&&edgeIds.has(link.dataset.edge)));
  };
  const open=edges=>{
-  const members=[...new Map(edges.flatMap(edge=>edge.members||[edge]).map(edge=>[edge.id,edge])).values()];
+  const streams=edges.flatMap(edge=>Number.isSafeInteger(edge.amount)&&Array.isArray(edge.members)?edge.members:[edge]);
+  const members=[...new Map(streams.map(edge=>[edge.id,edge])).values()];
   if(!members.length)return;
-  const edge={id:'sankey-selection:'+members.map(member=>member.id).join('|'),label:members.length===1?members[0].label:`${members.length} exact streams`,amount_minor:members.reduce((sum,member)=>sum+member.amount_minor,0),currency:members[0].currency,members};
+  const edge={id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,label:members.length===1?members[0].label:`${members.length} exact streams`,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency,members};
   inspect(edge);
  };
  const groupControls=()=>{
@@ -125,13 +134,13 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   const projected={...p,nodes},width=Math.max(720,stage.clientWidth||900);
   geometry=groupedLayout(projected,{width,anchors});
   const height=geometry.height,index=new Map(nodes.map((node,i)=>[node.id,i]));
-  layoutStyle(canvas,{width:`${width*zoom}px`,height:`${height*zoom}px`});
-  layoutStyle(layer,{width:`${width}px`,height:`${height}px`,transform:`scale(${zoom})`});
-  layoutStyle(chart,{width:`${width}px`,height:`${height}px`});
+  layoutStyle(canvas,{width:`${geometry.width*zoom}px`,height:`${height*zoom}px`});
+  layoutStyle(layer,{width:`${geometry.width}px`,height:`${height}px`,transform:`scale(${zoom})`});
+  layoutStyle(chart,{width:`${geometry.width}px`,height:`${height}px`});
   renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;
   const labels=nodes.map(node=>`${html(node.label)}<br>${account(node)?'Account':html(node.kind.replaceAll('-',' '))}<br>${html(new Intl.NumberFormat('en-CA',{style:'currency',currency:raw.currency}).format((node.value??Math.max(node.incoming,node.outgoing))/100))}`);
   const trace={type:'sankey',arrangement:'fixed',orientation:'h',valueformat:'.2f',valueprefix:raw.currency+' ',textfont:{family:'system-ui, sans-serif',size:12,color:'#22332f'},node:{x:nodes.map(node=>geometry.slots[node.id].x),y:nodes.map(node=>(geometry.slots[node.id].top+geometry.slots[node.id].bottom)/(2*height)),align:'left',pad:4,thickness:16,line:{width:0},label:labels,color:nodes.map(node=>color[node.displayKind||node.kind]||color.unresolved),customdata:nodes.map(node=>[node.id,html(node.label)]),hovertemplate:'%{customdata[1]}<extra></extra>'},link:{source:p.edges.map(edge=>index.get(edge.source)),target:p.edges.map(edge=>index.get(edge.target)),value:p.edges.map(edge=>edge.amount/100),color:p.edges.map(edge=>`${color[edge.displayKind||edge.type]||color.unresolved}55`),customdata:p.edges.map(edge=>[edge.id,html((nodes[index.get(edge.source)]?.label||'')+' → '+(nodes[index.get(edge.target)]?.label||''))]),hovertemplate:'%{customdata[1]}<extra></extra>'}};
-  const layout={width,height,margin:{l:12,r:12,t:12,b:12},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'system-ui, sans-serif',color:'#202b2b'}};
+  const layout={width:geometry.width,height,margin:{l:12,r:12,t:12,b:12},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'system-ui, sans-serif',color:'#202b2b'}};
   await Plotly.react(chart,[trace],layout,{displayModeBar:false,responsive:false});
   if(disposed)return;
   chart.removeAllListeners?.('plotly_click');
@@ -146,5 +155,5 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   if(selected)select(selected);
  }
  const onResize=()=>{if(!disposed)void draw();};window.addEventListener('resize',onResize);void draw();
- return {model,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select,snapshot(){return {expanded:[...expanded],collapsed:[...collapsed],anchors:{...anchors},zoom,exploreMode,selected:selected?{...selected}:null,exploreOpen:explore.open,finderOpen:finder.open,finderQuery:finderInput.value,scrollTop:stage.scrollTop,scrollLeft:stage.scrollLeft};},restore(state){if(!state||disposed)return;expanded.splice(0,expanded.length,...(Array.isArray(state.expanded)?state.expanded:[]));const groups=new Set(model.project().accountGroups.map(group=>group.id));collapsed.splice(0,collapsed.length,...(Array.isArray(state.collapsed)?state.collapsed.filter(id=>groups.has(id)):[]));for(const [id,top] of Object.entries(state.anchors||{}))if(groups.has(id)&&Number.isFinite(top))anchors[id]=top;zoom=Number.isFinite(state.zoom)?Math.min(1.5,Math.max(.65,state.zoom)):1;exploreMode=['accounts','spending','categories'].includes(state.exploreMode)?state.exploreMode:'spending';explore.open=!!state.exploreOpen;finder.open=!!state.finderOpen;finderInput.value=typeof state.finderQuery==='string'?state.finderQuery:'';selected=state.selected||null;void draw().then(()=>{stage.scrollTop=Number.isFinite(state.scrollTop)?state.scrollTop:0;stage.scrollLeft=Number.isFinite(state.scrollLeft)?state.scrollLeft:0;});}};
+ return {model,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select,snapshot(){return {expanded:[...expanded],collapsed:[...collapsed],anchors:{...anchors},zoom,exploreMode,selected:selected?{...selected}:null,exploreOpen:explore.open,finderOpen:finder.open,finderQuery:finderInput.value,scrollTop:stage.scrollTop,scrollLeft:stage.scrollLeft};},restore(state){if(!state||disposed)return;expanded.splice(0,expanded.length,...(Array.isArray(state.expanded)?state.expanded.filter(id=>model.kind(id)!==undefined):[]));const groups=new Set(model.project().accountGroups.map(group=>group.id));collapsed.splice(0,collapsed.length,...(Array.isArray(state.collapsed)?state.collapsed.filter(id=>groups.has(id)):[]));for(const [id,top] of Object.entries(state.anchors||{}))if(groups.has(id)&&Number.isFinite(top))anchors[id]=top;zoom=Number.isFinite(state.zoom)?Math.min(1.5,Math.max(.65,state.zoom)):1;exploreMode=['accounts','spending','categories'].includes(state.exploreMode)?state.exploreMode:'spending';explore.open=!!state.exploreOpen;finder.open=!!state.finderOpen;finderInput.value=typeof state.finderQuery==='string'?state.finderQuery:'';selected=state.selected||null;if(selected?.group&&!groups.has(selected.group))selected=null;if(selected&&!selected.group&&!selected.node&&!Array.isArray(selected.memberIds))selected=null;void draw().then(()=>{if(selected){const members=membersFor(selected);if(Array.isArray(selected.memberIds)&&!members.length&&!selected.group)selected=null;else select(selected);}stage.scrollTop=Number.isFinite(state.scrollTop)?state.scrollTop:0;stage.scrollLeft=Number.isFinite(state.scrollLeft)?state.scrollLeft:0;});}};
 }

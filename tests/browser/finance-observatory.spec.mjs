@@ -62,3 +62,100 @@ test('payroll waterfall does not add source salary a second time',{timeout:20000
 test('investment performance never connects different accounts as one series',{timeout:20000},async t=>{const {page,url}=await fixture(t);await page.route('**/finance/investments?**',route=>route.fulfill({json:{...fixtures.investments,periods:[...fixtures.investments.periods,{...fixtures.investments.periods[0],account:'Other fixture account'}]}}));await page.goto(url);await openAnalysis(page);await page.getByRole('tab',{name:'Investments',exact:true}).click();await page.getByText('Select an account for a comparable monthly performance chart.',{exact:true}).waitFor();assert.equal(await page.locator('[data-chart="monthly"]').count(),0);assert.equal(await page.getByRole('table',{name:'Monthly investment performance'}).locator('tbody tr').count(),2);});
 test('recorded unrealized gains and decimal-text reported returns are visible',{timeout:20000},async t=>{const {page,url}=await fixture(t);await page.route('**/finance/investments?**',route=>route.fulfill({json:{...fixtures.investments,holdings:[{...fixtures.investments.holdings[0],unrealized_gain_minor:2500,unrealized_gain_pct:2.5}],periods:[{...fixtures.investments.periods[0],return_pct:'8.125'}]}}));await page.goto(url);await openAnalysis(page);await page.getByRole('tab',{name:'Investments',exact:true}).click();await page.getByRole('table',{name:'Recorded holdings'}).getByText('USD 25.00',{exact:true}).waitFor();await page.getByText('8.125% (reported)',{exact:true}).waitFor();});
 for(const status of [401,403])test(`finance ${status} clears all financial state and lifecycle revalidates`,{timeout:20000},async t=>{const {page,url,deny}=await fixture(t);await page.goto(url);await openAnalysis(page);await page.getByText('Fixture investments',{exact:true}).first().waitFor();deny(status);await page.getByRole('button',{name:'Refresh data',exact:true}).click();await page.getByRole('heading',{name:'Finance is locked'}).waitFor();assert.equal(await page.getByText('Fixture investments',{exact:true}).count(),0);assert.equal(await page.locator('#filters').getByLabel('Account').locator('option').count(),1);assert.equal(await page.getByRole('link',{name:'Sign in with passkey'}).getAttribute('href'),'/hermes/');});
+test('mounted explorer keeps payroll rows, zero-cash evidence, and excludes bridged duplicates',{timeout:30000},async t=>{
+ const {page,url}=await fixture(t);
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json();
+  data.edges.push({id:'payroll-inline',source:'salary',target:'cash',kind:'income',label:'Payroll gross stream',amount_minor:50000,count:1,currency:data.currency,evidenceNote:'Synthetic payslip source',inlineRows:[{entry_id:'payroll-gross',record_id:'payroll-gross',date:'2024-08-01',account:'Fixture cash',description:'Payroll gross inline row',amount_minor:50000,currency:data.currency}],members:[{id:'zero-cash-source',kind:'investment',label:'Zero-cash source',amount_minor:0,currency:data.currency,selector:{endpoint:'transactions',filters:{record_id:'zero-cash-record',currency:data.currency,account:'Fixture cash'}}}]});
+  const food=data.edges.find(edge=>edge.id==='cash-food');food.excludeRecordIds=['synthetic-r'];
+  return route.fulfill({response,json:data});
+ });
+ await page.route('**/finance/transactions?**',route=>{
+  const query=new URL(route.request().url()).searchParams;
+  const item=query.get('record_id')==='zero-cash-record'
+   ?{entry_id:'zero-cash-row',record_id:'zero-cash-record',date:'2024-08-02',account:'Fixture cash',description:'Zero-cash source evidence',amount_minor:0,currency:'CAD'}
+   :tx;
+  return route.fulfill({json:{...common,items:[item],total:1,limit:50,offset:Number(query.get('offset')||0)}});
+ });
+ await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();
+ await page.locator('.money-sankey-group [data-group-select]').first().click();
+ await page.getByRole('button',{name:'Inspect Payroll gross stream'}).click();
+ await page.getByText('Payroll gross inline row',{exact:true}).waitFor();
+ await page.getByText('Zero-cash source evidence',{exact:true}).waitFor();
+ assert.equal(await page.locator('.flow-inspector .transaction-row').count(),2);
+ await page.getByRole('button',{name:'Close inspector'}).click();
+ await page.locator('.money-sankey-group [data-group-select]').first().click();
+ await page.getByRole('button',{name:'Inspect Food purchase'}).click();
+ await page.getByText('No matching records',{exact:true}).waitFor();
+ assert.equal(await page.getByText(tx.description,{exact:true}).count(),0,'bridge-assigned transaction must not be counted a second time');
+});
+
+test('account and net-spending explorer choices select projected movements',{timeout:25000},async t=>{
+ const {page,url}=await fixture(t);await page.goto(url);
+ await page.locator('#content .money-sankey .sankey-link').first().waitFor();
+ await page.getByText('Explore accounts, spending and categories',{exact:true}).click();
+ await page.getByRole('tab',{name:'Accounts'}).click();
+ await page.getByRole('button',{name:'Inspect account Synthetic cash'}).click();
+ await page.locator('.flow-inspector').waitFor();
+ await page.getByRole('button',{name:'Close inspector'}).click();
+ await page.getByRole('tab',{name:'Spending'}).click();
+ await page.getByRole('button',{name:/Inspect net spending Synthetic food/}).click();
+ await page.locator('.flow-inspector').waitFor();
+ assert.ok(await page.locator('.flow-inspector .stream-member').count()>0);
+});
+
+test('category expansion uses final geometry width and folding reclaims it',{timeout:30000},async t=>{
+ const {page,url}=await fixture(t);
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json();
+  data.nodes.push({id:'deep-food',label:'Restaurant',kind:'expense'});
+  data.edges.push({id:'deep-food-edge',source:'cash',target:'deep-food',kind:'expense',label:'Restaurant purchase',amount_minor:5000,count:1,currency:data.currency,selector:{endpoint:'transactions',filters:{account:'Fixture cash',category:'expense.food.dining.restaurant',category_mode:'exact',flow:'expense'}}});
+  return route.fulfill({response,json:data});
+ });
+ await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();
+ await page.getByText('Explore accounts, spending and categories',{exact:true}).click();
+ await page.getByRole('tab',{name:'All categories'}).click();
+ const chart=page.locator('.money-sankey-chart'),band=page.locator('.money-sankey-band').first();
+ await page.getByRole('button',{name:'Fit map to view'}).click();
+ await page.waitForFunction(()=>{const chart=document.querySelector('.money-sankey-chart'),stage=chart?.closest('.money-sankey');return chart?._fullLayout?.width===stage?.clientWidth;});
+ const initial=await chart.evaluate(node=>node._fullLayout.width),anchor=await band.evaluate(node=>node.getBoundingClientRect().top-node.closest('.money-sankey-layer').getBoundingClientRect().top);
+ await page.locator('.money-sankey-explore-row').filter({hasText:'Synthetic food'}).getByRole('button',{name:'Expand'}).click();
+ await page.locator('.money-sankey-explore-row').filter({hasText:'Dining'}).getByRole('button',{name:'Expand'}).click();
+ await page.getByText('Restaurant · expense',{exact:false}).waitFor();
+ await page.waitForFunction(width=>document.querySelector('.money-sankey-chart')?._fullLayout?.width>width+200,initial);
+ assert.equal(await band.evaluate(node=>node.getBoundingClientRect().top-node.closest('.money-sankey-layer').getBoundingClientRect().top),anchor,'account group heading remains anchored');
+ const expanded=await chart.evaluate(node=>node._fullLayout.width);
+ await page.locator('.money-sankey-explore-row').filter({hasText:'Synthetic food'}).getByRole('button',{name:'Fold'}).click();
+ await page.waitForFunction(width=>document.querySelector('.money-sankey-chart')?._fullLayout?.width===width,initial);
+ assert.ok(expanded>initial);
+});
+
+test('unconverted USD activity has selectable native evidence with no dated FX',{timeout:25000},async t=>{
+ const {page,url}=await fixture(t);let inspectorCurrency='';
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json(),query=new URL(route.request().url()).searchParams;
+  if(query.get('currency')==='USD')data.edges=[{id:'usd-native-edge',source:'salary',target:'cash',kind:'income',label:'Original USD deposit',amount_minor:12345,count:1,currency:'USD',selector:{endpoint:'transactions',filters:{account:'Fixture cash',category:'income.salary',category_mode:'exact',flow:'income',direction:'incoming'}}}];
+  return route.fulfill({response,json:data});
+ });
+ await page.route('**/finance/transactions?**',route=>{inspectorCurrency=new URL(route.request().url()).searchParams.get('currency');return route.fulfill({json:{...common,items:[{...tx,entry_id:'usd-native',record_id:'usd-native-record',currency:'USD',amount_minor:12345,description:'Original USD evidence'}],total:1,limit:50,offset:0}});});
+ await page.goto(url);await page.locator('.money-map').getByText('USD activity is shown separately because a dated conversion rate is unavailable.',{exact:false}).waitFor();
+ await page.getByText('Inspect original USD movements',{exact:true}).click();
+ await page.getByRole('button',{name:/Inspect original USD movement/}).click();
+ await page.getByText('Original USD evidence',{exact:true}).waitFor();
+ assert.equal(inspectorCurrency,'USD');
+});
+
+test('Back and refresh rebuild inspector selection from current stream identities',{timeout:30000},async t=>{
+ const {page,url}=await fixture(t);await page.goto(url);
+ await page.locator('#content .money-sankey .sankey-link').first().waitFor();
+ await page.locator('.money-sankey-group [data-group-select]').first().click();
+ await page.getByRole('button',{name:'Inspect Salary deposit'}).waitFor();
+ await page.getByRole('tab',{name:'Cash flow',exact:true}).click();
+ await page.getByRole('button',{name:'Back'}).click();
+ await page.locator('.money-sankey').waitFor();
+ await page.locator('.flow-inspector').waitFor();
+ await page.getByRole('button',{name:'Inspect Salary deposit'}).waitFor();
+ await page.getByRole('button',{name:'Refresh data'}).click();
+ await page.locator('.flow-inspector').waitFor();
+ await page.getByRole('button',{name:'Inspect Salary deposit'}).waitFor();
+});
