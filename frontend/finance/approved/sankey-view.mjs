@@ -144,16 +144,25 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;return;}
   const projected={...p,nodes},width=Math.max(720,stage.clientWidth||900);
   geometry=groupedLayout(projected,{width,anchors});
-  const height=geometry.height,index=new Map(nodes.map((node,i)=>[node.id,i]));
-  layoutStyle(canvas,{width:`${geometry.width*zoom}px`,height:`${height*zoom}px`});
-  layoutStyle(layer,{width:`${geometry.width}px`,height:`${height}px`,transform:`scale(${zoom})`});
-  layoutStyle(chart,{width:`${geometry.width}px`,height:`${height}px`});
+  const flowHeight=Math.max(200,...[...new Set(geometry.x)].map(x=>geometry.x.filter(value=>value===x).length*4+160));
+  let height=geometry.height;
+  const index=new Map(nodes.map((node,i)=>[node.id,i]));
+  const applyLayout=()=>{layoutStyle(canvas,{width:`${geometry.width*zoom}px`,height:`${height*zoom}px`});layoutStyle(layer,{width:`${geometry.width}px`,height:`${height}px`,transform:`scale(${zoom})`});layoutStyle(chart,{width:`${geometry.width}px`,height:`${height}px`});};
+  applyLayout();
   renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;
   const labels=nodes.map(node=>`${html(node.label)}<br>${account(node)?'Account':html(node.kind.replaceAll('-',' '))}<br>${html(new Intl.NumberFormat('en-CA',{style:'currency',currency:raw.currency}).format((node.value??Math.max(node.incoming,node.outgoing))/100))}`);
-  const trace={type:'sankey',arrangement:'fixed',orientation:'h',valueformat:'.2f',valueprefix:raw.currency+' ',textfont:{family:'system-ui, sans-serif',size:12,color:'#22332f'},node:{x:nodes.map(node=>geometry.slots[node.id].x),y:nodes.map(node=>(geometry.slots[node.id].top+geometry.slots[node.id].bottom)/(2*height)),align:'left',pad:4,thickness:16,line:{width:0},label:labels,color:nodes.map(node=>color[node.displayKind||node.kind]||color.unresolved),customdata:nodes.map(node=>[node.id,html(node.label)]),hovertemplate:'%{customdata[1]}<extra></extra>'},link:{source:p.edges.map(edge=>index.get(edge.source)),target:p.edges.map(edge=>index.get(edge.target)),value:p.edges.map(edge=>edge.amount/100),color:p.edges.map(edge=>`${color[edge.displayKind||edge.type]||color.unresolved}55`),customdata:p.edges.map(edge=>[edge.id,html((nodes[index.get(edge.source)]?.label||'')+' → '+(nodes[index.get(edge.target)]?.label||''))]),hovertemplate:'%{customdata[1]}<extra></extra>'}};
-  const layout={width:geometry.width,height,margin:{l:12,r:12,t:12,b:12},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'system-ui, sans-serif',color:'#202b2b'}};
+  const trace={type:'sankey',domain:{y:[1-flowHeight/height,1]},arrangement:'fixed',orientation:'h',valueformat:'.2f',valueprefix:raw.currency+' ',textfont:{family:'system-ui, sans-serif',size:12,color:'#22332f'},node:{x:nodes.map(node=>geometry.slots[node.id].x),y:nodes.map(node=>(geometry.slots[node.id].top+geometry.slots[node.id].bottom)/(2*flowHeight)),align:'left',pad:4,thickness:16,line:{width:0},label:labels,color:nodes.map(node=>color[node.displayKind||node.kind]||color.unresolved),customdata:nodes.map(node=>[node.id,html(node.label)]),hovertemplate:'%{customdata[1]}<extra></extra>'},link:{source:p.edges.map(edge=>index.get(edge.source)),target:p.edges.map(edge=>index.get(edge.target)),value:p.edges.map(edge=>edge.amount/100),color:p.edges.map(edge=>`${color[edge.displayKind||edge.type]||color.unresolved}55`),customdata:p.edges.map(edge=>[edge.id,html((nodes[index.get(edge.source)]?.label||'')+' → '+(nodes[index.get(edge.target)]?.label||''))]),hovertemplate:'%{customdata[1]}<extra></extra>'}};
+  const layout={width:geometry.width,height,margin:{l:12,r:12,t:0,b:0},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'system-ui, sans-serif',color:'#202b2b'}};
   await Plotly.react(chart,[trace],layout,{displayModeBar:false,responsive:false});
   if(disposed)return;
+  const heights={};
+  chart.querySelectorAll('.sankey-node').forEach((node,index)=>{const id=node.__data__?.node?.customdata?.[0]||node.dataset.node||nodes[index]?.id,rect=node.querySelector('.node-rect');if(id&&rect)heights[id]=rect.getBoundingClientRect().height/zoom;});
+  if(Object.keys(heights).length){
+   geometry=groupedLayout(projected,{heights,width,anchors});height=geometry.height;
+   trace.domain.y=[1-flowHeight/height,1];trace.node.x=nodes.map(node=>geometry.slots[node.id].x);trace.node.y=nodes.map(node=>(geometry.slots[node.id].top+geometry.slots[node.id].bottom)/(2*flowHeight));layout.width=geometry.width;layout.height=height;
+   applyLayout();renderBands();await Plotly.react(chart,[trace],layout,{displayModeBar:false,responsive:false});
+   if(disposed)return;
+  }
   chart.removeAllListeners?.('plotly_click');
   let lastNodeTap=null;
   chart.on('plotly_click',event=>{
