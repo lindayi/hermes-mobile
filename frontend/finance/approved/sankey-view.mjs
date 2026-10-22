@@ -1,4 +1,4 @@
-import {createModel,selectionMembers} from './live-model.mjs';
+import {createModel,groupSelection,selectionMembers} from './live-model.mjs';
 import {groupedLayout} from './layout.mjs';
 import {ranked} from './live-model.mjs';
 
@@ -53,6 +53,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
    const wanted=new Set(selection.memberIds),found=new Map();
    const visit=member=>{if(!member||found.has(member.id))return;if(wanted.has(member.id))found.set(member.id,member);for(const nested of member.members||[])visit(nested);};
    for(const edge of [...p.edges,...p.internalEdges])for(const member of edge.members||[])visit(member);
+    for(const member of groupSelection(p,selection.group)?.evidenceMembers||[])visit(member);
    return [...found.values()];
   }
   return selectionMembers(selection.view||p,selection);
@@ -83,7 +84,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   }
   exploreList.replaceChildren(...list);
  };
- const chooseGroup=(id,label)=>{const selectedGroup={group:id,label};select(selectedGroup);open(membersFor(selectedGroup));};
+ const chooseGroup=(id,label)=>{const selectedGroup={group:id,label};select(selectedGroup);open(membersFor(selectedGroup),id);};
  const select=next=>{
   selected=next?{...next,memberIds:membersFor(next).map(member=>member.id)}:null;
   status.textContent=next?.label||'';
@@ -92,17 +93,18 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   chart.querySelectorAll('.sankey-node').forEach(node=>node.classList.toggle('is-dim',!!next&&!nodeIds.has(node.dataset.node)));
   chart.querySelectorAll('.sankey-link').forEach(link=>link.classList.toggle('is-selected',!!selected&&edgeIds.has(link.dataset.edge)));
  };
- const open=edges=>{
+ const open=(edges,group='')=>{
   const streams=edges.flatMap(edge=>Number.isSafeInteger(edge.amount)&&Array.isArray(edge.members)?edge.members:[edge]);
   const members=[...new Map(streams.map(edge=>[edge.id,edge])).values()];
   if(!members.length)return;
   const projectionIds=[...new Set(edges.filter(edge=>Number.isSafeInteger(edge.amount)&&Array.isArray(edge.members)).map(edge=>edge.id))];
-  const edge={id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,projectionIds,label:members.length===1?members[0].label:`${members.length} exact streams`,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency,members};
+  const edge={id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,projectionIds,group,label:members.length===1?members[0].label:`${members.length} exact streams`,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency,members};
   inspect(edge);
  };
  const rebind=edge=>{
   const ids=new Set(edge?.projectionIds||[]);if(!ids.size)return null;
-  const members=[...new Map([...p.edges,...p.internalEdges].filter(item=>ids.has(item.id)).flatMap(item=>item.members||[]).map(member=>[member.id,member])).values()];
+  const current=[...p.edges,...p.internalEdges].filter(item=>ids.has(item.id)).flatMap(item=>item.members||[]),groupMembers=groupSelection(p,edge.group)?.evidenceMembers||[];
+  const members=[...new Map([...current,...groupMembers].map(member=>[member.id,member])).values()];
   if(!members.length)return null;
   return {...edge,id:'sankey-selection:'+members.map(member=>member.id).join('|'),label:members.length===1?members[0].label:`${members.length} exact streams`,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||edge.currency};
  };

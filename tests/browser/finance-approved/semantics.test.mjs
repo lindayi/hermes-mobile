@@ -34,6 +34,16 @@ test('loader reads actual supplements and exact linked records; denial is never 
  assert.equal(typeof S.loadQuarter,'function');const out=await S.loadQuarter(api,{...r.range,currency:'CAD',scope:'personal'});assert.equal(out.payrollCoverage.linked,1);assert.equal(calls.filter(c=>c[0]==='transactions').length,3);assert.ok(calls.filter(c=>c[0]==='transactions').every(c=>c[1].record_id&&c[1].account));
  const denied=async(endpoint,q)=>{if(endpoint==='investments')throw Object.assign(Error('Denied'),{status:403});return api(endpoint,q);};await assert.rejects(S.loadQuarter(denied,{...r.range,currency:'CAD',scope:'personal'}),e=>e.status===403);
 });
+test('loader accepts server-resolved dates only for omitted filter boundaries',async()=>{
+ const r=raw(),api=async(endpoint)=>endpoint==='flow'?r:endpoint==='investments'?{}:{};
+ for(const query of [
+  {start:'',end:'',currency:'CAD',scope:'personal'},
+  {start:'',end:r.range.end,currency:'CAD',scope:'personal'},
+  {start:r.range.start,end:'',currency:'CAD',scope:'personal'}
+ ])assert.equal((await S.loadQuarter(api,query)).currency,'CAD');
+ await assert.rejects(S.loadQuarter(api,{start:'2026-08-01',end:r.range.end,currency:'CAD',scope:'personal'}),/Unexpected finance period/);
+ await assert.rejects(S.loadQuarter(api,{start:r.range.start,end:'2026-08-31',currency:'CAD',scope:'personal'}),/Unexpected finance period/);
+});
 test('refund labels name the receiving account and never call a distribution a refund',()=>{
  const r=raw();r.nodes.push(node('fee','expense','Bank fees'));r.edges.push(edge('fee','fee','cash','expense',100,'expense.financial.bank_fees'));
  const o=S.enrichFinance(r);assert.match(o.edges.find(e=>e.id==='fee').displayLabel,/Fee refunds.*Chequing/);assert.equal(o.edges.find(e=>e.id==='d').displayLabel,'Dividends & distributions');

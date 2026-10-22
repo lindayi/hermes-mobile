@@ -55,17 +55,15 @@ export function groupSelection(p, groupId) {
 
 // Union node/group incidents and explicit projected edge IDs, deduplicated by API ID.
 export function selectionMembers(p, { node = '', group = '', edges = [] } = {}) {
-  const ids = new Set([...edges, ...(groupSelection(p, group)?.edges ?? []).map(e => e.id)]), members = new Map();
+  const selectedGroup=groupSelection(p,group),ids = new Set([...edges, ...(selectedGroup?.edges ?? []).map(e => e.id)]), members = new Map();
+  const retain=member=>{if(members.has(member.id))return;members.set(member.id,member);for(const original of member.members??[])retain(original);};
   for (const edge of [...p.edges, ...(p.internalEdges ?? [])]) {
     if (ids.has(edge.id) || (node && (edge.source === node || edge.target === node))) {
-      const retain = member => {
-        if (members.has(member.id)) return;
-        members.set(member.id, member);
-        for (const original of member.members ?? []) retain(original);
-      };
       for (const member of edge.members) retain(member);
     }
   }
+  for(const member of selectedGroup?.evidenceMembers??[])retain(member);
+  for(const member of p.nodes.find(item=>item.id===node)?.evidenceMembers??[])retain(member);
   return [...members.values()];
 }
 
@@ -83,8 +81,9 @@ export function createModel(raw) {
   const accountGroups = roles.map((role, i) => {
     const members = accounts.filter(n => n.accountGroup === role);
     const nodeIds = members.map(n => n.id);
+    const evidenceMembers = raw.nodes.filter(n => n.kind === 'product-group' && nodeIds.includes(n.ownerAccountId)).flatMap(n => n.evidenceMembers ?? []);
     return { id: key('account-group', role), label: groupLabels[i], role, accounts: members.map(n => n.account ?? n.label), nodeIds,
-      allOwnedNodeIds: [...nodeIds, ...raw.nodes.filter(n => ['product', 'product-group'].includes(n.kind) && nodeIds.includes(n.ownerAccountId)).map(n => n.id)],
+      allOwnedNodeIds: [...nodeIds, ...raw.nodes.filter(n => ['product', 'product-group'].includes(n.kind) && nodeIds.includes(n.ownerAccountId)).map(n => n.id)], evidenceMembers,
       count: members.length, collapsed: false };
   }).filter(g => g.count);
   const groupLookup = new Map(accountGroups.map(g => [g.id, g]));

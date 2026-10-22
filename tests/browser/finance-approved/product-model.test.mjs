@@ -42,6 +42,19 @@ test('exact complete trade evidence becomes owned products without mutating the 
   }
 });
 
+test('zero-cash-only security stays selectable from its investment group without a ribbon',()=>{
+  const x=fixture();
+  x.investments.cashflows.push({event_id:'event-zero-only',account:'broker',security_key:'ZERO',date:'2026-09-05',currency:'CAD',cash_amount_minor:0,classification:'buy'});
+  const p=enrich(x.raw,{investments:x.investments});
+  const zero=p.nodes.find(n=>n.kind==='product'&&n.security_key==='ZERO');
+  assert.ok(zero,'Zero-only security remains represented');
+  assert.equal(p.edges.reduce((sum,edge)=>sum+edge.amount_minor,0),300,'Zero evidence adds no ribbon width');
+  const graph=model.createModel(p),group=JSON.stringify(['account-group','investments']);
+  const members=model.selectionMembers(graph.project(),{group});
+  assert.ok(members.some(member=>member.id.includes('event-zero-only')&&member.amount_minor===0),'Investment group exposes exact zero-cash evidence');
+  assert.equal(members.filter(member=>member.id.includes('event-zero-only')).length,1);
+});
+
 
 test('unverifiable trade breakdown retains the whole original selector and amount inside its owner', () => {
   const cases = [

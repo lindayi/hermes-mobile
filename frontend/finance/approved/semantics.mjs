@@ -4,7 +4,7 @@ export async function loadQuarter(api,query,signal){
  const unavailable=[];
  async function supplement(endpoint){try{return await api(endpoint,query,signal);}catch(e){if([401,403].includes(e.status)||e.name==='AbortError')throw e;unavailable.push(endpoint+' detail unavailable');return {};}}
  const [raw,investments,compensation]=await Promise.all([api('flow',query,signal),supplement('investments'),supplement('compensation')]);signal?.throwIfAborted();
- if(!Array.isArray(raw.nodes)||!Array.isArray(raw.edges)||raw.currency!==query.currency||raw.range?.start!==query.start||raw.range?.end!==query.end)throw Error('Unexpected finance period');
+ if(!Array.isArray(raw.nodes)||!Array.isArray(raw.edges)||raw.currency!==query.currency||(query.start&&raw.range?.start!==query.start)||(query.end&&raw.range?.end!==query.end))throw Error('Unexpected finance period');
  const pays=(compensation.payroll||[]).filter(p=>p.currency===raw.currency&&inRange(p.pay_date,raw.range));
  const payrollDetails=await boundedMap(pays,async p=>{
   if(p.payroll_id===compensation.coverage?.selected_payroll_id)return compensation;

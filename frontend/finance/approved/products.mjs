@@ -43,9 +43,12 @@ export function enrichProducts(input, { investments = {} } = {}) {
       raw.notes = [...(raw.notes ?? []), 'Product breakdown unavailable; original trade amount and evidence retained.'];
       continue;
     }
-    for (const row of events.filter(row => row.cash_amount_minor !== 0)) {
+    for (const row of events) {
       const productId = id('security', account.id, row.currency, row.security_key);
       if (!raw.nodes.some(n => n.id === productId)) raw.nodes.push({ id: productId, label: row.security_key, security_key: row.security_key, kind: 'product', semantic: true, parentId: rootId, ownerAccountId: account.id, groupId });
+    }
+    for (const row of events.filter(row => row.cash_amount_minor !== 0)) {
+      const productId = id('security', account.id, row.currency, row.security_key);
       const recordId = 'investment:' + row.event_id;
       // A narrowed selector must not be bypassed by a wider preloaded page or lineage.
       const { inlineRows, members, ...base } = edge;
@@ -56,12 +59,13 @@ export function enrichProducts(input, { investments = {} } = {}) {
     }
     // Zero-cash rows are source evidence, never invented ribbon widths or values.
     for (const row of events.filter(row => row.cash_amount_minor === 0)) {
-      const productId = id('security', account.id, row.currency, row.security_key);
-      const owner = result.find(e => e.originalId === (edge.originalId ?? edge.id) && (e.source === productId || e.target === productId));
-      if (!owner) continue;
       const filters = {...edge.selector.filters,dataset:'investment',record_id:'investment:'+row.event_id};
       delete filters.direction;
-      (owner.members ??= []).push({id:id('zero-evidence',edge.id,row.event_id),kind:'investment',currency:row.currency,amount_minor:0,evidenceNote:'Zero-cash source entry; no flow or holding value inferred.',selector:{...edge.selector,filters}});
+      const owner=raw.nodes.find(n=>n.id===rootId);
+      const evidenceMember={id:id('zero-evidence',edge.id,row.event_id),kind:'investment',label:'Zero-cash '+row.classification+' · '+row.security_key,currency:row.currency,amount_minor:0,evidenceNote:'Zero-cash source entry; no flow or holding value inferred.',selector:{...edge.selector,filters}};
+      (owner.evidenceMembers??=[]).push(evidenceMember);
+      const product=raw.nodes.find(n=>n.id===id('security',account.id,row.currency,row.security_key));
+      (product.evidenceMembers??=[]).push(evidenceMember);
     }
   }
   raw.edges = result;

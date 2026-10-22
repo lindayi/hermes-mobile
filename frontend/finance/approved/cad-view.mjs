@@ -1,6 +1,17 @@
 // Presentation only: original ledger rows, selectors and source evidence stay USD.
 import {loadQuarter,enrichFinance} from './semantics.mjs';
 
+function mergeCoverage(cad,usd){
+ const cadCoverage=structuredClone(cad.coverage??{}),usdCoverage=structuredClone(usd.coverage??{});
+ const complete=cadCoverage.complete===false||usdCoverage.complete===false?false:
+  cadCoverage.complete===true&&usdCoverage.complete===true?true:undefined;
+ return {...cadCoverage,...(complete===undefined?{}:{complete}),currencies:{CAD:cadCoverage,USD:usdCoverage}};
+}
+function qualifiedWarnings(cad,usd){
+ return [...new Set([['CAD',cad],['USD',usd]].flatMap(([currency,data])=>
+  [...(data.warnings??[]),...(data.meta?.warnings??[])].filter(warning=>typeof warning==='string').map(warning=>`${currency}: ${warning}`)))];
+}
+
 // Accept flat API filters or {start,end,scope,filters}. Explicit top-level values
 // win; only currency is forced per read. Selectors stay exactly as API returned:
 // feed these members to createPager, never CAD display amounts or rewritten filters.
@@ -11,11 +22,12 @@ export async function loadCADQuarter(api,query,signal){
  const read=async(endpoint,filters,readSignal)=>{const data=await api(endpoint,filters,readSignal);if(endpoint==='flow'&&filters.currency==='USD')usdSource=structuredClone(data);return data;};
  const [cad,usd]=await Promise.all(['CAD','USD'].map(currency=>loadQuarter(read,{...query,currency},signal)));
  const usdNotes=usd.notes.filter(note=>note!=='No payslip breakdown recorded for this period.'||usd.summary.netPay>0||usd.summary.employeeRRSP>0||usd.summary.employerMatch>0);
+ const coverage=mergeCoverage(cad,usd),warnings=qualifiedWarnings(cad,usd),meta={...cad.meta,warnings};
  let fx;
  try{fx=(await api('quotes',{},signal))?.fx;}
  catch(error){if([401,403].includes(error.status)||error.name==='AbortError')throw error;}
  signal?.throwIfAborted();
- if(!usableFX(fx))return {...cad,originalUSD:usd,foreignUnconverted:usd,fx:{pair:'USDCAD',status:'unavailable',rate:null,as_of:null,source:null,approximate:false,label:'USD not converted — exchange rate unavailable'},notes:[...cad.notes,...usdNotes.map(note=>'USD: '+note),'USD not converted: exchange rate unavailable. Original USD flows remain available for inspection and are excluded from CAD totals.']};
+ if(!usableFX(fx))return {...cad,meta,coverage,warnings,originalUSD:usd,foreignUnconverted:usd,fx:{pair:'USDCAD',status:'unavailable',rate:null,as_of:null,source:null,approximate:false,label:'USD not converted — exchange rate unavailable'},notes:[...cad.notes,...usdNotes.map(note=>'USD: '+note),'USD not converted: exchange rate unavailable. Original USD flows remain available for inspection and are excluded from CAD totals.']};
  const foreign=structuredClone(usd);
  const namespace=(kind,value)=>JSON.stringify(['presentation','USD',kind,value]);
  for(const n of foreign.nodes){n.originalSourceId=n.id;n.originalCurrency='USD';n.currency='CAD';n.approximate=true;n.id=namespace('node',n.id);if(n.ownerAccountId)n.ownerAccountId=namespace('node',n.ownerAccountId);if(n.parentId)n.parentId=namespace('node',n.parentId);n.label=String(n.label||n.account||'')+' (USD)';}
@@ -35,7 +47,7 @@ export async function loadCADQuarter(api,query,signal){
  const summary={...cad.summary};
  for(const key of Object.keys(summary))summary[key]+=convertedSummary[key];
  summary.net=summary.income-summary.spending;
- return {...cad,nodes:[...cad.nodes,...foreign.nodes],edges:[...cad.edges,...foreign.edges],summary,originalUSD:usd,foreignUnconverted:null,fx:{...fx,approximate:true,label:equivalentLabel(fx)},notes:[...cad.notes,...usdNotes.map(note=>'USD: '+note),'USD: '+equivalentLabel(fx)+'. Original USD evidence is unchanged.']};
+ return {...cad,meta,coverage,warnings,nodes:[...cad.nodes,...foreign.nodes],edges:[...cad.edges,...foreign.edges],summary,originalUSD:usd,foreignUnconverted:null,fx:{...fx,approximate:true,label:equivalentLabel(fx)},notes:[...cad.notes,...usdNotes.map(note=>'USD: '+note),'USD: '+equivalentLabel(fx)+'. Original USD evidence is unchanged.']};
 }
 function equivalentLabel(fx){return 'Approximate CAD equivalent at rate date '+fx.as_of+(fx.status==='stale'?' (stale rate)':'');}
 function usableFX(fx){

@@ -4,8 +4,8 @@
 .money-sankey .sankey-link.is-selected{fill-opacity:.78!important;stroke-opacity:.78!important}
 .money-sankey-bands{position:absolute;inset:0;pointer-events:none;z-index:2}
 .money-sankey-chart{position:relative}
-.money-sankey-band{position:absolute;display:flex;align-items:flex-start;justify-content:space-between;gap:4px;pointer-events:auto;z-index:2}
-.money-sankey-band button{min-height:44px;background:var(--panel);font-size:11px}
+.money-sankey-band{position:absolute;display:flex;align-items:flex-start;justify-content:space-between;gap:4px;pointer-events:none;z-index:2}
+.money-sankey-band button{min-height:44px;background:var(--panel);font-size:11px;pointer-events:auto}
 .money-sankey-band button:first-child{max-width:calc(100% - 48px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .money-sankey-enclosure{position:absolute;border:1px solid var(--border);border-radius:9px;background:color-mix(in srgb,var(--tint) 24%,transparent);pointer-events:none}
 .money-sankey-group{display:flex;gap:5px;margin:0 0 6px}

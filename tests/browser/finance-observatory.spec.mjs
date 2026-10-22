@@ -46,6 +46,55 @@ async function openAnalysis(page){await page.waitForFunction(()=>document.queryS
 test('Finance Overview mounts the approved amount-first Sankey inside the real filtered route',{timeout:30000},async t=>{const {page,url,calls}=await fixture(t);await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');await page.locator('#content .money-sankey .sankey-link').first().waitFor();assert.ok(calls.some(c=>c.name==='flow'&&c.query.currency==='CAD'&&c.query.scope==='personal'&&c.query.dataset==='all'));await page.getByLabel('From').fill('2026-08-01');await page.getByLabel('Currency').selectOption('USD');await page.getByRole('button',{name:'Apply filters'}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');assert.ok(calls.some(c=>c.name==='flow'&&c.query.currency==='USD'&&c.query.start==='2026-08-01'&&c.query.scope==='personal'&&c.query.dataset==='all'));});
 test('visibility hides but retains the Finance chart and selection until bounded owner revalidation',{timeout:30000},async t=>{const {page,url,calls}=await fixture(t);await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();const group=page.locator('.money-sankey-group button:first-child').first();await group.click();const selected=await group.getAttribute('aria-pressed'),flowCalls=()=>calls.filter(c=>c.name==='flow').length,before=flowCalls();await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));});assert.equal(await page.locator('#content .money-sankey').count(),1);await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));});await page.waitForFunction(()=>!document.body.classList.contains('private-paused'));assert.equal(await group.getAttribute('aria-pressed'),selected);assert.equal(flowCalls(),before);});
 test('owner denial while the retained view is hidden clears the chart on resume',{timeout:25000},async t=>{const {page,url,deny}=await fixture(t);await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));});deny(403);await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));});await page.getByRole('heading',{name:'Finance is locked'}).waitFor();assert.equal(await page.locator('#content .money-sankey').count(),0);});
+test('hard reset drops parked Sankey and payslip identity before another owner returns',{timeout:45000},async t=>{
+ const {page,url,deny,setOwner}=await fixture(t);await page.goto(url);
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Food purchase');
+ await finder.getByRole('button',{name:/Inspect Food purchase/}).click();
+ await page.getByRole('tab',{name:'Compensation',exact:true}).click();
+ const payslip=page.getByLabel('Select payslip');await payslip.selectOption('fixture-pay-old');
+ await page.getByRole('tab',{name:'Overview',exact:true}).click();
+ deny(403);await page.getByRole('button',{name:'Refresh data'}).click();await page.getByRole('heading',{name:'Finance is locked'}).waitFor();
+ setOwner('replacement-owner');deny(0);await page.getByRole('button',{name:'Retry after sign-in'}).click();
+ await page.locator('.money-sankey-stream-finder').waitFor();await page.getByRole('tab',{name:'Compensation',exact:true}).click();
+ assert.equal(await page.getByLabel('Select payslip').inputValue(),'fixture-pay','A prior owner’s selected payslip is not restored');
+ await page.getByRole('tab',{name:'Overview',exact:true}).click();
+ const restoredFinder=page.locator('.money-sankey-stream-finder');await restoredFinder.waitFor();
+ assert.equal(await restoredFinder.getByLabel('Search exact movements').inputValue(),'','A denied refresh cannot restore a parked finder query');
+ await restoredFinder.locator('summary').click();await restoredFinder.getByLabel('Search exact movements').fill('Food purchase');
+ await restoredFinder.getByRole('button',{name:/Inspect Food purchase/}).click();
+ await page.getByRole('tab',{name:'Compensation',exact:true}).click();await page.getByLabel('Select payslip').selectOption('fixture-pay-old');
+ await page.getByRole('tab',{name:'Overview',exact:true}).click();
+ await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true})));
+ await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})));
+ await page.locator('.money-sankey-stream-finder').waitFor();
+ assert.equal(await page.locator('.money-sankey-stream-finder input').inputValue(),'','Pagehide clears the retained finder snapshot');
+ await page.getByRole('tab',{name:'Compensation',exact:true}).click();
+ assert.equal(await page.getByLabel('Select payslip').inputValue(),'fixture-pay','Pagehide clears the selected payslip identity');
+});
+test('converted CAD movement keeps its original USD selector and signed evidence',{timeout:30000},async t=>{
+ const {page,url}=await fixture(t);
+ await page.route('**/finance/flow?**',route=>{
+  const q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+  const edge=currency==='USD'?[{id:'usd-food',source:'cash',target:'food',kind:'expense',label:'Original USD purchase',amount_minor:12345,count:1,currency:'USD',selector:{endpoint:'transactions',filters:{currency:'USD',account:'Fixture cash',category:'expense.food',category_mode:'exact',flow:'expense',direction:'outgoing'}}}]:[];
+  return route.fulfill({json:{...common,currency,range:{start:q.get('start'),end:q.get('end')},nodes:flowNodes,edges:edge,coverage:{complete:true}}});
+ });
+ await page.route('**/finance/quotes**',route=>route.fulfill({json:{...common,fx:{pair:'USDCAD',rate:1.25,as_of:'2026-10-01',source:'Synthetic Bank of Canada fixture',status:'ok'}}}));
+ let evidenceQuery;
+ await page.route('**/finance/transactions?**',route=>{
+  evidenceQuery=new URL(route.request().url()).searchParams;
+  return route.fulfill({json:{...common,items:[{record_id:'usd-original-record',date:'2026-08-02',account:'Fixture cash',description:'Original signed USD posting',amount_minor:-12345,currency:'USD',source_id:'usd-source'}],total:1,limit:50,offset:0}});
+ });
+ await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ assert.ok(await page.locator('.money-sankey .sankey-link').count());
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();
+ await finder.getByLabel('Search exact movements').fill('cash');
+ await finder.getByRole('button',{name:/Inspect/}).first().click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByRole('button',{name:/Inspect/}).first().click();
+ await inspector.getByText('Original signed USD posting',{exact:true}).waitFor();
+ assert.equal(evidenceQuery.get('currency'),'USD');
+ assert.equal((await inspector.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'-USD 123.45');
+});
 test('approved map exposes explorer lists and reachable zoom, Fit, pan, and group controls',{timeout:30000},async t=>{const {page,url}=await fixture(t);await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();await page.getByRole('button',{name:'Fit map to view'}).click();await page.getByRole('button',{name:'Zoom in'}).click();await page.getByRole('button',{name:'Pan right'}).click();await page.getByText('Explore accounts, spending and categories',{exact:true}).click();await page.getByRole('tab',{name:'Accounts'}).click();await page.getByRole('button',{name:'Inspect account Synthetic cash'}).waitFor();await page.getByRole('tab',{name:'Spending'}).click();await page.getByRole('button',{name:/Inspect net spending Synthetic food/}).waitFor();await page.getByRole('tab',{name:'All categories'}).click();await page.locator('.money-sankey-explore-list button').filter({hasText:'Synthetic food'}).waitFor();});
 test('empty filtered Sankey renders a bounded empty state without missing geometry',{timeout:25000},async t=>{const {page,url}=await fixture(t);await page.route('**/finance/flow?**',route=>{const q=new URL(route.request().url()).searchParams;return route.fulfill({json:{...common,currency:q.get('currency'),range:{start:q.get('start'),end:q.get('end')},nodes:[],edges:[],coverage:{complete:true}}});});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(url);await page.getByText('No recorded movements match these filters.').waitFor();assert.deepEqual(errors,[]);});
 test('Back restores the expanded account group and exploration mode',{timeout:30000},async t=>{const {page,url}=await fixture(t);await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();await page.getByText('Explore accounts, spending and categories',{exact:true}).click();const categories=page.getByRole('tab',{name:'All categories'});await categories.click();const expand=page.locator('.money-sankey-controls .money-sankey-toggle').first();if(await expand.getAttribute('aria-expanded')==='true'){await expand.click();await page.waitForFunction(()=>document.querySelector('.money-sankey-controls .money-sankey-toggle[aria-expanded="false"]'));}await expand.click();await page.waitForFunction(()=>document.querySelector('.money-sankey-controls .money-sankey-toggle[aria-expanded="true"]'));assert.equal(await categories.getAttribute('aria-selected'),'true');await page.getByRole('tab',{name:'Cash flow',exact:true}).click();await page.getByRole('button',{name:'Back'}).click();await page.locator('#content .money-sankey .sankey-link').first().waitFor();const restoredCategories=page.getByRole('tab',{name:'All categories'});await restoredCategories.waitFor();await page.waitForFunction(()=>document.querySelector('.money-sankey-controls .money-sankey-toggle[aria-expanded="true"]'));assert.equal(await restoredCategories.getAttribute('aria-selected'),'true','Back restores the All categories exploration mode');});
@@ -163,7 +212,7 @@ test('mounted explorer keeps payroll rows, zero-cash evidence, and excludes brid
  const {page,url}=await fixture(t);
  await page.route('**/finance/flow?**',async route=>{
   const response=await route.fetch(),data=await response.json();
-  data.edges.push({id:'payroll-inline',source:'salary',target:'cash',kind:'income',label:'Payroll gross stream',amount_minor:50000,count:1,currency:data.currency,evidenceNote:'Synthetic payslip source',inlineRows:[{entry_id:'payroll-gross',record_id:'payroll-gross',date:'2024-08-01',account:'Fixture cash',description:'Payroll gross inline row',amount_minor:50000,currency:data.currency}],members:[{id:'zero-cash-source',kind:'investment',label:'Zero-cash source',amount_minor:0,currency:data.currency,selector:{endpoint:'transactions',filters:{record_id:'zero-cash-record',currency:data.currency,account:'Fixture cash'}}}]});
+  data.edges.push({id:'payroll-inline',source:'salary',target:'cash',kind:'income',label:'Payroll gross stream',amount_minor:50000,count:1,currency:data.currency,evidenceNote:'Synthetic payslip source',inlineRows:[{entry_id:'payroll-gross',record_id:'payroll-gross',date:'2024-08-01',account:'Fixture cash',description:'Payroll gross inline row',amount_minor:50000,currency:data.currency}],members:[{id:'zero-cash-source',kind:'investment',label:'Zero-cash source',amount_minor:0,currency:data.currency,selector:{endpoint:'transactions',filters:{record_id:'zero-cash-record',currency:data.currency,account:'Fixture cash'}}}]  });
   const food=data.edges.find(edge=>edge.id==='cash-food');food.excludeRecordIds=['synthetic-r'];
   return route.fulfill({response,json:data});
  });
@@ -186,7 +235,35 @@ test('mounted explorer keeps payroll rows, zero-cash evidence, and excludes brid
  await page.getByText('No matching records',{exact:true}).waitFor();
  assert.equal(await page.getByText(tx.description,{exact:true}).count(),0,'bridge-assigned transaction must not be counted a second time');
 });
-
+test('mounted investment group exposes a zero-only distinct security as exact evidence',{timeout:30000},async t=>{
+ const {page,url,calls}=await fixture(t);
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json(),q=new URL(route.request().url()).searchParams;
+  if(q.get('currency')==='CAD'){
+   data.nodes.push({id:'investment-purchases',kind:'investment',label:'Investment purchases'});
+   data.edges.push({id:'synthetic-investment-trades',source:'cash',target:'investment-purchases',kind:'investment',label:'Synthetic investment trades',amount_minor:5000,count:2,currency:'CAD',selector:{endpoint:'transactions',filters:{start:q.get('start'),end:q.get('end'),currency:'CAD',scope:'personal',dataset:'all',account:'Fixture cash',category:'investment.trade.buy',category_mode:'exact',flow:'investment',direction:'outgoing'}}});
+  }
+  return route.fulfill({response,json:data});
+ });
+ await page.route('**/finance/investments?**',route=>{
+  const q=new URL(route.request().url()).searchParams,cashflows=q.get('currency')==='CAD'?[
+   {event_id:'paid-a',account:'Fixture cash',security_key:'PAID',classification:'buy',cash_amount_minor:-5000,currency:'CAD',date:'2026-08-02'},
+   {event_id:'zero-only-b',account:'Fixture cash',security_key:'ZERO',classification:'buy',cash_amount_minor:0,currency:'CAD',date:'2026-08-03'}
+  ]:[];
+  return route.fulfill({json:{...fixtures.investments,cashflows,coverage:{cashflows:{complete:true}}}});
+ });
+ await page.route('**/finance/transactions?**',route=>{
+  const q=new URL(route.request().url()).searchParams;calls.push({name:'transactions',query:Object.fromEntries(q)});
+  return route.fulfill({json:{...common,items:[{record_id:q.get('record_id'),date:'2026-08-03',account:'Fixture cash',description:'Zero-cash distinct security',amount_minor:0,currency:'CAD'}],total:1,limit:50,offset:0}});
+ });
+ await page.goto(url);await page.locator('.money-sankey .sankey-link').first().waitFor();
+ await page.locator('.money-sankey-controls [data-group-select]').filter({hasText:'Investments'}).click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByRole('button',{name:/Inspect Zero-cash buy · ZERO/}).click();
+ await inspector.getByText('Zero-cash distinct security',{exact:true}).waitFor();
+ assert.equal(calls.filter(call=>call.name==='transactions').at(-1).query.record_id,'investment:zero-only-b');
+ assert.equal((await inspector.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'CAD 0.00');
+});
 test('account and net-spending explorer choices select projected movements',{timeout:25000},async t=>{
  const {page,url}=await fixture(t);await page.goto(url);
  await page.locator('#content .money-sankey .sankey-link').first().waitFor();

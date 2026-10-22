@@ -65,6 +65,18 @@ for(const width of [390,1280])for(const method of ['mouse','touch'])test(`mounte
   if(stream!==pairs.at(-1))await activateAccount(page,method);
  }
 });
+test('account-group overlay passes pointer input to a mounted product node',{timeout:30000},async t=>{
+ const {page}=await fixture(t,{width:1280,includeProduct:true});
+ const product=page.locator('.money-sankey .sankey-node[data-node="reserve-product"]');
+ await product.waitFor();
+ const box=await product.boundingBox();assert.ok(box);
+ const hit=await page.evaluate(({x,y})=>{
+  const target=document.elementFromPoint(x,y);
+  return {node:target?.closest('.sankey-node')?.getAttribute('data-node')||'',band:!!target?.closest('.money-sankey-band')};
+ },{x:box.x+box.width/2,y:box.y+box.height/2});
+ assert.equal(hit.node,'reserve-product',JSON.stringify(hit));
+ assert.equal(hit.band,false,JSON.stringify(hit));
+});
 for(const width of [390,1280])test(`mounted Sankey nodes and paths have finite contained geometry at ${width}`,{timeout:20000},async t=>{
  const {page}=await fixture(t,{width,edges:[...flow.edges,{...pair('spare-reserve','own_cash'),source:'spare'}],includeProduct:true});await expandNarrowAccounts(page,width);await page.locator('.money-sankey .sankey-link[data-edge]').first().waitFor();
  const geometry=await page.locator('.money-sankey-chart').evaluate(chart=>{

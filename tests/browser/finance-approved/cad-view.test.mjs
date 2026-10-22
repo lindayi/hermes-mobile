@@ -54,6 +54,23 @@ test('unavailable or invalid FX retains the complete inspectable USD graph outsi
  assert.equal(result.foreignUnconverted.edges.length,1);assert.equal(result.fx.status,'unavailable');
 });
 
+test('combined coverage and warnings retain both currencies and cannot hide partial USD data',async()=>{
+const cad={...sample('CAD',[]),coverage:{complete:true,transactions:{complete:true}},warnings:['CAD coverage recorded'],meta:{warnings:['CAD source warning']}};
+const usd={...sample('USD'),coverage:{complete:false,transactions:{complete:false,omitted:2,unknown_amounts:1}},warnings:['USD rows omitted'],meta:{warnings:['USD source warning']}};
+const converted=await CAD.loadCADQuarter(service(cad,usd).api,query);
+assert.equal(converted.coverage.complete,false);
+assert.deepEqual(converted.coverage.currencies,{CAD:cad.coverage,USD:usd.coverage});
+assert.ok(converted.warnings.includes('CAD: CAD coverage recorded'));
+assert.ok(converted.warnings.includes('USD: USD rows omitted'));
+assert.ok(converted.meta.warnings.includes('USD: USD source warning'));
+assert.ok(converted.originalUSD.coverage.transactions.omitted===2);
+const unavailable=await CAD.loadCADQuarter(service(cad,usd,{fx:null}).api,query);
+assert.equal(unavailable.coverage.complete,false);
+assert.deepEqual(unavailable.coverage.currencies.USD,usd.coverage);
+assert.deepEqual(unavailable.foreignUnconverted.coverage,usd.coverage);
+assert.ok(unavailable.warnings.includes('USD: USD rows omitted'));
+});
+
 test('structured UI filters are flattened identically without overriding period or currency',async()=>{
  const svc=service();const {start,end,scope,...filters}=query;
  await CAD.loadCADQuarter(svc.api,{start,end,scope,filters:{...filters,currency:'EUR',start:'1900-01-01'}},undefined);
