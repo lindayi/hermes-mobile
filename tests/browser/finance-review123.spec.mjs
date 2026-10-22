@@ -134,7 +134,7 @@ test('incomplete selected payroll component coverage hides waterfall without hid
  const bank={...debit,record_id:'bank:synthetic-net',tx_id:'synthetic-net',date:'2024-01-02',flow:'income',category_id:'income.payroll',amount_minor:350000,description:'Synthetic selected payroll net'};
  const pay={payroll_id:'z-newest',pay_date:'2024-01-01',currency:'CAD',gross_minor:500000,net_minor:350000};
  let complete=false;
- const compensation=()=>({payroll:[pay,{...pay,payroll_id:'a-older',pay_date:'2023-12-01',net_minor:100}],components:complete?[{payroll_id:pay.payroll_id,code:'TAX',kind:'deduction',amount_minor:150000,cash_effect_minor:-150000}]:[],links:[{payroll_id:pay.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched',linked_record:{record_id:bank.record_id,date:bank.date,account:bank.account,currency:bank.currency,dataset:bank.dataset}}],awards:[{award_id:'synthetic-grant-reference',employer:'Synthetic employer',grant_currency:'USD',grant_value_minor:100000}],coverage:{selected_payroll_id:pay.payroll_id,components:complete?{total:1,returned:1,omitted:0,complete:true}:{total:1001,returned:0,omitted:1001,complete:false}}});
+ const compensation=()=>({payroll:[pay,{...pay,payroll_id:'a-older',pay_date:'2023-12-01',net_minor:100}],components:complete?[{payroll_id:pay.payroll_id,code:'TAX',kind:'deduction',amount_minor:150000,cash_effect_minor:-150000,ytd_minor:300000}]:[],links:[{payroll_id:pay.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched',linked_record:{record_id:bank.record_id,date:bank.date,account:bank.account,currency:bank.currency,dataset:bank.dataset}}],awards:[{award_id:'synthetic-grant-reference',employer:'Synthetic employer',grant_currency:'USD',grant_value_minor:100000}],coverage:{selected_payroll_id:pay.payroll_id,components:complete?{total:1,returned:1,omitted:0,complete:true}:{total:1001,returned:0,omitted:1001,complete:false}}});
  const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation}});await page.goto(url);await ready(page);
  await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  assert.equal(await page.locator('[data-chart="waterfall"]').count(),0);
@@ -149,7 +149,7 @@ test('incomplete selected payroll component coverage hides waterfall without hid
  complete=true;await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  assert.equal(await page.locator('[data-chart="waterfall"]').count(),1);
  assert.equal(await page.getByText('Payroll breakdown unavailable: component coverage is incomplete. Bank net and recorded evidence remain available.',{exact:true}).count(),0);
- await page.getByRole('table',{name:'Current vs year-to-date components',exact:true}).getByText('TAX',{exact:true}).waitFor();
+ const components=page.getByRole('table',{name:'Selected payslip components',exact:true}),tax=components.locator('tbody tr').filter({hasText:'TAX'});await tax.getByText('TAX',{exact:true}).waitFor();assert.equal((await tax.locator('td').nth(2).textContent()).trim(),'CAD 1,500.00');assert.equal((await tax.locator('td').nth(3).textContent()).trim(),'-CAD 1,500.00');assert.equal((await tax.locator('td').nth(4).textContent()).trim(),'CAD 3,000.00');
 });
 
 test('alluvial keeps skewed category bands, nodes and labels inside its viewBox with a twelve-category bound',{timeout:20000},async t=>{
@@ -190,8 +190,8 @@ test('vesting policy defaults to full horizon and explicitly selects vest dates 
  const awards=[{award_id:'synthetic-old-grant',award_date:'2022-04-01',employer:'Synthetic employer',grant_currency:'USD',grant_value_minor:100000,granted_shares:10,status:'scheduled'}];
  const vesting=['2023-01-01','2024-01-02','2025-01-01'].map(vest_date=>({award_id:awards[0].award_id,vest_date,percent_basis_points:2500,theoretical_shares:2.5,actual_vested_shares:null,status:'scheduled'}));
  const {page,calls,url}=await fixture(t,{responses:{compensation:q=>({awards,vesting:q.vesting_policy==='range'?vesting.filter(v=>(!q.start||v.vest_date>=q.start)&&(!q.end||v.vest_date<=q.end)):vesting})}});
- await page.goto(url);await ready(page);await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
- assert.equal(last(calls,'compensation').vesting_policy,'horizon');assert.equal(await page.getByLabel('Vesting date policy').inputValue(),'horizon');
+ await page.goto(url);await ready(page);await page.getByLabel('From',{exact:true}).fill('2024-01-01');await page.getByLabel('Through',{exact:true}).fill('2024-01-02');await page.getByRole('button',{name:'Apply filters',exact:true}).click();await ready(page);await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
+ assert.equal(last(calls,'compensation').vesting_policy,'horizon');assert.equal(last(calls,'compensation').start,'2024-01-01');assert.equal(last(calls,'compensation').end,'2024-01-02');assert.equal(await page.getByLabel('Vesting date policy').inputValue(),'horizon');
  const openTables=async()=>{await page.getByText('Vesting schedule · table alternative',{exact:true}).click();};
  await openTables();
  const schedule=page.getByRole('table',{name:'Vesting schedule',exact:true});assert.equal(await schedule.locator('tbody tr').count(),vesting.length);await schedule.getByText('2025-01-01',{exact:true}).waitFor();await schedule.getByText('2023-01-01',{exact:true}).waitFor();

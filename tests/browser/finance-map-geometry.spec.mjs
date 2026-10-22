@@ -10,11 +10,11 @@ const root=process.env.HERMES_FRONTEND_DIR||fileURLToPath(new URL('../../fronten
 let plotlyBuilt=false;
 function buildPlotly(){if(plotlyBuilt)return;execFileSync(process.execPath,[fileURLToPath(new URL('../../scripts/build_finance_plotly.mjs',import.meta.url))],{cwd:fileURLToPath(new URL('../..',import.meta.url))});plotlyBuilt=true;}
 const common={meta:{generated_at:'2024-08-15T12:00:00Z',warnings:[]},currency:'CAD',range:{start:'2024-01-01',end:'2024-08-15'}};
-const nodes=[['salary','Salary','income'],['cash','Everyday','account'],['spare','Spare','account'],['reserve','Reserve','account'],['food','Food','expense']].map(([id,label,kind])=>({id,label,kind,...(kind==='account'?{account:label}:{})}));
+const nodes=[['salary','Salary','income'],['cash','Everyday','account'],['spare','Spare','account'],['reserve','Reserve','account'],['food','Food','expense']].map(([id,label,kind])=>({id,label,kind,...(kind==='account'?{account:label}:{})})).concat({id:'reserve-product',label:'Synthetic fund',kind:'product',ownerAccountId:'reserve',groupId:JSON.stringify(['account-group','other']),semantic:true});
 const pair=(id,link_type)=>({id,source:'cash',target:'reserve',kind:'transfer',label:'Everyday → Reserve · '+link_type,amount_minor:10000,currency:'CAD',count:1,selector:{endpoint:'transfers',filters:{source_account:'Everyday',target_account:'Reserve',link_type,transfer_status:'matched'}}});
 const expense=(id,incoming)=>({id,source:incoming?'food':'cash',target:incoming?'cash':'food',kind:'expense',label:incoming?'Food refund → Everyday':'Everyday → Food',amount_minor:incoming?2000:60000,currency:'CAD',count:1,selector:{endpoint:'transactions',filters:{account:'Everyday',category:'expense.food',category_mode:'exact',flow:'expense',direction:incoming?'incoming':'outgoing'}}});
 const flow={...common,coverage:{complete:true},nodes,edges:[pair('cash-reserve','own_cash')]};
-async function fixture(t,{width=390,edges=flow.edges}={}){
+async function fixture(t,{width=390,edges=flow.edges,includeProduct=false}={}){
  buildPlotly();
  const calls=[];
  const server=createServer(async(req,res)=>{
@@ -24,7 +24,7 @@ async function fixture(t,{width=390,edges=flow.edges}={}){
    const name=u.pathname.split('/').pop(),q=Object.fromEntries(u.searchParams);calls.push({name,q});res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
    let data={...common};
    if(name==='meta')data={...common,accounts:nodes.filter(n=>n.account),categories:[],currencies:['CAD']};
-   if(name==='flow')data={...flow,currency:q.currency,range:{start:q.start,end:q.end},edges:edges.map(edge=>({...edge,currency:q.currency}))};
+   if(name==='flow')data={...flow,currency:q.currency,range:{start:q.start,end:q.end},edges:[...edges,...(includeProduct?[{id:'reserve-product-flow',source:'reserve',target:'reserve-product',kind:'investment',label:'Synthetic fund activity',amount_minor:10000,count:1,currency:q.currency,selector:{endpoint:'transactions',filters:{account:'Reserve',category:'investment.trade.synthetic',category_mode:'exact',flow:'investment',direction:'outgoing'}}}]:[])].map(edge=>({...edge,currency:q.currency}))};
    if(name==='transactions')data={...common,items:[{record_id:'synthetic',date:'2024-08-01',account:q.account,description:'Synthetic evidence',amount_minor:q.direction==='incoming'?2000:-60000,currency:q.currency,category_id:q.category}],total:1,offset:0,limit:25};
    if(name==='transfers')data={...common,items:[{link_id:'synthetic-pair',link_type:q.link_type,debit:{record_id:'synthetic-debit',account:q.source_account,date:'2024-08-01',currency:q.currency,amount_minor:-10000},credit:{record_id:'synthetic-credit',account:q.target_account,date:'2024-08-01',currency:q.currency,amount_minor:10000}}],total:1,offset:0,limit:25};
    res.end(JSON.stringify(data));return;
@@ -58,18 +58,23 @@ for(const width of [390,1280])for(const method of ['mouse','touch'])test(`mounte
   await inspectMember(page,stream.label,method);
   const request=calls.filter(call=>call.name===stream.selector.endpoint).at(-1);
   for(const [key,value] of Object.entries(stream.selector.filters))assert.equal(request.q[key],value,`Preserve the exact ${key} selector`);
+  const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+  if(stream.selector.endpoint==='transactions'){const amount=(await inspector.locator('.transaction-row .tx-amount').first().textContent()).replace(/\s+/g,' ').trim();assert.equal(amount,stream===expenses[0]?'-CAD 600.00':'CAD 20.00','The rendered evidence retains the outgoing expense or positive refund sign');}
+  else {const rows=inspector.locator('.transaction-row');assert.deepEqual(await rows.evaluateAll(items=>items.map(row=>row.dataset.recordId).sort()),['synthetic-credit','synthetic-debit'],'A paired selector displays both exact endpoint records');const amounts=await rows.locator('.tx-amount').evaluateAll(items=>items.map(item=>item.textContent.replace(/\s+/g,' ').trim()).sort());assert.deepEqual(amounts,['-CAD 100.00','CAD 100.00'],'Transfer debit and credit retain opposite signs');}
   await page.getByRole('button',{name:'Close inspector',exact:true}).click();assert.equal(await inspector.count(),0);
   if(stream!==pairs.at(-1))await activateAccount(page,method);
  }
 });
 for(const width of [390,1280])test(`mounted Sankey nodes and paths have finite contained geometry at ${width}`,{timeout:20000},async t=>{
- const {page}=await fixture(t,{width,edges:[...flow.edges,{...pair('spare-reserve','own_cash'),source:'spare'}]});await expandNarrowAccounts(page,width);await page.locator('.money-sankey .sankey-link[data-edge]').first().waitFor();
+ const {page}=await fixture(t,{width,edges:[...flow.edges,{...pair('spare-reserve','own_cash'),source:'spare'}],includeProduct:true});await expandNarrowAccounts(page,width);await page.locator('.money-sankey .sankey-link[data-edge]').first().waitFor();
  const geometry=await page.locator('.money-sankey-chart').evaluate(chart=>{
   const finite=node=>{const r=node.getBBox();return [r.x,r.y,r.width,r.height].every(Number.isFinite)&&r.width>=0&&r.height>=0;};
-  return {nodes:[...chart.querySelectorAll('.sankey-node')].every(finite),links:[...chart.querySelectorAll('.sankey-link')].every(finite),enclosure:[...document.querySelectorAll('.money-sankey-enclosure')].some(node=>{const r=node.getBoundingClientRect();return [r.left,r.top,r.width,r.height].every(Number.isFinite)&&r.width>0&&r.height>0;})};
+  const rect=node=>{const r=node.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+  const box=document.querySelector('.money-sankey-enclosure[data-role="other"]'),bounds=box&&rect(box),owned=[...chart.querySelectorAll('.sankey-node[data-node="cash"],.sankey-node[data-node="spare"],.sankey-node[data-node="reserve"],.sankey-node[data-node="reserve-product"]')];
+  return {nodes:[...chart.querySelectorAll('.sankey-node')].every(finite),links:[...chart.querySelectorAll('.sankey-link')].every(finite),enclosure:bounds&&[bounds.left,bounds.top,bounds.width,bounds.height].every(Number.isFinite)&&bounds.width>0&&bounds.height>0?bounds:null,owned:owned.map(node=>({id:node.dataset.node,bounds:rect(node)})),canvas:rect(document.querySelector('.money-sankey-canvas')),stage:rect(document.querySelector('.money-sankey'))};
  });
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'The integrated map remains contained in the browser viewport');
- assert.equal(geometry.nodes,true,JSON.stringify(geometry));assert.equal(geometry.links,true,JSON.stringify(geometry));assert.equal(geometry.enclosure,true,'The accepted account-role enclosure is mounted with the Plotly geometry');
+ assert.equal(geometry.nodes,true,JSON.stringify(geometry));assert.equal(geometry.links,true,JSON.stringify(geometry));assert.equal(geometry.enclosure,true,'The accepted account-role enclosure is mounted with the Plotly geometry');assert.deepEqual(geometry.owned.map(node=>node.id).sort(),['cash','reserve','reserve-product','spare']);for(const node of geometry.owned)assert.ok(node.bounds.left>=geometry.enclosure.left-1&&node.bounds.right<=geometry.enclosure.right+1&&node.bounds.top>=geometry.enclosure.top-1&&node.bounds.bottom<=geometry.enclosure.bottom+1,`${node.id} is contained by its owning account enclosure: ${JSON.stringify({node:node.bounds,enclosure:geometry.enclosure})}`);assert.ok(geometry.canvas.width<=geometry.stage.width+1,'The graph canvas is bounded by its scroll viewport');assert.ok(geometry.stage.width<=width,'The graph scroll viewport does not exceed the browser viewport');
 });
 for(const width of [390,1280])test(`selection inspector dismisses cleanly and returns focus to the selected Sankey link at ${width}`,{timeout:25000},async t=>{
  const {page}=await fixture(t,{width,edges:[expense('cash-food',false),...flow.edges]});await expandNarrowAccounts(page,width);
@@ -101,11 +106,14 @@ for(const width of [390,1280])test(`exact movement finder pages every dense sele
 });
 for(const width of [390,1280])test(`same-account loop remains exact evidence with real zoom, pan and Fit controls at ${width}`,{timeout:30000},async t=>{
  const loop={...pair('self-loop','own_cash'),source:'reserve',target:'reserve',label:'Reserve internal loop',selector:{endpoint:'transfers',filters:{source_account:'Reserve',target_account:'Reserve',link_type:'own_cash',transfer_status:'matched'}}};
- const {page,calls}=await fixture(t,{width,edges:[...flow.edges,loop]});await expandNarrowAccounts(page,width);
+ const deepExpense={...expense('deep-expense',false),label:'Synthetic deep expense',selector:{...expense('deep-expense',false).selector,filters:{...expense('deep-expense',false).selector.filters,category:'expense.food.household.supplies.recurring'}}};
+ const {page,calls}=await fixture(t,{width,edges:[...flow.edges,loop,deepExpense],includeProduct:true});await expandNarrowAccounts(page,width);
  const initial=await page.locator('.money-sankey-view-controls output').textContent();await page.getByRole('button',{name:'Zoom in',exact:true}).click();assert.notEqual(await page.locator('.money-sankey-view-controls output').textContent(),initial);
  await page.getByRole('button',{name:'Fit map to view',exact:true}).click();assert.equal(await page.locator('.money-sankey-view-controls output').textContent(),initial);
+ await page.getByRole('button',{name:'Pan right',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.money-sankey').scrollLeft>0,'Pan right changes the actual chart viewport');
  const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Reserve internal loop');await finder.getByRole('button',{name:'Inspect Reserve internal loop',exact:true}).click();
  const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspectMember(page,'Reserve internal loop');
  const request=calls.filter(call=>call.name==='transfers').at(-1).q;assert.equal(request.source_account,'Reserve');assert.equal(request.target_account,'Reserve');assert.equal(request.link_type,'own_cash');assert.equal(request.transfer_status,'matched');
+ assert.deepEqual(await inspector.locator('.transaction-row').evaluateAll(rows=>rows.map(row=>row.dataset.recordId).sort()),['synthetic-credit','synthetic-debit'],'The same-account transfer retains both exact endpoint records');
  await page.getByRole('button',{name:'Close inspector',exact:true}).click();
 });
