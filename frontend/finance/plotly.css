@@ -18,6 +18,7 @@
 .money-sankey{position:relative;max-height:62vh;min-height:360px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .money-sankey-chart{position:relative}
 .money-sankey .sankey-node,.money-sankey .sankey-link{cursor:pointer}
+.money-sankey .sankey-node text{fill:var(--text)!important}
 @media(max-width:600px){.money-sankey{max-height:55vh;min-height:320px}.money-sankey-group{flex:1 1 100%}}
 @media(prefers-reduced-motion:reduce){.money-sankey .sankey-node,.money-sankey .sankey-link{transition:none}}
 .money-map{--bg:#f4f3ee;--panel:#fffefa;--rail:#efeee7;--text:#22332f;--muted:#616d67;--border:#d7dcd3;--teal:#327b65;--amber:#b36d45;--blue:#647f9f;--tint:#edf2e9}

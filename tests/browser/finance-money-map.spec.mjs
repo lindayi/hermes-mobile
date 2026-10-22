@@ -94,6 +94,17 @@ test('overview is a large three-part money map with actual zoom, pan, fit and qu
  console.log('Money map screenshots:',fileURLToPath(artifactURL()));
 });
 
+test('Sankey labels follow light and dark theme changes',{timeout:20000},async t=>{
+ const {page,url}=await fixture(t);await page.emulateMedia({colorScheme:'light'});await page.goto(url);await readySankey(page);
+ const labels=page.locator('.money-sankey .sankey-node text');await labels.first().waitFor();
+ const labelsMatchTheme=()=>{
+  const map=document.querySelector('.money-map'),probe=document.createElement('span'),labels=[...document.querySelectorAll('.money-sankey .sankey-node text')];
+  if(!map||!labels.length)return false;probe.style.color='var(--text)';map.append(probe);const expected=getComputedStyle(probe).color;probe.remove();
+  return labels.every(label=>getComputedStyle(label).fill===expected);
+ };
+ await page.waitForFunction(labelsMatchTheme);await page.emulateMedia({colorScheme:'dark'});await page.waitForFunction(labelsMatchTheme);
+});
+
 test('edge inspector leaves map in place, pages exact selectors, closes and reverses full context',{timeout:30000},async t=>{
  const {page,url,calls}=await fixture(t);await page.goto(url);await readySankey(page);
  await page.getByRole('button',{name:'Zoom in',exact:true}).click();const zoomed=await transform(page);
