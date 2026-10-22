@@ -26,10 +26,9 @@ function indexMapEdge(edge,seen=new Set()){if(!edge||typeof edge.id!=='string')r
 function currentSelectionEdge(edge){
  if(!edge?.aggregateSelection)return mapEdges.get(mapEdgeKey(edge))||null;
  if((edge.group||edge.projectionIds?.length)&&sankeyViewInstance){const rebound=sankeyViewInstance.rebind(edge);if(!rebound)return null;indexMapEdge(rebound);return rebound;}
- const current=mapEdges.get(mapEdgeKey(edge))||edge,members=[...new Map(array(current.members).map(member=>{const key=mapEdgeKey(member);return [key,mapEdges.get(key)||member];})).values()];
+ const members=[...new Map(array(edge.members).map(member=>{const key=mapEdgeKey(member),current=mapEdges.get(key);return current?[key,current]:null;}).filter(Boolean)).values()];
  if(!members.length)return null;
- const rebound={...current,id:'sankey-selection:'+members.map(mapEdgeKey).join('|'),aggregateSelection:true,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||current.currency};
- mapEdges.set(mapEdgeKey(rebound),rebound);return rebound;
+ return {...edge,id:'sankey-selection:'+members.map(mapEdgeKey).join('|'),aggregateSelection:true,members,count:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.count)&&member.count>=0?member.count:1),0),amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||edge.currency};
 }
 function evidenceStreams(edge){
  const streams=[],seen=new Set();
@@ -49,7 +48,7 @@ async function loadInspector(){
  const shell=inspectorShell(current,()=>closeInspector());content.append(shell);shell.focus({preventScroll:true});
  for(const node of document.querySelectorAll('[data-edge]'))node.setAttribute('aria-pressed',String(node.dataset.edge===current.edge.id));
  const body=shell.querySelector('.inspector-body');
- if(edge.aggregateSelection){const members=edge.members;body.replaceChildren(el('p',{class:'inspector-amount'},money(edge.amount_minor,edge.currency)),el('p',{},`${members.length} exact streams · Choose a stream to read its evidence.`),...members.slice(current.offset,current.offset+25).map(stream=>button('Inspect '+(stream.label||stream.displayLabel||'recorded movement'),()=>openInspector(stream),{class:'stream-member'})),el('div',{class:'pager'},button('Previous streams',()=>{remember();selection={...current,offset:Math.max(0,current.offset-25)};loadInspector();},{disabled:current.offset===0?'':null}),button('Next streams',()=>{remember();selection={...current,offset:current.offset+25};loadInspector();},{disabled:current.offset+25>=members.length?'':null})));return;}
+ if(edge.aggregateSelection){const members=edge.members;body.replaceChildren(el('p',{class:'inspector-amount'},money(edge.amount_minor,edge.currency)),el('p',{},`${members.length} exact streams${Number.isSafeInteger(edge.count)?` · ${edge.count} source items`:''} · Choose a stream to read its evidence.`),...members.slice(current.offset,current.offset+25).map(stream=>button('Inspect '+(stream.label||stream.displayLabel||'recorded movement'),()=>openInspector(stream),{class:'stream-member'})),el('div',{class:'pager'},button('Previous streams',()=>{remember();selection={...current,offset:Math.max(0,current.offset-25)};loadInspector();},{disabled:current.offset===0?'':null}),button('Next streams',()=>{remember();selection={...current,offset:current.offset+25};loadInspector();},{disabled:current.offset+25>=members.length?'':null})));return;}
  const streams=evidenceStreams(edge),pager=createPager(streams,(endpoint,filters,signal)=>api(endpoint,{...query,...filters,currency:filters.currency||edge.originalCurrency||edge.currency||query.currency},signal));
  const renderPage=async(loadMore=false)=>{
   try{

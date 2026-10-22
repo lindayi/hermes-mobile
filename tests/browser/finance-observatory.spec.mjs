@@ -456,3 +456,46 @@ test('folding an upstream investment hierarchy reclaims only displaced account-g
  assert.ok(Math.abs(folded.height-baseline.height)<2,`the map height must return to baseline: ${JSON.stringify({baseline,expanded,folded})}`);
  assert.equal(await page.locator('.money-sankey-controls .money-sankey-group').filter({hasText:'Loans'}).locator('[data-group-select]').getAttribute('aria-pressed'),'true','the selected downstream group remains selected through reflow');
 });
+test('raw-member aggregates refresh current counts and close when only a same-ID foreign stream remains',{timeout:45000},async t=>{
+ const {page,url,calls}=await fixture(t);let cadState='initial';
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json(),q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+  const present=currency==='USD'||cadState!=='removed';
+  const amount=currency==='USD'?9876:cadState==='updated'?2468:1234;
+  const count=currency==='USD'?1:cadState==='updated'?3:2;
+  data.edges=present?[{id:'shared-flow-id',source:'cash',target:'food',kind:'expense',label:currency+(cadState==='updated'?' updated':'')+' exact movement',amount_minor:amount,count,currency,selector:{endpoint:'transactions',filters:{start:q.get('start'),end:q.get('end'),currency,scope:q.get('scope'),dataset:q.get('dataset'),account:'Fixture cash',category:'expense.food',category_mode:'exact',flow:'expense',direction:'outgoing'}}}]:[];
+  return route.fulfill({response,json:data});
+ });
+ await page.route('**/finance/transactions?**',route=>{
+  const q=new URL(route.request().url()).searchParams;calls.push({name:'transactions',query:Object.fromEntries(q)});
+  const currency=q.get('currency');
+  return route.fulfill({json:{...common,items:[{record_id:currency+'-original',date:'2026-08-02',account:'Fixture cash',description:currency+' signed original',amount_minor:currency==='CAD'?-2468:-9876,currency}],total:1,limit:50,offset:0}});
+ });
+ await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('CAD exact movement');
+ await finder.getByRole('button',{name:/Inspect CAD exact movement/}).click();
+ let inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByText(/exact streams/).waitFor();
+ await inspector.getByText(/2 source items/).waitFor();
+ assert.match((await inspector.locator('.inspector-amount').first().textContent()).replace(/\u00a0/g,' '),/CAD 12\.34/);
+ cadState='updated';await page.getByRole('button',{name:'Refresh data'}).click();
+ inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspector.getByText(/exact streams/).waitFor();
+ await inspector.getByText(/3 source items/).waitFor();
+ assert.match((await inspector.locator('.inspector-amount').first().textContent()).replace(/\u00a0/g,' '),/CAD 24\.68/);
+ assert.match(await inspector.textContent(),/CAD updated exact movement/);
+ cadState='removed';await page.getByRole('button',{name:'Refresh data'}).click();
+ await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ assert.equal(await page.locator('.flow-inspector').count(),0,'removed CAD selection must close instead of restoring its saved member');
+ const foreign=page.locator('.foreign-unconverted');await foreign.locator('summary').click();
+ await foreign.getByRole('button',{name:/Inspect original USD movement/}).click();
+ await page.getByText('USD signed original',{exact:true}).waitFor();
+ assert.equal(calls.findLast(call=>call.name==='transactions').query.currency,'USD');
+ assert.match((await page.locator('.flow-inspector .tx-amount').textContent()).replace(/\u00a0/g,' '),/-USD 98\.76/);
+ await page.keyboard.press('Escape');cadState='initial';await page.getByRole('button',{name:'Refresh data'}).click();
+ await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ await finder.getByLabel('Search exact movements').fill('CAD exact movement');await finder.getByRole('button',{name:/Inspect CAD exact movement/}).click();
+ cadState='removed';await page.getByRole('tab',{name:'Cash flow',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ await page.getByRole('button',{name:'Back'}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ assert.equal(await page.locator('.flow-inspector').count(),0,'Back must not restore a removed CAD member from a saved aggregate');
+});
