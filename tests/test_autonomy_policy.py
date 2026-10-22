@@ -346,6 +346,7 @@ _ISSUE124_MONEY_MAP_FIXTURE = {
 }
 
 _ISSUE127_FINANCE_INTEGRATION_FIXTURE = {
+    'backend/finance.py': '0a2f9c020602893badc98246860f838fff384c1ac018cdefcd2dfa2df1953b49',
     '.github/workflows/ci.yml': '5025e464918a2e8ea1f483596cc256210cf7709913041ee07b79d89743d7a857',
     'deploy/frontend_release.py': 'b2132ef75f0f187b119304207882777a2cf88d837dd284d66cc041ec28421881',
     'package.json': '476c6215e7f46554703a81a4b68d86c56dc5edec98e9302ada5bb542487206db',
@@ -1193,9 +1194,12 @@ def test_issue124_money_map_source_pin_supersedes_only_finance(phase):
     assert ISSUE124_MONEY_MAP_OVERLAY == _ISSUE124_MONEY_MAP_FIXTURE
     root = Path(__file__).resolve().parents[1]
     for path, digest in _ISSUE124_MONEY_MAP_FIXTURE.items():
-        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+        current_digest = _ISSUE127_FINANCE_INTEGRATION_FIXTURE.get(path, digest)
+        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == current_digest
     evidence = _phase_evidence(phase)
     assert _blockers(evidence, phase) == set()
+    evidence['main']['files']['backend/finance.py'] = _ISSUE124_MONEY_MAP_FIXTURE['backend/finance.py']
+    assert _blockers(evidence, phase) == {'execution-source-contract'}
     evidence['main']['files']['backend/finance.py'] = _ISSUE122_FINANCE_FIXTURE['backend/finance.py']
     assert _blockers(evidence, phase) == {'execution-source-contract'}
 
@@ -1221,7 +1225,7 @@ def test_issue122_finance_source_family_is_complete_and_independent():
 def test_issue127_finance_build_pins_are_complete_and_independent():
     from deploy.autonomy_policy import ISSUE127_FINANCE_INTEGRATION_OVERLAY
     assert set(_ISSUE127_FINANCE_INTEGRATION_FIXTURE) == {
-        '.github/workflows/ci.yml', 'deploy/frontend_release.py',
+        'backend/finance.py', '.github/workflows/ci.yml', 'deploy/frontend_release.py',
         'package.json', 'package-lock.json',
     }
     assert ISSUE127_FINANCE_INTEGRATION_OVERLAY == _ISSUE127_FINANCE_INTEGRATION_FIXTURE
