@@ -34,9 +34,9 @@
 .background-result>.markdown,.process-history>.markdown{padding:8px 0;border-top:1px solid var(--border)}
 .background-result>p{margin:0 0 8px}.background-result>.caption{margin:8px 0 0}
 .background-result .markdown>:last-child{margin-bottom:0}
-:root{color-scheme:light;--bg:#f5f4ed;--surface:#faf9f5;--raised:#fffefa;--sand:#ece9df;--text:#282720;--muted:#6b685e;--border:#dedbd0;--accent:#9f4c35;--accent-hover:#843d29;--tint:#f1e1d6;--danger:#a82f34;--focus:#286fa8;--shadow:0 4px 24px #30271908;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;line-height:1.55;color:var(--text);background:var(--bg)}
-:root[data-theme=dark]{color-scheme:dark;--bg:#22221e;--surface:#2b2b25;--raised:#32322b;--sand:#3a3931;--text:#eeece2;--muted:#b3b0a3;--border:#49483e;--accent:#e8a386;--accent-hover:#f4baa0;--tint:#4a342b;--danger:#ffaaaa;--focus:#8cc8f4;--shadow:none}
-@media(prefers-color-scheme:dark){:root[data-theme=system]{color-scheme:dark;--bg:#22221e;--surface:#2b2b25;--raised:#32322b;--sand:#3a3931;--text:#eeece2;--muted:#b3b0a3;--border:#49483e;--accent:#e8a386;--accent-hover:#f4baa0;--tint:#4a342b;--danger:#ffaaaa;--focus:#8cc8f4;--shadow:none}}
+:root{color-scheme:light;--bg:#f4f3ee;--surface:#fffefa;--raised:#fffefa;--sand:#ecefe8;--text:#22332f;--muted:#616d67;--border:#d7dcd3;--accent:#327b65;--accent-hover:#286450;--tint:#e6ede8;--danger:#a82f34;--focus:#286fa8;--shadow:0 2px 12px #22332f0a;font-family:"Helvetica Neue",Arial,sans-serif;font-size:16px;line-height:1.55;color:var(--text);background:var(--bg)}
+:root[data-theme=dark]{color-scheme:dark;--bg:#202824;--surface:#29332e;--raised:#303b35;--sand:#37423c;--text:#edf1eb;--muted:#b4beb7;--border:#46534c;--accent:#8fbea4;--accent-hover:#aad2b9;--tint:#304139;--danger:#ffaaaa;--focus:#8cc8f4;--shadow:none}
+@media(prefers-color-scheme:dark){:root[data-theme=system]{color-scheme:dark;--bg:#202824;--surface:#29332e;--raised:#303b35;--sand:#37423c;--text:#edf1eb;--muted:#b4beb7;--border:#46534c;--accent:#8fbea4;--accent-hover:#aad2b9;--tint:#304139;--danger:#ffaaaa;--focus:#8cc8f4;--shadow:none}}
 /* Run control belongs to Activity, never beside model selection or Send. */
 .live-activity-heading .steering-stop{height:44px;min-width:44px;padding:0 12px;margin-left:auto;flex:none;background:var(--surface);color:var(--danger);border:1px solid var(--danger)}
 .composer-editor{display:grid;grid-template-columns:minmax(0,1fr) 44px;align-items:start;gap:4px}
@@ -199,3 +199,12 @@ details[open]>summary .disclosure-icon{transform:rotate(90deg)}
 .approval-card .review-payload{max-height:35dvh;overflow:auto}
 .approval-card .review-payload:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 .approval-card .actions button{flex:1 1 120px;white-space:normal}
+.nav-item[aria-current=page],.filter-segment[aria-pressed=true],.filter-toggle[data-active=true],.user-message a{color:var(--accent-hover)}
+h1{font-family:Georgia,"Times New Roman",serif}
+h2,h3,.brand{font-family:"Helvetica Neue",Arial,sans-serif;letter-spacing:-.015em}
+.card{padding:18px 16px;border-radius:14px}
+.auth-shell header{margin-bottom:48px}
+.auth-card h1{font-size:40px}
+.auth-card>.muted{font-size:16px;margin-bottom:28px}
+.account-finance-link{display:inline-flex;align-items:center;min-height:44px;padding:8px 0;font-weight:600}
+@media(min-width:760px){.auth-shell header{margin-bottom:56px}.auth-card h1{font-size:42px}.page-heading h1{font-size:34px}}
