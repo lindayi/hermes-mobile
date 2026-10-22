@@ -121,6 +121,9 @@ test('folded account-role transfers remain searchable and inspectable without ex
  const loop={...pair('folded-loop','own_cash'),label:'Everyday internal transfer',selector:{endpoint:'transfers',filters:{source_account:'Everyday',target_account:'Reserve',link_type:'own_cash',transfer_status:'matched'}}};
  const {page,calls}=await fixture(t,{width:390,edges:[loop]});
  assert.equal(await page.locator('.money-sankey-controls .money-sankey-toggle').first().getAttribute('aria-expanded'),'false','Mobile account roles start folded');
+ assert.equal(await page.getByText('No recorded movements match these filters.',{exact:true}).count(),0,'Folded transfers are recorded movements, not an empty ledger');
+ await page.getByText('Movements are within folded account groups. Expand a group to see them.',{exact:true}).waitFor();
+ assert.equal(await page.locator('.money-sankey-controls').getByRole('button',{name:'Expand Other accounts',exact:true}).isVisible(),true);
  const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Everyday internal transfer');
  const result=finder.getByRole('button',{name:/Inspect Everyday internal transfer/});await result.waitFor();
  await result.click();const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
@@ -128,6 +131,10 @@ test('folded account-role transfers remain searchable and inspectable without ex
  const q=calls.filter(call=>call.name==='transfers').at(-1).q;
  assert.equal(q.source_account,'Everyday');assert.equal(q.target_account,'Reserve');assert.equal(q.transfer_status,'matched');
  assert.deepEqual(await inspector.locator('.transaction-row').evaluateAll(rows=>rows.map(row=>row.dataset.recordId).sort()),['synthetic-credit','synthetic-debit']);
+ await page.getByRole('button',{name:'Close inspector',exact:true}).click();
+ await page.locator('.money-sankey-controls').getByRole('button',{name:'Expand Other accounts',exact:true}).click();
+ await page.locator('.money-sankey .sankey-link[data-edge]').first().waitFor();
+ assert.equal(await page.getByText('Movements are within folded account groups. Expand a group to see them.',{exact:true}).count(),0);
 });
 
 for(const width of [390,1280])test(`tall Sankey keeps its lowest account and product nodes visible at ${width}`,{timeout:30000},async t=>{

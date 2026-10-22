@@ -154,7 +154,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   if(disposed)return;const sequence=++drawSequence;stage.setAttribute('aria-busy','true');clearLayoutStyles();
   directory=model.project(expanded,[]);p=model.project(expanded,collapsed);
   const active=new Set(p.edges.flatMap(edge=>[edge.source,edge.target])),nodes=p.nodes.filter(node=>active.has(node.id));
-  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;finishDraw(sequence);return;}
+  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent=p.internalEdges.some(edge=>edge.amount>0)?'Movements are within folded account groups. Expand a group to see them.':'No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;finishDraw(sequence);return;}
   const projected={...p,nodes},width=Math.max(720,stage.clientWidth||900);
   geometry=groupedLayout(projected,{width,anchors});
   const flowHeight=Math.max(200,...[...new Set(geometry.x)].map(x=>geometry.x.filter(value=>value===x).length*4+160));
