@@ -1,5 +1,5 @@
 import {createModel,groupSelection,selectionMembers} from './live-model.mjs';
-import {groupedLayout} from './layout.mjs';
+import {groupedLayout,anchorGroupAndReclaim} from './layout.mjs';
 import {ranked} from './live-model.mjs';
 
 const account=node=>node?.kind==='account'||node?.kind==='account-group';
@@ -61,7 +61,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  };
  const toggleNode=node=>{
   if(!node?.expandable)return;
-  const anchor=geometry?.bands.find(band=>band.id===node.groupId);if(anchor)anchors[node.groupId]=anchor.top;
+  anchorGroupAndReclaim(geometry,anchors,node.groupId);
   const keep=selected;expanded.splice(0,expanded.length,...model.toggle(expanded,node.id));
   void draw().then(()=>{if(keep)select(keep);});
  };
@@ -116,7 +116,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   for(const group of p.accountGroups){
    const row=document.createElement('div');row.className='money-sankey-group';
    const selectButton=document.createElement('button');selectButton.type='button';selectButton.dataset.groupSelect=group.id;selectButton.setAttribute('aria-pressed',String(selected?.group===group.id));selectButton.textContent=`${group.label} · ${group.count}`;selectButton.addEventListener('click',()=>chooseGroup(group.id,group.label));
-   const toggle=document.createElement('button');toggle.type='button';toggle.className='money-sankey-toggle';toggle.setAttribute('aria-label',`${group.collapsed?'Expand':'Fold'} ${group.label}`);toggle.setAttribute('aria-expanded',String(!group.collapsed));toggle.textContent=group.collapsed?'›':'⌄';toggle.addEventListener('click',()=>{const band=geometry?.bands.find(item=>item.id===group.id);if(band)anchors[group.id]=band.top;const wasSelected=selected?.group===group.id;collapsed.splice(0,collapsed.length,...model.toggleGroup(collapsed,group.id));draw().then(()=>{if(wasSelected)select({group:group.id,label:group.label});});});
+   const toggle=document.createElement('button');toggle.type='button';toggle.className='money-sankey-toggle';toggle.setAttribute('aria-label',`${group.collapsed?'Expand':'Fold'} ${group.label}`);toggle.setAttribute('aria-expanded',String(!group.collapsed));toggle.textContent=group.collapsed?'›':'⌄';toggle.addEventListener('click',()=>{anchorGroupAndReclaim(geometry,anchors,group.id);const wasSelected=selected?.group===group.id;collapsed.splice(0,collapsed.length,...model.toggleGroup(collapsed,group.id));draw().then(()=>{if(wasSelected)select({group:group.id,label:group.label});});});
    row.append(selectButton,toggle);controls.append(row);
   }
  };
@@ -126,7 +126,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
    const row=document.createElement('div');row.className='money-sankey-band';row.dataset.role=band.role;
    layoutStyle(row,{left:`${12+band.x*(geometry.width-24)-10}px`,top:`${band.top+4}px`,width:`${Math.max(150,12+(band.right-band.x)*(geometry.width-24))}px`,height:`${Math.max(48,band.bottom-band.top-4)}px`});
    const selectButton=document.createElement('button');selectButton.type='button';selectButton.dataset.groupSelect=band.id;selectButton.setAttribute('aria-pressed',String(selected?.group===band.id));selectButton.textContent=band.label;selectButton.addEventListener('click',()=>chooseGroup(band.id,band.label));
-   const toggle=document.createElement('button');toggle.type='button';toggle.className='money-sankey-toggle';toggle.setAttribute('aria-label',`${band.collapsed?'Expand':'Fold'} ${band.label}`);toggle.setAttribute('aria-expanded',String(!band.collapsed));toggle.textContent=band.collapsed?'›':'⌄';toggle.addEventListener('click',()=>{anchors[band.id]=band.top;const keep=selected?.group===band.id;collapsed.splice(0,collapsed.length,...model.toggleGroup(collapsed,band.id));draw().then(()=>{if(keep)select({group:band.id,label:band.label});});});
+   const toggle=document.createElement('button');toggle.type='button';toggle.className='money-sankey-toggle';toggle.setAttribute('aria-label',`${band.collapsed?'Expand':'Fold'} ${band.label}`);toggle.setAttribute('aria-expanded',String(!band.collapsed));toggle.textContent=band.collapsed?'›':'⌄';toggle.addEventListener('click',()=>{anchorGroupAndReclaim(geometry,anchors,band.id);const keep=selected?.group===band.id;collapsed.splice(0,collapsed.length,...model.toggleGroup(collapsed,band.id));draw().then(()=>{if(keep)select({group:band.id,label:band.label});});});
    row.append(selectButton,toggle);bands.append(row);
    if(!band.collapsed){const box=document.createElement('div');box.className='money-sankey-enclosure';box.dataset.role=band.role;layoutStyle(box,{left:`${Math.max(0,12+band.x*(geometry.width-24)-18)}px`,top:`${band.top}px`,width:`${Math.max(180,(band.right-band.x)*(geometry.width-24)+30)}px`,height:`${band.bottom-band.top}px`});bands.append(box);}
    jump.append(new Option(`${band.label}${band.active?'':' · no movement'}`,band.id));

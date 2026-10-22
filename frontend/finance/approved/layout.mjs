@@ -8,6 +8,15 @@ const role=n=>n.accountGroup||n.role||'other';
 const compare=(a,b)=>String(a.label).localeCompare(String(b.label))||a.id.localeCompare(b.id);
 const roleX={banking:0.32,cards:0.52,investments:0.52,debt:0.52,other:0.52};
 const headerHeight=52;
+export function anchorGroupAndReclaim(geometry,anchors,id){
+ const index=geometry?.bands.findIndex(band=>band.id===id)??-1;if(index<0)return;
+ const band=geometry.bands[index],pixel=1/(geometry.width-24);anchors[id]=band.top;
+ for(const downstream of geometry.bands.slice(index+1)){
+  if(downstream.top<band.top)continue;
+  const intersects=downstream.x-pixel*18<band.right+pixel*12&&downstream.right+pixel*12>band.x-pixel*18;
+  if(intersects)delete anchors[downstream.id];
+ }
+}
 export function groupedLayout(p,{heights=null,width:baseWidth=1280,anchors={}}={}){
  const columns=new Map(),accounts=p.nodes.filter(isAccount),products=p.nodes.filter(isProduct);
  const hubs=p.nodes.filter(n=>n.kind==='payroll'&&n.incoming>0&&n.outgoing>0);

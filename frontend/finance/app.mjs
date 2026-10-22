@@ -15,24 +15,25 @@ let tab='overview',metadata=null,query={...lastQuarter(),currency:'CAD',scope:'p
 const array=v=>Array.isArray(v)?v:[];
 const button=(text,action,attrs={})=>el('button',{type:'button',onclick:action,...attrs},text);
 const amount=(r,key)=>money(r[key],r.currency);
+const mapEdgeKey=edge=>JSON.stringify([edge?.selector?.filters?.currency||edge?.originalCurrency||edge?.currency||'',edge?.id]);
 const tablist=document.querySelector('#tabs');
 const accessNotice=el('div',{class:'private-pause',role:'status',hidden:''},'Finance is hidden until access is checked. ',button('Retry access check',()=>resumeAccess()));coverage.after(accessNotice);
 const history=[];let selection=null,inspectorController=null,inspectorGeneration=0;
 const back=button('← Back',goBack,{'aria-label':'Back',disabled:''});
 document.querySelector('.topbar').append(back);
 function updateBack(){back.disabled=!history.length;}
-function indexMapEdge(edge,seen=new Set()){if(!edge||typeof edge.id!=='string'||seen.has(edge.id))return;seen.add(edge.id);mapEdges.set(edge.id,edge);for(const member of [...array(edge.members),...array(edge.evidenceMembers)])indexMapEdge(member,seen);}
+function indexMapEdge(edge,seen=new Set()){if(!edge||typeof edge.id!=='string')return;const key=mapEdgeKey(edge);if(seen.has(key))return;seen.add(key);mapEdges.set(key,edge);for(const member of [...array(edge.members),...array(edge.evidenceMembers)])indexMapEdge(member,seen);}
 function currentSelectionEdge(edge){
- if(!edge?.aggregateSelection)return mapEdges.get(edge?.id)||null;
+ if(!edge?.aggregateSelection)return mapEdges.get(mapEdgeKey(edge))||null;
  if((edge.group||edge.projectionIds?.length)&&sankeyViewInstance){const rebound=sankeyViewInstance.rebind(edge);if(!rebound)return null;indexMapEdge(rebound);return rebound;}
- const current=mapEdges.get(edge.id)||edge,members=[...new Map(array(current.members).map(member=>[member.id,mapEdges.get(member.id)]).filter(([,member])=>member)).values()];
+ const current=mapEdges.get(mapEdgeKey(edge))||edge,members=[...new Map(array(current.members).map(member=>{const key=mapEdgeKey(member);return [key,mapEdges.get(key)||member];})).values()];
  if(!members.length)return null;
- const rebound={...current,id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||current.currency};
- mapEdges.set(rebound.id,rebound);return rebound;
+ const rebound={...current,id:'sankey-selection:'+members.map(mapEdgeKey).join('|'),aggregateSelection:true,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||current.currency};
+ mapEdges.set(mapEdgeKey(rebound),rebound);return rebound;
 }
 function evidenceStreams(edge){
  const streams=[],seen=new Set();
- const visit=stream=>{if(!stream||typeof stream!=='object'||(stream.id&&seen.has(stream.id)))return;if(stream.id)seen.add(stream.id);if(Array.isArray(stream.inlineRows)||['transactions','transfers'].includes(stream.selector?.endpoint))streams.push(stream);for(const member of array(stream.members))visit(member);};
+ const visit=stream=>{if(!stream||typeof stream!=='object'||(stream.id&&seen.has(mapEdgeKey(stream))))return;if(stream.id)seen.add(mapEdgeKey(stream));if(Array.isArray(stream.inlineRows)||['transactions','transfers'].includes(stream.selector?.endpoint))streams.push(stream);for(const member of array(stream.members))visit(member);};
  visit(edge);return streams;
 }
 function snapshot(){return {tab,query:{...query},offset,search,schedulePolicy,vestingPolicy,mapViewport:{...mapViewport},mapFocus,mapExpanded,sankey:sankeyViewInstance?.snapshot()||null,selection:selection?structuredClone(selection):null,scroll:window.scrollY,details:[...document.querySelectorAll('#content details')].map(d=>d.open),filtersOpen:!!form.querySelector('details')?.open,inspectorScroll:document.querySelector('.inspector-body')?.scrollTop||0};}

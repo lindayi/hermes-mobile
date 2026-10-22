@@ -386,3 +386,73 @@ test('zero-cash investment evidence creates an owner from an empty API graph',{t
  const query=calls.findLast(call=>call.name==='transactions').query;
  assert.equal(query.record_id,'investment:empty-graph-zero');assert.equal(query.account,'Fixture orphan investment');assert.equal(query.category,'investment.trade.buy');assert.equal(query.flow,'investment');assert.equal(query.dataset,'investment');assert.equal(query.scope,'personal');assert.equal(query.currency,'CAD');
 });
+test('same backend flow IDs retain native CAD and USD evidence across selection order and Back',{timeout:45000},async t=>{
+ const {page,url,calls}=await fixture(t);
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json(),q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+  const edge={id:'shared-flow-id',source:'cash',target:'food',kind:'expense',label:currency+' exact movement',amount_minor:currency==='CAD'?1234:9876,count:1,currency,selector:{endpoint:'transactions',filters:{start:q.get('start'),end:q.get('end'),currency,scope:q.get('scope'),dataset:q.get('dataset'),account:'Fixture cash',category:'expense.food',category_mode:'exact',flow:'expense',direction:'outgoing'}}};
+  data.edges=[edge];return route.fulfill({response,json:data});
+ });
+ await page.route('**/finance/transactions?**',route=>{
+  const q=new URL(route.request().url()).searchParams;calls.push({name:'transactions',query:Object.fromEntries(q)});
+  const currency=q.get('currency');
+  return route.fulfill({json:{...common,items:[{record_id:currency+'-original',date:'2026-08-02',account:'Fixture cash',description:currency+' signed original',amount_minor:currency==='CAD'?-1234:-9876,currency}],total:1,limit:50,offset:0}});
+ });
+ await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ const originalUSD=page.locator('.foreign-unconverted').getByRole('button',{name:/Inspect original USD movement/});
+ assert.equal(await page.locator('.foreign-unconverted').count(),1,await page.locator('#content').innerText());
+ await page.locator('.foreign-unconverted summary').click();
+ await originalUSD.click();await page.getByText('USD signed original',{exact:true}).waitFor();
+ assert.equal(calls.findLast(call=>call.name==='transactions').query.currency,'USD');
+ assert.equal((await page.locator('.flow-inspector .tx-amount').textContent()).replace(/\u00a0/g,' '),'-USD 98.76');
+ await page.getByRole('button',{name:'Back'}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('CAD exact movement');
+ await finder.getByRole('button',{name:/Inspect CAD exact movement/}).click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByRole('button',{name:/Inspect CAD exact movement/}).click();await inspector.getByText('CAD signed original',{exact:true}).waitFor();
+ assert.equal(calls.findLast(call=>call.name==='transactions').query.currency,'CAD');
+ assert.equal((await inspector.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'-CAD 12.34');
+ await page.keyboard.press('Escape');
+ const disclosure=page.locator('.foreign-unconverted'),summary=disclosure.locator('summary');
+ if(!await disclosure.evaluate(node=>node.open))await summary.click();
+ await originalUSD.click();
+ await page.getByText('USD signed original',{exact:true}).waitFor();
+ assert.equal(calls.findLast(call=>call.name==='transactions').query.currency,'USD','a prior CAD selection must not replace the native USD stream');
+ assert.equal((await page.locator('.flow-inspector .tx-amount').textContent()).replace(/\u00a0/g,' '),'-USD 98.76');
+});
+test('folding an upstream investment hierarchy reclaims only displaced account-group space',{timeout:45000},async t=>{
+ const {page,url}=await fixture(t);
+ const products=Array.from({length:8},(_,i)=>({event_id:'synthetic-product-'+i,account:'Fixture broker',security_key:'Synthetic '+i,classification:'buy',date:'2026-08-02',currency:'CAD',cash_amount_minor:-100}));
+ await page.route('**/finance/flow?**',async route=>{
+  const response=await route.fetch(),data=await response.json(),q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+  const nodes=[{id:'broker',label:'Fixture broker',account:'Fixture broker',kind:'account'},
+   {id:'loan',label:'Fixture loan',account:'Fixture loan',kind:'account'},
+   {id:'buys',label:'Investment purchases',kind:'investment'},
+   {id:'interest',label:'Interest expense',kind:'expense'}];
+  const edges=[{id:'investment-buy',source:'broker',target:'buys',kind:'investment',label:'Investment purchases',amount_minor:800,count:8,currency,selector:{endpoint:'transactions',filters:{start:q.get('start'),end:q.get('end'),currency,scope:q.get('scope'),dataset:'investment',account:'Fixture broker',category:'investment.trade.buy',category_mode:'exact',flow:'investment',direction:'outgoing'}}},
+   {id:'loan-expense',source:'loan',target:'interest',kind:'expense',label:'Loan expense',amount_minor:500,count:1,currency,selector:{endpoint:'transactions',filters:{start:q.get('start'),end:q.get('end'),currency,scope:q.get('scope'),dataset:'all',account:'Fixture loan',category:'expense.interest',category_mode:'exact',flow:'expense',direction:'outgoing'}}}];
+  data.nodes=nodes;data.edges=edges;return route.fulfill({response,json:data});
+ });
+ await page.route('**/finance/investments?**',route=>{
+  const q=new URL(route.request().url()).searchParams;
+  return route.fulfill({json:{...common,cashflows:q.get('currency')==='CAD'?products:[],holdings:[],coverage:{cashflows:{complete:true}}}});
+ });
+ await page.goto(url);await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+ const roleBand=page.locator('.money-sankey-band[data-role="debt"]');
+ const readGeometry=()=>roleBand.evaluate(node=>{const layer=document.querySelector('.money-sankey-layer');return {top:node.getBoundingClientRect().top-layer.getBoundingClientRect().top,height:layer.getBoundingClientRect().height};});
+ const baseline=await readGeometry();
+ await page.getByText('Explore accounts, spending and categories',{exact:true}).click();
+ await page.getByRole('tab',{name:'All categories'}).click();
+ await page.getByRole('button',{name:'Expand Products'}).click();
+ await page.waitForFunction(minimumHeight=>{const band=document.querySelector('.money-sankey-band[data-role="debt"]');return band&&band.getBoundingClientRect().top>200&&document.querySelector('.money-sankey-layer').getBoundingClientRect().height>minimumHeight;},baseline.height);
+ const expanded=await readGeometry();assert.ok(expanded.top>baseline.top);
+ const loanGroup=page.locator('.money-sankey-controls .money-sankey-group').filter({hasText:'Loans'});
+ await loanGroup.locator('[data-group-select]').click();await page.locator('.flow-inspector').waitFor();await page.keyboard.press('Escape');
+ await loanGroup.getByRole('button',{name:/Fold Loans/}).click();
+ await page.getByRole('button',{name:'Fold Products'}).click();
+ await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+ const folded=await readGeometry();
+ assert.ok(Math.abs(folded.top-baseline.top)<2,`folding Products must restore the Loans heading: ${JSON.stringify({baseline,expanded,folded})}`);
+ assert.ok(Math.abs(folded.height-baseline.height)<2,`the map height must return to baseline: ${JSON.stringify({baseline,expanded,folded})}`);
+ assert.equal(await page.locator('.money-sankey-controls .money-sankey-group').filter({hasText:'Loans'}).locator('[data-group-select]').getAttribute('aria-pressed'),'true','the selected downstream group remains selected through reflow');
+});

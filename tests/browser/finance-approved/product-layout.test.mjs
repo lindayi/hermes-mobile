@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {groupedLayout} from '../../../frontend/finance/approved/layout.mjs';
+import {groupedLayout,anchorGroupAndReclaim} from '../../../frontend/finance/approved/layout.mjs';
 
 const groupId=JSON.stringify(['account-group','investments']);
 function fixture(){
@@ -128,4 +128,32 @@ test('product expansion preserves payroll weighting, ordinary scale and two-pass
  const l=groupedLayout(leaves,{width:850,heights});
  assert.equal(l.width,measured.width);
  for(const n of leaves.nodes.filter(isProduct))assert.ok(l.slots[n.id].x>l.slots[n.ownerAccountId].x);
+});
+
+test('reclaiming an upstream group clears only intersecting downstream anchors',()=>{
+ const geometry={width:1280,bands:[
+  {id:'upstream',x:.2,right:.6,top:30,bottom:280},
+  {id:'downstream',x:.5,right:.72,top:292,bottom:450},
+  {id:'unrelated',x:.85,right:.96,top:500,bottom:600}
+ ]};
+ const anchors={downstream:292,unrelated:500};
+ anchorGroupAndReclaim(geometry,anchors,'upstream');
+ assert.deepEqual(anchors,{upstream:30,unrelated:500});
+});
+
+test('folding a nested upstream hierarchy releases an explicitly anchored downstream group',()=>{
+ const banking=JSON.stringify(['account-group','banking']),debt=JSON.stringify(['account-group','debt']);
+ const accounts=[{id:'bank',kind:'account',accountGroup:'banking',label:'Bank',incoming:100,outgoing:100},{id:'loan',kind:'account',accountGroup:'debt',label:'Loan',incoming:100,outgoing:100}];
+ const products=[{id:'root',kind:'product-group',label:'Products',ownerAccountId:'bank',groupId:banking,hierarchyDepth:0,incoming:100,outgoing:0},
+  ...Array.from({length:8},(_,i)=>({id:'product-'+i,kind:'product',label:'Product '+i,ownerAccountId:'bank',groupId:banking,parentId:'root',hierarchyDepth:1,incoming:100,outgoing:0}))];
+ const groups=[{id:banking,role:'banking',accounts:[accounts[0]],count:1},{id:debt,role:'debt',accounts:[accounts[1]],count:1}];
+ const baseline=groupedLayout({nodes:accounts,edges:[],accountGroups:groups}),expanded=groupedLayout({nodes:[...accounts,...products],edges:[],accountGroups:groups});
+ const downstreamTop=expanded.bands.find(band=>band.id===debt).top,anchors={};
+ anchorGroupAndReclaim(expanded,anchors,debt);
+ assert.equal(anchors[debt],downstreamTop,'the user can anchor the downstream heading');
+ anchorGroupAndReclaim(expanded,anchors,banking);
+ assert.equal(anchors[debt],undefined,'folding its upstream collision discards the stale anchor');
+ const folded=groupedLayout({nodes:accounts,edges:[],accountGroups:groups},{anchors});
+ assert.equal(folded.bands.find(band=>band.id===debt).top,baseline.bands.find(band=>band.id===debt).top);
+ assert.equal(folded.height,baseline.height);
 });
