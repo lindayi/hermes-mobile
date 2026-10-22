@@ -11,6 +11,18 @@ test('transfer rows retain parent provenance separately from both signed endpoin
  assert.ok(all.rows.every(r=>r.transferEvidence==='Paired-link rationale'&&r.transferConfidence==='pair reviewed'&&r.transferProtectedBoundary===true));
  const one=C.createPager(members,api,'B');await one.more();assert.equal(one.rows.length,1);assert.equal(one.rows[0].amount,500);assert.equal(one.rows[0].evidence,'Credit source rationale');assert.equal(one.rows[0].transferEvidence,'Paired-link rationale');assert.equal(one.rows[0].transferProtectedBoundary,true);
 });
+test('transaction and transfer rows retain endpoint allocation and both protection fields',async()=>{
+const members=[{id:'p',selector:{endpoint:'transfers',filters:{}}}],api=async(endpoint)=>endpoint==='transactions'?{total:1,items:[{record_id:'t',account:'A',date:'2026-07-02',amount_minor:-500,currency:'CAD',allocation:'family',current_planning_protected:0,planning_protected:1}]}:{total:1,items:[{link_id:'l',link_type:'own',protected_boundary:true,debit:{record_id:'d',account:'A',date:'2026-07-02',amount_minor:-500,currency:'CAD',allocation:'family',planning_protected:1},credit:{record_id:'c',account:'B',date:'2026-07-03',amount_minor:500,currency:'CAD',allocation:'personal',current_planning_protected:0}}]};
+const transactionPager=C.createPager([{id:'t',selector:{endpoint:'transactions',filters:{}}}],api);await transactionPager.more();
+const transaction=transactionPager.rows[0];assert.deepEqual({allocation:transaction.allocation,current_planning_protected:transaction.current_planning_protected,planning_protected:transaction.planning_protected},{allocation:'family',current_planning_protected:0,planning_protected:1});
+const transferPager=C.createPager(members,api);await transferPager.more();
+assert.deepEqual(transferPager.rows.map(({allocation,current_planning_protected,planning_protected,transferProtectedBoundary})=>({allocation,current_planning_protected,planning_protected,transferProtectedBoundary})).sort((a,b)=>a.allocation.localeCompare(b.allocation)),[
+ {allocation:'family',current_planning_protected:undefined,planning_protected:1,transferProtectedBoundary:true},
+ {allocation:'personal',current_planning_protected:0,planning_protected:undefined,transferProtectedBoundary:true}
+]);
+const absent=C.createPager([{id:'absent',selector:{endpoint:'transactions',filters:{}}}],async()=>({total:1,items:[{record_id:'a',account:'A',date:'2026-07-02',amount_minor:0,currency:'CAD'}]}));await absent.more();
+assert.equal(absent.rows[0].allocation,undefined);assert.equal(absent.rows[0].current_planning_protected,undefined);assert.equal(absent.rows[0].planning_protected,undefined);
+});
 test('denial propagates, malformed or stalled pages never become empty success',async()=>{const api=C.makeAPI(async()=>({ok:false,status:401,json:async()=>({})}));await assert.rejects(()=>api('flow',{}),e=>e.status===401);const pager=C.createPager([{id:'x',selector:{endpoint:'transactions',filters:{}}}],async()=>({items:[],total:12}));await assert.rejects(()=>pager.more(),/page/i);assert.equal(pager.done,false);});
 test('per-record rationale and confidence stay separate from stream notes',async()=>{
  const pager=C.createPager([{id:'stream',evidenceNote:'Payroll link note',selector:{endpoint:'transactions',filters:{}}}],async()=>({items:[{...row('ordinary','A',-125),source_id:'synthetic-source',page:4,drive_url:'https://drive.google.com/file/synthetic',evidence:'Matched statement line',confidence:'reviewed'}],total:1}));

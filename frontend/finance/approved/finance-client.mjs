@@ -17,7 +17,7 @@ export function makeAPI(fetcher=globalThis.fetch.bind(globalThis)){
 function transaction(item,streamEvidenceNote=''){
  if(!item||typeof item!=='object'||!Number.isSafeInteger(item.amount_minor)||!['CAD','USD'].includes(item.currency))throw Error('Invalid transaction page');
  const id=item.entry_id||item.record_id;if(typeof id!=='string'||!id)throw Error('Missing transaction identity');
- return {id:(item.entry_id?'entry:':'record:')+id,date:item.date,account:item.account,amount:item.amount_minor,currency:item.currency,description:item.description||item.merchant||'Transaction',category:item.category_id||'',source:item.source_id,page:item.page,url:item.drive_url,record_id:item.record_id,recordBasis:item.recordBasis||'',evidence:item.evidence??item.rationale??'',confidence:item.confidence??null,evidenceNote:item.evidenceNote||'',streamEvidenceNote};
+ return {id:(item.entry_id?'entry:':'record:')+id,date:item.date,account:item.account,amount:item.amount_minor,currency:item.currency,description:item.description||item.merchant||'Transaction',category:item.category_id||'',source:item.source_id,page:item.page,url:item.drive_url,record_id:item.record_id,recordBasis:item.recordBasis||'',evidence:item.evidence??item.rationale??'',confidence:item.confidence??null,allocation:item.allocation,current_planning_protected:item.current_planning_protected,planning_protected:item.planning_protected,evidenceNote:item.evidenceNote||'',streamEvidenceNote};
 }
 export function createPager(members,api,account=''){
  const selectedAccounts=account?new Set(Array.isArray(account)?account:[account]):null;

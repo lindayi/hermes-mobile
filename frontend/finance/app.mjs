@@ -62,7 +62,7 @@ async function loadInspector(){
    if(token!==inspectorGeneration||viewToken!==generation||selection!==current)return;
    if(pager.done)current.offset=Math.min(current.offset,Math.max(0,Math.floor((pager.rows.length-1)/25)*25));
    const rows=pager.rows.slice(current.offset,current.offset+25),last=current.offset+rows.length;
-   const records=rows.map(row=>el('article',{class:'transaction-row','data-record-id':row.record_id},el('div',{class:'tx-top'},el('time',{},row.date||'Date unavailable'),el('strong',{class:'tx-amount'},money(row.amount,row.currency))),el('p',{class:'tx-description'},row.description),el('p',{class:'tx-account'},[row.account,row.side,row.category].filter(Boolean).join(' · ')),row.recordBasis?el('p',{class:'record-basis'},row.recordBasis):null,row.streamEvidenceNote?el('p',{class:'evidence-note'},row.streamEvidenceNote):null,row.evidenceNote?el('p',{class:'evidence-note'},row.evidenceNote):null,evidence({source_id:row.source,page:row.page,evidence:row.evidence,confidence:row.confidence,drive_url:row.url,transfer:row.transfer,transferEvidence:row.transferEvidence,transferConfidence:row.transferConfidence,transferProtectedBoundary:row.transferProtectedBoundary})));
+   const records=rows.map(row=>el('article',{class:'transaction-row','data-record-id':row.record_id},el('div',{class:'tx-top'},el('time',{},row.date||'Date unavailable'),el('strong',{class:'tx-amount'},money(row.amount,row.currency))),el('p',{class:'tx-description'},row.description),el('p',{class:'tx-account'},[row.account,row.side,row.category].filter(Boolean).join(' · ')),row.recordBasis?el('p',{class:'record-basis'},row.recordBasis):null,row.streamEvidenceNote?el('p',{class:'evidence-note'},row.streamEvidenceNote):null,row.evidenceNote?el('p',{class:'evidence-note'},row.evidenceNote):null,evidence({source_id:row.source,page:row.page,evidence:row.evidence,confidence:row.confidence,allocation:row.allocation,current_planning_protected:row.current_planning_protected,planning_protected:row.planning_protected,drive_url:row.url,transfer:row.transfer,transferEvidence:row.transferEvidence,transferConfidence:row.transferConfidence,transferProtectedBoundary:row.transferProtectedBoundary})));
    const matching=streams.find(stream=>stream.selector?.filters)?.selector?.filters;
    const forward=pager.rows.length>current.offset+25?button('Next page',()=>changePage(current.offset+25)):!pager.done?button('Load more records',()=>renderPage(true)):null;
    const streamCount=edge.count||streams.length;
@@ -99,9 +99,12 @@ function positionSummary(data){
 }
 function overview(data,flow){
  if(tab==='overview'){
+  const foreignEdges=array(flow?.foreignUnconverted?.edges),foreignNodes=array(flow?.foreignUnconverted?.nodes),foreignEvidence=foreignNodes.flatMap(node=>array(node.evidenceMembers));
+  const foreignMembers=[...new Map([...foreignEdges,...foreignEvidence].filter(edge=>edge&&typeof edge.id==='string').map(edge=>[mapEdgeKey(edge),edge])).values()];
   mapEdges.clear();
   for(const edge of array(flow?.edges))indexMapEdge(edge);
   for(const node of array(flow?.nodes))if(node.kind==='product-group')indexMapEdge(node);
+  for(const edge of foreignMembers)indexMapEdge(edge);
   const map=el('section',{class:'money-map panel',role:'region','aria-label':'Money map'});
   const title=el('div',{class:'panel-head'},el('span',{class:'eyebrow'},'EXPLORE / RECORDED MOVEMENTS'),el('h2',{},'Your money, in motion'),el('p',{class:'muted'},'Recorded flows across the selected period. Width shows movement, not a balanced budget.'));
   const chart=el('div',{class:'chart-scroll'});
@@ -110,15 +113,14 @@ function overview(data,flow){
   map.append(title,chart);
   if(flow?.unavailable){map.append(el('p',{class:'warning'},'Money map unavailable. This is not an empty ledger.'),button('Retry map',()=>load(true)));}
   else if(flow?.coverage?.complete===false)map.append(el('p',{class:'warning'},'Partial data · Some source movements are not shown.'));
-  if(flow?.foreignUnconverted?.edges?.length){
+  if(foreignMembers.length){
    map.append(el('p',{class:'warning'},'USD activity is shown separately because a dated conversion rate is unavailable. Original USD selectors and amounts remain unchanged.'));
-   const nodes=new Map(array(flow.foreignUnconverted.nodes).map(node=>[node.id,node])),details=el('details',{class:'foreign-unconverted'},el('summary',{},'Inspect original USD movements'));
-   for(const edge of flow.foreignUnconverted.edges){const label=edge.label||edge.displayLabel||`${nodes.get(edge.source)?.label||'USD activity'} → ${nodes.get(edge.target)?.label||'recorded destination'}`;details.append(button(`Inspect original USD movement · ${label} · ${money(edge.amount_minor,'USD')}`,()=>openInspector(edge),{class:'stream-member'}));}
+   const nodes=new Map(foreignNodes.map(node=>[node.id,node])),details=el('details',{class:'foreign-unconverted'},el('summary',{},'Inspect original USD movements'));
+   for(const edge of foreignMembers){const label=edge.label||edge.displayLabel||`${nodes.get(edge.source)?.label||'USD activity'} → ${nodes.get(edge.target)?.label||'recorded destination'}`;details.append(button(`Inspect original USD movement · ${label} · ${money(edge.amount_minor,'USD')}`,()=>openInspector(edge),{class:'stream-member'}));}
    map.append(details);
   }
   if(flow?.fx?.approximate)map.append(el('p',{class:'muted'},flow.fx.label+' · Original USD amounts and selectors remain available in details.'));
   if(flow?.notes?.length)map.append(el('details',{class:'secondary-details'},el('summary',{},'Coverage & interpretation'),...flow.notes.map(note=>el('p',{class:'muted'},note))));
-  for(const edge of array(flow?.foreignUnconverted?.edges))indexMapEdge(edge);
   if(!flow?.unavailable){sankeyViewInstance=sankeyView(target,flow||{nodes:[],edges:[],currency:query.currency,range:{start:query.start,end:query.end}},{inspect:edge=>{indexMapEdge(edge);openInspector(edge);}});if(pendingSankeyState){sankeyViewInstance.restore(pendingSankeyState);pendingSankeyState=null;}}
   content.append(map);
   const details=el('details',{'data-secondary':'',class:'secondary-details'},el('summary',{},'Financial position & cash-flow analysis'));

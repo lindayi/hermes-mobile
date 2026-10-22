@@ -121,3 +121,34 @@ test('edge inspector leaves map in place, pages exact selectors, closes and reve
  const transfer=page.locator('.money-sankey-stream-finder');if(!await transfer.evaluate(n=>n.open))await transfer.locator('summary').click();await transfer.getByLabel('Search exact movements').fill('Own cash');await transfer.getByRole('button',{name:/Inspect Own cash/}).first().click();await inspector.getByRole('button',{name:/Inspect Own cash/}).first().click();await inspector.locator('.transaction-row').first().waitFor();const transferRows=inspector.locator('.transaction-row');assert.equal(await transferRows.count(),2);assert.deepEqual((await transferRows.locator('.tx-amount').allTextContents()).sort(),[money(-100000,'CAD'),money(100000,'CAD')].sort());for(const row of await transferRows.all()){await row.locator('details.evidence > summary').click();const disclosure=row.locator('details.evidence');const text=await disclosure.innerText();assert.match(text,/Synthetic paired-link rationale/);assert.match(text,/Synthetic pair reviewed/);assert.match(text,/Protected boundary: Yes/);const id=await row.getAttribute('data-record-id'),side=id==='synthetic-debit'?'debit':'credit';assert.match(text,new RegExp(`Synthetic ${side} endpoint rationale`));assert.match(text,new RegExp(`Synthetic ${side} reviewed`));assert.equal(await disclosure.locator('a').getAttribute('href'),`https://drive.google.com/file/${side}`);}const pair=calls.filter(c=>c.name==='transfers').at(-1).q;assert.equal(pair.source_account,'Everyday account');assert.equal(pair.target_account,'Reserve account');assert.equal(pair.link_type,'own_cash');
  await page.getByRole('tab',{name:'Overview',exact:true}).click();await ready(page);assert.equal(await inspector.count(),0);
 });
+test('mounted transaction and paired-transfer inspection preserves endpoint classifications and pair protection separately',{timeout:30000},async t=>{
+ const {page,url,calls}=await fixture(t);
+ await page.route('**/finance/transactions?**',route=>{
+  const q=new URL(route.request().url()).searchParams;
+  if(q.get('category')!=='expense.food')return route.continue();
+  calls.push({name:'transactions',q:Object.fromEntries(q)});
+  return route.fulfill({json:{...common,items:[{entry_id:'allocation-food',record_id:'allocation-food',date:'2024-08-01',account:'Everyday account',description:'Synthetic family allocation',category_id:'expense.food',amount_minor:-1000,currency:'CAD',source_id:'allocation-food-source',drive_url:'https://drive.google.com/file/endpoint',evidence:'Synthetic endpoint rationale',confidence:'Endpoint reviewed',allocation:'family',planning_protected:1}],total:1,limit:50,offset:0}});
+ });
+ await page.route('**/finance/transfers?**',route=>{
+  const q=new URL(route.request().url()).searchParams;calls.push({name:'transfers',q:Object.fromEntries(q)});
+  return route.fulfill({json:{...common,items:[{link_id:'allocation-pair',link_type:'own_cash',evidence:'Synthetic pair rationale',confidence:'Pair reviewed',protected_boundary:true,debit:{record_id:'allocation-debit',account:'Everyday account',date:'2024-08-01',amount_minor:-1000,currency:'CAD',source_id:'debit-source',drive_url:'https://drive.google.com/file/debit',evidence:'Synthetic debit rationale',confidence:'Debit reviewed',allocation:'family',planning_protected:1},credit:{record_id:'allocation-credit',account:'Reserve account',date:'2024-08-02',amount_minor:1000,currency:'CAD',source_id:'credit-source',drive_url:'https://drive.google.com/file/credit',evidence:'Synthetic credit rationale',confidence:'Credit reviewed',allocation:'personal',current_planning_protected:0}}],total:1,limit:50,offset:0}});
+ });
+ await page.goto(url);await readySankey(page);
+ const filters=page.locator('.filter-options');if(!await filters.evaluate(node=>node.open))await filters.locator('summary').click();
+ await page.locator('#filters').getByLabel('Scope').selectOption('all');await page.locator('#filters').locator('select[name="account"]').selectOption('Everyday account');await page.getByRole('button',{name:'Apply filters'}).click();await readySankey(page);
+ const transactions=await inspectExact(page,'Everyday account → Food','Everyday account → Food');
+ const txrow=transactions.locator('.transaction-row').first();await txrow.locator('details.evidence > summary').click();
+ let details=txrow.locator('details.evidence'),text=await details.innerText();
+ assert.match(text,/Allocation: family/);assert.match(text,/Protected: 1/);assert.match(text,/Synthetic endpoint rationale/);assert.equal(await txrow.locator('details.evidence a').getAttribute('href'),'https://drive.google.com/file/endpoint');
+ assert.equal(calls.filter(call=>call.name==='transactions').at(-1).q.scope,'all');assert.equal(calls.filter(call=>call.name==='transactions').at(-1).q.account,'Everyday account');
+ await page.getByRole('button',{name:'Close inspector',exact:true}).click();
+ const finder=page.locator('.money-sankey-stream-finder');if(!await finder.evaluate(node=>node.open))await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Own cash');await finder.getByRole('button',{name:/Inspect/}).first().click();
+ const transfer=inspector(page);await transfer.locator('button.stream-member').first().click();await transfer.locator('.transaction-row').first().waitFor();const rows=transfer.locator('.transaction-row');assert.equal(await rows.count(),2);
+ assert.deepEqual((await rows.locator('.tx-amount').allTextContents()).sort(),['-CAD 10.00','CAD 10.00'].sort());
+ const debit=transfer.locator('.transaction-row[data-record-id="allocation-debit"]');assert.equal(await debit.count(),1);await debit.locator('details.evidence > summary').click();text=await debit.locator('details.evidence').innerText();
+ assert.match(text,/Allocation: family/);assert.match(text,/Protected: 1/);assert.match(text,/Rationale: Synthetic pair rationale/);assert.match(text,/Confidence: Pair reviewed/);assert.match(text,/Protected boundary: Yes/);assert.match(text,/Synthetic debit rationale/);
+ assert.equal(await debit.locator('details.evidence a').getAttribute('href'),'https://drive.google.com/file/debit');
+ const credit=transfer.locator('.transaction-row[data-record-id="allocation-credit"]');assert.equal(await credit.count(),1);await credit.locator('details.evidence > summary').click();text=await credit.locator('details.evidence').innerText();
+ assert.match(text,/Allocation: personal/);assert.match(text,/Protected: 0/);assert.match(text,/Synthetic credit rationale/);assert.match(text,/Protected boundary: Yes/);
+ assert.equal(calls.filter(call=>call.name==='transfers').at(-1).q.account,'Everyday account');
+});

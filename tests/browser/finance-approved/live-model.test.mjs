@@ -24,6 +24,22 @@ const byMember = (p, id) => p.edges.find(e => !e.decomposition && e.members.some
 const nodeAt = (p, id) => p.nodes.find(n => n.id === id);
 const ids = members => members.map(m => m.id).sort();
 
+test('combined CAD and converted USD categories keep native-currency labels distinct',()=>{
+  const cad=account('cad'),usd=account('usd');
+  const raw={currency:'CAD',nodes:[cad,usd,
+    {id:'cad-food',label:'Food',kind:'expense'},
+    {id:'usd-food',label:'Food (USD)',kind:'expense'}],
+    edges:[
+      {id:'cad-expense',source:'cad',target:'cad-food',kind:'expense',amount_minor:1000,currency:'CAD',count:1,selector:{endpoint:'transactions',filters:{currency:'CAD',category:'expense.food',category_mode:'exact'}}},
+      {id:'usd-expense',source:'usd',target:'usd-food',kind:'expense',amount_minor:2000,currency:'CAD',originalCurrency:'USD',count:1,selector:{endpoint:'transactions',filters:{currency:'USD',category:'expense.food',category_mode:'exact'}}}
+    ]};
+  const projection=adapter.createModel(raw).project();
+  const categories=projection.nodes.filter(node=>node.kind==='expense'&&node.categoryPath==='expense.food');
+  assert.deepEqual(categories.map(node=>node.label).sort(),['Food','Food (USD)']);
+  assert.deepEqual(categories.map(node=>node.value).sort((a,b)=>a-b),[1000,2000]);
+  assert.deepEqual(categories.map(node=>node.incoming).sort((a,b)=>a-b),[1000,2000]);
+});
+
 test('split category values deduplicate originals independently of decomposition geometry', () => {
   const { raw, tx } = fixture();
   tx('purchase', 'expense', 'expense.food.shop.fresh', 10000);

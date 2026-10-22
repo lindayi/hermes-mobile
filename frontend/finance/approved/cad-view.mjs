@@ -49,7 +49,7 @@ export async function loadCADQuarter(api,query,signal){
  summary.net=summary.income-summary.spending;
  return {...cad,meta,coverage,warnings,nodes:[...cad.nodes,...foreign.nodes],edges:[...cad.edges,...foreign.edges],summary,originalUSD:usd,foreignUnconverted:null,fx:{...fx,approximate:true,label:equivalentLabel(fx)},notes:[...cad.notes,...usdNotes.map(note=>'USD: '+note),'USD: '+equivalentLabel(fx)+'. Original USD evidence is unchanged.']};
 }
-function equivalentLabel(fx){return 'Approximate CAD equivalent at rate date '+fx.as_of+(fx.status==='stale'?' (stale rate)':'');}
+function equivalentLabel(fx){return `Approximate CAD equivalent at USD/CAD ${fx.rate} from ${fx.source} as of ${fx.as_of}`+(fx.status==='stale'?' (stale rate)':'');}
 function usableFX(fx){
  return fx?.pair==='USDCAD'&&['ok','stale'].includes(fx.status)&&typeof fx.rate==='number'&&Number.isFinite(fx.rate)&&fx.rate>0&&/^\d{4}-\d{2}-\d{2}$/.test(fx.as_of)&&Number.isFinite(Date.parse(fx.as_of))&&new Date(fx.as_of).toISOString().slice(0,10)===fx.as_of&&typeof fx.source==='string'&&fx.source.length>0;
 }

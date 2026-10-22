@@ -85,6 +85,7 @@ test('converted CAD movement keeps its original USD selector and signed evidence
   return route.fulfill({json:{...common,items:[{record_id:'usd-original-record',date:'2026-08-02',account:'Fixture cash',description:'Original signed USD posting',amount_minor:-12345,currency:'USD',source_id:'usd-source'}],total:1,limit:50,offset:0}});
  });
  await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ await page.locator('.money-map > p.muted').filter({hasText:/USD\/CAD.*1\.25.*Synthetic Bank of Canada fixture.*2026-10-01/}).waitFor();
  assert.ok(await page.locator('.money-sankey .sankey-link').count());
  const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();
  await finder.getByLabel('Search exact movements').fill('cash');
@@ -94,6 +95,37 @@ test('converted CAD movement keeps its original USD selector and signed evidence
  await inspector.getByText('Original signed USD posting',{exact:true}).waitFor();
  assert.equal(evidenceQuery.get('currency'),'USD');
  assert.equal((await inspector.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'-USD 123.45');
+});
+test('zero-cash USD evidence remains inspectable without FX or movement edges and rebinds on Refresh and Back',{timeout:30000},async t=>{
+  const {page,url,calls}=await fixture(t);
+  await page.route('**/finance/flow?**',route=>{
+    const q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+    return route.fulfill({json:{...common,currency,range:{start:q.get('start'),end:q.get('end')},nodes:[],edges:[],coverage:{complete:true}}});
+  });
+  await page.route('**/finance/investments?**',route=>{
+    const q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+    const cashflows=currency==='USD'?[{event_id:'zero-usd',account:'Fixture investments',security_key:'SYNTHETIC',classification:'buy',cash_amount_minor:0,currency:'USD',date:'2026-08-03'}]:[];
+    return route.fulfill({json:{...common,balances:[],history:[],holdings:[],cashflows,coverage:{cashflows:{complete:true}}}});
+  });
+  await page.route('**/finance/transactions?**',route=>{
+    const q=new URL(route.request().url()).searchParams;calls.push({name:'transactions',query:Object.fromEntries(q)});
+    return route.fulfill({json:{...common,items:[{entry_id:'zero-usd',record_id:'investment:zero-usd',date:'2026-08-03',account:'Fixture investments',description:'Zero-cash USD trade evidence',category_id:'investment.trade.buy',amount_minor:0,currency:'USD',source_id:'zero-usd-source'}],total:1,limit:50,offset:Number(q.get('offset')||0)}});
+  });
+  await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+  assert.equal(await page.locator('.money-sankey .sankey-link[data-edge]').count(),0);
+  const details=page.locator('.foreign-unconverted');await details.locator('summary').waitFor();
+  await details.locator('summary').click();
+  const inspect=()=>details.getByRole('button').first();
+  await inspect().click();
+  const panel=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+  await panel.getByText('Zero-cash USD trade evidence',{exact:true}).waitFor();
+  assert.equal((await panel.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'USD 0.00');
+  assert.deepEqual(calls.at(-1).query,{start:lastQuarter().start,end:lastQuarter().end,currency:'USD',scope:'personal',dataset:'investment',account:'Fixture investments',category:'investment.trade.buy',category_mode:'exact',flow:'investment',record_id:'investment:zero-usd',offset:'0',limit:'50'});
+  await page.getByRole('button',{name:'Refresh data',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+  await panel.getByText('Zero-cash USD trade evidence',{exact:true}).waitFor();
+  await page.getByRole('tab',{name:'Cash flow',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+  await page.getByRole('button',{name:'Back',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+  await page.getByRole('complementary',{name:'Flow inspector',exact:true}).getByText('Zero-cash USD trade evidence',{exact:true}).waitFor();
 });
 test('a zero-cash purchase beside a sale is findable and opens its exact original record',{timeout:30000},async t=>{
  const {page,url,calls}=await fixture(t);

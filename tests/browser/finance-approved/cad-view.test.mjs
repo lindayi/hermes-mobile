@@ -23,7 +23,7 @@ test('CAD-first merge namespaces USD graph, keeps original evidence and sends ev
  assert.deepEqual(edge.selector,usd.edges[0].selector);assert.ok(result.nodes.some(n=>n.id===edge.source&&n.label.endsWith('(USD)')&&n.account==='Synthetic broker'&&n.currency==='CAD'&&n.approximate===true));
  assert.deepEqual(result.originalUSD.edges[0].selector,usd.edges[0].selector);assert.equal(result.originalUSD.edges[0].amount_minor,12);assert.equal(result.originalUSD.currency,'USD');
  assert.equal(result.summary.spending,0);assert.equal(result.summary.income,0);assert.equal(result.foreignUnconverted,null);
- assert.equal(result.fx.as_of,fx.as_of);assert.match(result.fx.label,/CAD equivalent at rate date/);
+ assert.equal(result.fx.as_of,fx.as_of);assert.match(result.fx.label,/USD\/CAD.*1\.125.*synthetic.*2026-08-31/);
  for(const currency of ['CAD','USD'])for(const endpoint of ['flow','investments','compensation'])assert.deepEqual(svc.calls.find(c=>c.endpoint===endpoint&&c.q.currency===currency).q,{...query,currency});
  assert.deepEqual(svc.calls.find(c=>c.endpoint==='quotes').q,{});assert.ok(svc.calls.every(c=>c.signal===controller.signal));
  assert.deepEqual(usd,sample('USD'));
@@ -106,7 +106,7 @@ test('converted members still inspect signed original USD rows, inline evidence 
 test('stale FX stays explicitly stale and dated, never presented as a historical quarter rate',async()=>{
  const stale={...fx,status:'stale',as_of:'2026-11-02'};
  const result=await CAD.loadCADQuarter(service(sample('CAD',[]),sample('USD'),{fx:stale}).api,query);
- assert.equal(result.fx.as_of,'2026-11-02');assert.equal(result.fx.status,'stale');assert.match(result.fx.label,/stale/i);
+ assert.equal(result.fx.as_of,'2026-11-02');assert.equal(result.fx.status,'stale');assert.match(result.fx.label,/USD\/CAD.*1\.125.*synthetic.*2026-11-02.*stale/i);
  assert.match(result.notes.join(' '),/stale/i);assert.equal(result.edges[0].amount_minor,14);
  assert.match(CAD.presentationEquivalent({amount:12,currency:'USD'},stale).label,/stale/i);
 });
@@ -118,7 +118,7 @@ test('presentation equivalent rounds signed minor units exactly and never rewrit
  assert.equal(eq.amount_minor,-14);assert.equal(eq.currency,'CAD');assert.equal(eq.approximate,true);
  assert.equal(eq.originalCurrency,'USD');assert.equal(eq.originalAmountMinor,-12);
  assert.equal(eq.as_of,fx.as_of);assert.equal(eq.rate,fx.rate);
- assert.match(eq.label,/CAD equivalent at rate date 2026-08-31/);
+ assert.match(eq.label,/USD\/CAD.*1\.125.*synthetic.*2026-08-31/);
  assert.equal(row.amount,-12);assert.equal(row.currency,'USD');
  assert.equal(CAD.presentationEquivalent({amount_minor:12,currency:'USD'},fx).amount_minor,14);
  assert.equal(CAD.presentationEquivalent(row,{...fx,rate:1.005}).amount_minor,-12);

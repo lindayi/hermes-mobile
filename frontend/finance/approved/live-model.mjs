@@ -127,7 +127,7 @@ export function createModel(raw) {
       const chain = [];
       for (let depth = root.split('.').length; depth <= segments.length; depth++) {
         const categoryPath = segments.slice(0, depth).join('.');
-        const identity = ['live-category', displayKind, categoryPath, ...(recovery ? [member.target] : investment || !['expense'].includes(member.kind) ? [direction > 0 ? 'inflow' : 'outflow'] : [])];
+        const identity = ['live-category', displayKind, categoryPath, ...(recovery ? [member.target] : investment || !['expense'].includes(member.kind) ? [direction > 0 ? 'inflow' : 'outflow'] : []), ...(member.originalCurrency ? ['native-currency', member.originalCurrency] : [])];
         let ident = key(...identity);
         for (let salt = 1; inputNodes.has(ident); salt++) ident = key(...identity, salt);
         const exact = categoryPath === path;
