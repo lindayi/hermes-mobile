@@ -41,7 +41,7 @@ async function goBack(){const state=history.pop();if(!state)return;closeInspecto
 function closeInspector(record=true){if(record&&selection)remember();inspectorGeneration++;inspectorController?.abort();const id=selection?.edge.id;selection=null;document.querySelectorAll('.flow-inspector').forEach(node=>node.remove());const target=[...document.querySelectorAll('[data-edge]')].find(node=>node.dataset.edge===id)||document.querySelector('.money-sankey .sankey-link.is-selected');for(const node of document.querySelectorAll('[data-edge]'))node.removeAttribute('aria-pressed');if(record)target?.focus({preventScroll:true});}
 function openInspector(edge){if(!edge?.aggregateSelection&&!evidenceStreams(edge).length)return;remember();selection={edge:structuredClone(edge),offset:0};loadInspector();}
 async function loadInspector(){
- inspectorController?.abort();inspectorController=new AbortController();const token=++inspectorGeneration,viewToken=generation;
+ inspectorController?.abort();inspectorController=new AbortController();const inspectorSignal=inspectorController.signal,token=++inspectorGeneration,viewToken=generation;
  document.querySelectorAll('.flow-inspector').forEach(node=>node.remove());if(!selection)return;
  let current=selection,edge=currentSelectionEdge(current.edge);if(!edge){closeInspector(false);return;}selection.edge=edge;current=selection;
  if(edge.aggregateSelection)current.offset=Math.min(current.offset,Math.max(0,Math.floor((edge.members.length-1)/25)*25));
@@ -54,8 +54,8 @@ async function loadInspector(){
   try{
    if(!pager.done&&(loadMore||pager.rows.length<current.offset+25)){
     const target=current.offset+25;
-    for(let batch=0;batch<target&&!pager.done&&pager.rows.length<target;batch++){
-     await pager.more(inspectorController.signal);
+    for(let batch=0;batch<target&&!pager.done&&(loadMore&&batch===0||pager.rows.length<target);batch++){
+     await pager.more(inspectorSignal);
      if(token!==inspectorGeneration||viewToken!==generation||selection!==current)return;
     }
    }
