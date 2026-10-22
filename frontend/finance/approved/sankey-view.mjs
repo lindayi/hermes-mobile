@@ -54,7 +54,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
    const wanted=new Set(selection.memberIds),found=new Map();
    const visit=member=>{if(!member||found.has(member.id))return;if(wanted.has(member.id))found.set(member.id,member);for(const nested of member.members||[])visit(nested);};
    for(const edge of [...p.edges,...p.internalEdges])for(const member of edge.members||[])visit(member);
-    for(const member of groupSelection(p,selection.group)?.evidenceMembers||[])visit(member);
+   for(const node of raw.nodes)for(const member of node.evidenceMembers||[])visit(member);
    return [...found.values()];
   }
   return selectionMembers(selection.view||p,selection);
@@ -70,7 +70,12 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   const modes=[['accounts','Accounts'],['spending','Spending'],['categories','All categories']];
   exploreTabs.replaceChildren(...modes.map(([id,label])=>{const tab=control(label,()=>{exploreMode=id;renderExplore();},label);tab.setAttribute('role','tab');tab.setAttribute('aria-selected',String(id===exploreMode));return tab;}));
   const list=[];
-  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.groupId===group.id))list.push(control(node.label,()=>{const members=[...new Map([...p.edges,...p.internalEdges].flatMap(edge=>edge.members||[]).filter(member=>member.source===node.id||member.target===node.id).map(member=>[member.id,member])).values()];select({memberIds:members.map(member=>member.id),label:node.label});open(members);},`Inspect account ${node.label}`));
+  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.kind==='account'&&n.groupId===group.id))list.push(control(node.label,()=>{
+   const movements=[...p.edges,...p.internalEdges].flatMap(edge=>edge.members||[]).filter(member=>member.source===node.id||member.target===node.id);
+   const evidence=raw.nodes.filter(item=>item.id===node.id||item.ownerAccountId===node.id).flatMap(item=>item.evidenceMembers||[]);
+   const members=[...new Map([...movements,...evidence].map(member=>[member.id,member])).values()];
+   select({memberIds:members.map(member=>member.id),label:node.label});open(members);
+  },`Inspect account ${node.label}`));
   if(exploreMode==='spending')for(const row of ranked(p)){
    const currency=raw.currency,fmt=value=>new Intl.NumberFormat('en-CA',{style:'currency',currency}).format(value/100);
    const button=control(`${row.label} · ${fmt(row.net)} net`,()=>{select({edges:row.edges.map(edge=>edge.id),label:row.label});open(row.edges);},`Inspect net spending ${row.label} · gross ${fmt(row.gross)} · refunds ${fmt(row.offset)}`);

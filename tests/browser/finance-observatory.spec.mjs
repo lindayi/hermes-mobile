@@ -408,7 +408,7 @@ test('Back and refresh rebuild inspector selection from current stream identitie
 test('zero-cash investment evidence creates an owner from an empty API graph',{timeout:30000},async t=>{
  const {page,url,calls}=await fixture(t);
  await page.route('**/finance/flow?**',route=>{const q=new URL(route.request().url()).searchParams;return route.fulfill({json:{...common,currency:q.get('currency'),range:{start:q.get('start'),end:q.get('end')},nodes:[],edges:[],coverage:{complete:true}}});});
- await page.route('**/finance/investments?**',route=>{const q=new URL(route.request().url()).searchParams;const cashflows=q.get('currency')==='CAD'?[{event_id:'empty-graph-zero',account:'Fixture orphan investment',security_key:'ZERO_ONLY',classification:'buy',cash_amount_minor:0,currency:'CAD',date:'2026-08-03'}]:[];return route.fulfill({json:{...common,balances:[],history:[],holdings:[],cashflows,coverage:{cashflows:{complete:true}}}});});
+ await page.route('**/finance/investments?**',route=>{const q=new URL(route.request().url()).searchParams;const cashflows=q.get('currency')==='CAD'?[{event_id:'empty-graph-zero',account:'Fixture orphan investment',security_key:'ZERO_ONLY',classification:'buy',cash_amount_minor:0,currency:'CAD',date:'2026-08-03'},{event_id:'other-zero',account:'Other fixture investment',security_key:'OTHER_ZERO',classification:'buy',cash_amount_minor:0,currency:'CAD',date:'2026-08-03'}]:[];return route.fulfill({json:{...common,balances:[],history:[],holdings:[],cashflows,coverage:{cashflows:{complete:true}}}});});
  await page.route('**/finance/transactions?**',route=>{const query=Object.fromEntries(new URL(route.request().url()).searchParams);calls.push({name:'transactions',query});return route.fulfill({json:{...common,items:[{record_id:'investment:empty-graph-zero',entry_id:'empty-graph-zero',account:'Fixture orphan investment',date:'2026-08-03',description:'Zero-cash source evidence',category_id:'investment.trade.buy',amount_minor:0,currency:'CAD'}],total:1,limit:50,offset:0}});});
  await page.goto(url);await page.locator('.money-sankey').waitFor();await page.getByText('No recorded movements match these filters.',{exact:true}).waitFor();
  await page.locator('.money-sankey-controls [data-group-select]').filter({hasText:'Investments'}).click();
@@ -417,6 +417,17 @@ test('zero-cash investment evidence creates an owner from an empty API graph',{t
  await inspector.getByText('Zero-cash source evidence',{exact:true}).waitFor();
  const query=calls.findLast(call=>call.name==='transactions').query;
  assert.equal(query.record_id,'investment:empty-graph-zero');assert.equal(query.account,'Fixture orphan investment');assert.equal(query.category,'investment.trade.buy');assert.equal(query.flow,'investment');assert.equal(query.dataset,'investment');assert.equal(query.scope,'personal');assert.equal(query.currency,'CAD');
+ await inspector.getByRole('button',{name:'Close inspector',exact:true}).click();
+ const explorer=page.locator('.money-sankey-explore');await explorer.locator('summary').click();await explorer.getByRole('tab',{name:'Accounts',exact:true}).click();
+ await explorer.getByRole('button',{name:'Inspect account Fixture orphan investment',exact:true}).click();
+ assert.equal(await inspector.count(),1,'an account with zero-cash evidence must open inspection');
+ assert.equal(await inspector.getByRole('button',{name:/OTHER_ZERO/}).count(),0,'account selection excludes sibling account evidence');
+ await inspector.getByRole('button',{name:/Inspect Zero-cash buy · ZERO_ONLY/}).click();await inspector.getByText('Zero-cash source evidence',{exact:true}).waitFor();
+ assert.equal(calls.findLast(call=>call.name==='transactions').query.record_id,'investment:empty-graph-zero');
+ assert.equal(await explorer.getByRole('button',{name:/^Inspect account /}).count(),2,'Accounts lists accounts, not their product groups');
+ const refreshed=page.waitForResponse(response=>{const url=new URL(response.url());return url.pathname.endsWith('/finance/transactions')&&url.searchParams.get('record_id')==='investment:empty-graph-zero';});
+ await page.getByRole('button',{name:'Refresh data',exact:true}).click();await refreshed;await inspector.getByText('Zero-cash source evidence',{exact:true}).waitFor();
+ assert.equal(calls.findLast(call=>call.name==='transactions').query.account,'Fixture orphan investment');
 });
 test('same backend flow IDs retain native CAD and USD evidence across selection order and Back',{timeout:45000},async t=>{
  const {page,url,calls}=await fixture(t);
