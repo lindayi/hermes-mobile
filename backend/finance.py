@@ -90,6 +90,7 @@ class Filters(BaseModel):
     transfer_status: Literal['matched', 'unmatched'] | None = None
     flow: Literal['income', 'expense', 'transfer', 'investment', 'financing', 'adjustment', 'unresolved'] | None = None
     vesting_policy: Literal['horizon', 'range'] = 'horizon'
+    payroll_id: str | None = Field(default=None, max_length=200)
     dataset: Literal['bank', 'investment', 'all'] = 'all'
     q: str = Field(default='', max_length=120)
     record_id: str | None = Field(default=None, max_length=200)
@@ -528,9 +529,13 @@ def query_compensation(db, f):
         where += ' AND payroll_id IN (SELECT l.payroll_id FROM payroll_component_links l JOIN hierarchical_transactions t ON t.tx_id=l.tx_id OR t.event_id=l.event_id WHERE t.account=?)'
         args.append(f.account)
     result['payroll'], result['coverage']['payroll'] = select_bounded(db, 'payroll_cashflow_bridge', PAYROLL_FIELDS, where, args, 'ORDER BY pay_date DESC,payroll_id')
-    selected_payroll_id = result['payroll'][0]['payroll_id'] if result['payroll'] else None
+    payroll_ids = {row['payroll_id'] for row in result['payroll']}
+    if f.payroll_id is not None:
+        selected_payroll_id = f.payroll_id if f.payroll_id in payroll_ids else None
+    else:
+        selected_payroll_id = result['payroll'][0]['payroll_id'] if result['payroll'] else None
     result['coverage']['selected_payroll_id'] = selected_payroll_id
-    result['warnings'].append('Components and links cover only the selected payroll sample (newest pay date, then payroll ID); the payroll list retains bounded reference history.')
+    result['warnings'].append('Components and links cover only the selected payroll sample (the requested payroll ID when supplied; otherwise newest pay date, then payroll ID); the payroll list retains bounded reference history.')
     for key, table, fields in (
         ('components','payroll_components','payroll_id code kind amount_minor ytd_minor cash_effect_minor'),
         ('links','payroll_component_links','payroll_id code tx_id event_id status evidence'),

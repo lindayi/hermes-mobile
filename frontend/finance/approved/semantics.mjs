@@ -8,7 +8,7 @@ export async function loadQuarter(api,query,signal){
  const pays=(compensation.payroll||[]).filter(p=>p.currency===raw.currency&&inRange(p.pay_date,raw.range));
  const payrollDetails=await boundedMap(pays,async p=>{
   if(p.payroll_id===compensation.coverage?.selected_payroll_id)return compensation;
-  try{const detail=await api('compensation',{...query,start:p.pay_date,end:p.pay_date},signal);signal?.throwIfAborted();return detail;}
+  try{const detail=await api('compensation',{...query,start:p.pay_date,end:p.pay_date,payroll_id:p.payroll_id},signal);signal?.throwIfAborted();return detail;}
   catch(e){if([401,403].includes(e.status)||e.name==='AbortError')throw e;unavailable.push('Payslip detail unavailable: '+p.pay_date);return {};}
  },signal);
  const records={},refs=new Map();

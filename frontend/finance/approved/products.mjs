@@ -66,7 +66,7 @@ export function enrichProducts(input, { investments = {}, filters = {} } = {}) {
     &&typeof row.security_key==='string'&&row.security_key.length>0&&typeof row.date==='string'
     &&row.currency===raw.currency&&eligibleCurrency&&eligibleDataset
     &&(!filters.account||filters.account===row.account)&&(!filters.flow||filters.flow==='investment')
-    &&(!filters.direction)&&(!filters.category||filters.category===`investment.trade.${row.classification}`)
+    &&(!filters.direction)&&(filters.category==null||(typeof filters.category==='string'&&(filters.category_mode==='exact'?filters.category===`investment.trade.${row.classification}`:`investment.trade.${row.classification}`.startsWith(filters.category))))
     &&(!filters.record_id||filters.record_id==='investment:'+row.event_id)&&!filters.q&&inRange(row.date,{start,end}));
   const zeroCounts=new Map();
   for(const row of zeroRows){const key=JSON.stringify([row.account,row.currency,row.event_id]);zeroCounts.set(key,(zeroCounts.get(key)||0)+1);}
@@ -90,7 +90,7 @@ export function enrichProducts(input, { investments = {}, filters = {} } = {}) {
     const recordId='investment:'+row.event_id;
     const selectorFilters={...filters,account:row.account,currency:row.currency,dataset:'investment',category:`investment.trade.${row.classification}`,category_mode:'exact',flow:'investment',record_id:recordId};
     delete selectorFilters.direction;delete selectorFilters.q;
-    const evidenceMember={id:id('zero-evidence',account.id,row.currency,row.event_id),kind:'investment',label:'Zero-cash '+row.classification+' · '+row.security_key,currency:row.currency,amount_minor:0,evidenceNote:'Zero-cash source entry; no flow or holding value inferred.',selector:{endpoint:'transactions',filters:selectorFilters}};
+    const evidenceMember={id:id('zero-evidence',row.account,row.currency,row.event_id),kind:'investment',label:'Zero-cash '+row.classification+' · '+row.security_key,currency:row.currency,amount_minor:0,evidenceNote:'Zero-cash source entry; no flow or holding value inferred.',selector:{endpoint:'transactions',filters:selectorFilters}};
     owner.evidenceMembers=[...new Map([...(owner.evidenceMembers??[]),evidenceMember].map(member=>[member.id,member])).values()];
     product.evidenceMembers=[...new Map([...(product.evidenceMembers??[]),evidenceMember].map(member=>[member.id,member])).values()];
   }

@@ -152,7 +152,7 @@ function compensation(data,token){
  const detailVersion=++payrollDetailVersion;payrollDetailController?.abort();payrollDetailController=new AbortController();
  paycheckDetails.replaceChildren(el('p',{class:'muted'},`Selected ${pay.pay_date} · ${pay.currency}.`),el('p',{class:'muted'},'Loading this payslip’s source detail…'));
  try{
-  const detail=data.coverage?.selected_payroll_id===pay.payroll_id?data:await api('compensation',{...query,start:pay.pay_date,end:pay.pay_date},payrollDetailController.signal);
+  const detail=data.coverage?.selected_payroll_id===pay.payroll_id?data:await api('compensation',{...query,start:pay.pay_date,end:pay.pay_date,payroll_id:pay.payroll_id},payrollDetailController.signal);
   if(detailVersion!==payrollDetailVersion||token!==generation||selectedPayrollId!==pay.payroll_id)return;
   const source=detail.payroll?.find(row=>row.payroll_id===pay.payroll_id),payComponents=array(detail.components).filter(row=>row.payroll_id===pay.payroll_id);
   if(detail.coverage?.selected_payroll_id!==pay.payroll_id||!source){paycheckDetails.replaceChildren(el('p',{class:'warning'},'This payslip’s detailed source record is unavailable. No newer pay details are shown in its place.'),table('Selected payslip',[['Pay date','pay_date'],['Period end','period_end'],['Gross',r=>amount(r,'gross_minor')],['Bank net',r=>amount(r,'net_minor')],['Reconciliation difference',r=>amount(r,'net_difference_minor')],['Evidence',evidence]],[pay]));return;}

@@ -30,7 +30,7 @@ function fakeAPI(f,override=()=>undefined){
   try{await new Promise(resolve=>setTimeout(resolve,1));const replacement=await override(endpoint,query);if(replacement!==undefined)return replacement;
    if(endpoint==='flow')return f.raw;
    if(endpoint==='investments')return {};
-   if(endpoint==='compensation')return query.start===query.end?f.payrollDetails.find(d=>d.payroll[0].pay_date===query.start):f.compensation;
+   if(endpoint==='compensation')return query.start===query.end?(f.payrollDetails.find(d=>d.payroll[0].payroll_id===query.payroll_id)||f.payrollDetails.find(d=>d.payroll[0].pay_date===query.start)):f.compensation;
    if(endpoint==='transactions'){const items=f.records[query.record_id]||[];return {items,total:items.length};}
    throw Error('Unexpected endpoint');
   }finally{active--;}
@@ -50,6 +50,21 @@ test('loader collects every selected-period payslip and outside-period linked ev
  const tx=client.calls.filter(c=>c.endpoint==='transactions');assert.equal(tx.length,18);
  assert.ok(tx.every(c=>c.query.limit===100&&c.query.offset===0&&c.query.start===c.query.end));
  assert.equal(tx.filter(c=>c.query.start==='2026-10-08').length,2,'October rows are evidence, not Q3 cash');
+});
+
+test('same-date payslips request and retain detail by payroll ID',async()=>{
+ const f=fixture(),sameDate='2026-08-12';
+ for(const id of ['synthetic-0','synthetic-1']){
+  const detail=f.payrollDetails.find(item=>item.payroll[0].payroll_id===id);
+  detail.payroll[0].pay_date=sameDate;
+  f.compensation.payroll.find(item=>item.payroll_id===id).pay_date=sameDate;
+ }
+ const client=fakeAPI(f),out=await loadQuarter(client.api,{...f.raw.range,currency:'CAD',scope:'personal'});
+ const detailCalls=client.calls.filter(call=>call.endpoint==='compensation'&&call.query.start===sameDate&&call.query.end===sameDate);
+ assert.deepEqual(detailCalls.map(call=>call.query.payroll_id).sort(),['synthetic-0','synthetic-1']);
+ assert.equal(out.payrollCoverage.detailed,6);
+ assert.equal(out.edges.filter(edge=>edge.payrollBridge&&edge.payroll_id==='synthetic-1').length>0,true,'The second same-date payslip keeps its own breakdown');
+ assert.ok(out.edges.some(edge=>edge.payroll_id==='synthetic-1'&&edge.inlineRows?.some(row=>row.recordBasis==='Payslip component'&&row.date===sameDate)));
 });
 
 test('per-pay authorization failures and aborts propagate rather than returning partial finance',async()=>{

@@ -3,7 +3,7 @@ export function lastQuarter(now=new Date()){
  const year=Number(parts.year),month=Number(parts.month),quarterStart=Math.floor((month-1)/3)*3;
  return {start:new Date(Date.UTC(year,quarterStart-3,1)).toISOString().slice(0,10),end:new Date(Date.UTC(year,quarterStart,0)).toISOString().slice(0,10)};
 }
-const allowed=new Set(['start','end','currency','scope','dataset','account','category','category_mode','direction','source_account','target_account','link_type','transfer_status','flow','record_id','q','limit','offset','vesting_policy']);
+const allowed=new Set(['start','end','currency','scope','dataset','account','category','category_mode','direction','source_account','target_account','link_type','transfer_status','flow','record_id','q','limit','offset','vesting_policy','payroll_id']);
 export function makeAPI(fetcher=globalThis.fetch.bind(globalThis)){
  return async(endpoint,query={},signal)=>{
   if(!['flow','transactions','transfers','compensation','investments','quotes'].includes(endpoint))throw Error('Invalid finance endpoint');

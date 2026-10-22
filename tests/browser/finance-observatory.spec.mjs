@@ -221,6 +221,26 @@ test('exact movement finder pages every dense category and keeps the original fi
  assert.equal(new URL((await request).url()).searchParams.get('category'),'expense.item106');
 });
 test('selected historical payslip loads its own dated detail without borrowing the newest payslip',{timeout:25000},async t=>{const {page,url}=await fixture(t);let selectedRange='';await page.route('**/finance/compensation?**',async route=>{const requestURL=new URL(route.request().url());selectedRange=requestURL.searchParams.get('start')||'';if(selectedRange==='2024-07-01')return route.fulfill({json:{...common,payroll:[{payroll_id:'fixture-pay-old',pay_date:'2024-07-01',period_end:'2024-06-30',currency:'CAD',gross_minor:400000,net_minor:280000}],components:[{payroll_id:'fixture-pay-old',code:'Old tax',kind:'tax',amount_minor:120000,cash_effect_minor:-120000}],coverage:{selected_payroll_id:'fixture-pay-old',payroll:{complete:true},components:{complete:true},links:{complete:true}}}});return route.fulfill({json:fixtures.compensation});});await page.goto(url);await openAnalysis(page);await page.getByRole('tab',{name:'Compensation',exact:true}).click();await page.getByText('All selected payslips · table alternative').click();await page.getByRole('button',{name:'Inspect 2024-07-01'}).click();await page.getByText('Selected payslip components · table alternative').click();await page.getByRole('table',{name:'Selected payslip components'}).getByText('Old tax',{exact:true}).waitFor();assert.equal(selectedRange,'2024-07-01');await page.getByText('Selected payslip · table alternative').click();await page.getByRole('table',{name:'Selected payslip'}).getByText('2024-07-01',{exact:true}).waitFor();});
+test('same-date payslip picker requests the selected payroll ID',{timeout:30000},async t=>{
+ const {page,url,calls}=await fixture(t),payroll=[
+  {payroll_id:'same-date-a',pay_date:'2024-08-01',period_end:'2024-07-31',currency:'CAD',gross_minor:120000,net_minor:84000},
+  {payroll_id:'same-date-b',pay_date:'2024-08-01',period_end:'2024-07-31',currency:'CAD',gross_minor:140000,net_minor:98000},
+ ];
+ await page.route('**/finance/compensation?**',route=>{
+  const requestURL=new URL(route.request().url()),payrollId=requestURL.searchParams.get('payroll_id')||'same-date-a';
+  const suffix=payrollId==='same-date-b'?'B':'A';
+  calls.push({name:'compensation-detail',query:Object.fromEntries(requestURL.searchParams)});
+  return route.fulfill({json:{...common,payroll,components:[{payroll_id:payrollId,code:`${suffix} unique component`,kind:'tax',amount_minor:1000,cash_effect_minor:-1000}],links:[{payroll_id:payrollId,code:'net_pay',status:'matched'}],coverage:{selected_payroll_id:payrollId,payroll:{complete:true},components:{complete:true},links:{complete:true}},awards:[],vesting:[]}});
+ });
+ await page.goto(url);await openAnalysis(page);await page.getByRole('tab',{name:'Compensation',exact:true}).click();
+ await page.getByLabel('Select payslip').selectOption('same-date-b');
+ await page.getByText('Selected payslip components · table alternative',{exact:true}).click();
+ await page.getByText('B unique component',{exact:true}).waitFor();
+ const request=calls.filter(call=>call.name==='compensation-detail'&&call.query.payroll_id==='same-date-b').at(-1);
+ assert.ok(request,'Selecting the second slip sends an explicit payroll ID');
+ assert.equal(request.query.start,'2024-08-01');assert.equal(request.query.end,'2024-08-01');
+ assert.equal(request.query.currency,'CAD');assert.equal(request.query.scope,'personal');
+});
 test('seven finance surfaces: real filters, diagrams, evidence, mobile tables and paginated search',{timeout:60000},async t=>{const {page,url,calls}=await fixture(t);const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&!m.text().includes('503'))errors.push(m.text());});await page.goto(url);await openAnalysis(page);await page.getByRole('heading',{name:'Recorded overview'}).waitFor();assert.equal(await page.getByRole('tab').count(),7);assert.equal(await page.getByLabel('From').inputValue(),lastQuarter().start);await page.locator('[data-chart="alluvial"]').waitFor();await mkdir(artifactURL(),{recursive:true});for(const width of [390,768,1280]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:fileURLToPath(artifactURL(`finance-overview-${width}.png`)),fullPage:true});}console.log('Finance screenshots:',fileURLToPath(artifactURL()));await page.getByRole('button',{name:'Inspect Food',exact:true}).first().click();await page.getByRole('heading',{name:'Transactions & evidence',exact:true}).waitFor();assert.ok(calls.some(c=>c.name==='transactions'&&c.query.category==='expense.food'));assert.equal(await page.locator('tbody img').count(),0);await page.getByLabel('Search transactions').fill('receipt');await page.getByRole('button',{name:'Search',exact:true}).click();await page.getByRole('button',{name:'Next page'}).click();await page.waitForFunction(()=>document.querySelector('[data-page-status]')?.textContent.includes('26'));assert.ok(calls.some(c=>c.name==='transactions'&&c.query.offset==='25'&&c.query.q==='receipt'));for(const [tab,heading,chart] of [['Cash flow','Cash flow','monthly'],['Transfers','Transfers','network'],['Investments','Investments','allocation'],['Compensation','Compensation','vesting'],['Obligations','Obligations','schedule']]){await page.getByRole('tab',{name:tab,exact:true}).click();await page.getByRole('heading',{name:heading,exact:true}).waitFor();await page.locator(`[data-chart="${chart}"]`).waitFor();assert.ok(await page.locator('.data-alternative').count());for(const width of [390,768,1280]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${tab} fits ${width}`);}await page.screenshot({path:fileURLToPath(artifactURL(`finance-${chart}-1280.png`)),fullPage:true});}await page.getByRole('tab',{name:'Investments',exact:true}).click();await page.getByText('Market prices unavailable',{exact:false}).waitFor();for(const width of [390,768,1280]){await page.setViewportSize({width,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`no page overflow at ${width}`);}assert.deepEqual(await page.evaluate(()=>({local:localStorage.length,session:sessionStorage.length})),{local:0,session:0});assert.deepEqual(errors,[]);});
 test('secondary records stay available on demand across all seven Finance views',{timeout:45000},async t=>{
  const {page,url}=await fixture(t);await page.goto(url);await openAnalysis(page);
@@ -349,6 +369,20 @@ test('category expansion uses final geometry width and folding reclaims it',{tim
   return route.fulfill({response,json:data});
  });
  await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();
+ const assertStyleOwners=async()=>{
+  await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+  const audit=await page.evaluate(()=>{
+   const root=document.querySelector('.money-sankey'),sheet=[...document.styleSheets].find(item=>item.ownerNode?.id==='plotly.js-style-global');
+   const nodes=[...root.querySelectorAll('.money-sankey-canvas,.money-sankey-layer,.money-sankey-chart,.money-sankey-band,.money-sankey-enclosure')];
+   const persistent=nodes.filter(node=>node.matches('.money-sankey-canvas,.money-sankey-layer,.money-sankey-chart'));
+   const names=nodes.flatMap(node=>[...node.classList].filter(name=>name.startsWith('finance-sankey-layout-')));
+   const rules=[...sheet.cssRules].map(rule=>rule.selectorText?.match(/\.finance-sankey-layout-\d+/)?.[0]?.slice(1)).filter(Boolean);
+   const owners=new Map();for(const node of nodes)for(const name of node.classList)if(name.startsWith('finance-sankey-layout-'))owners.set(name,(owners.get(name)||0)+1);
+   return {orphanPersistent:persistent.flatMap(node=>[...node.classList].filter(name=>name.startsWith('finance-sankey-layout-')&&!rules.includes(name))),duplicateOwners:[...owners].filter(([,count])=>count>1).map(([name])=>name)};
+  });
+  assert.deepEqual(audit,{orphanPersistent:[],duplicateOwners:[]},'Generated CSS classes must be removed from old owners before rule names are reused');
+ };
+ await assertStyleOwners();
  await page.getByText('Explore accounts, spending and categories',{exact:true}).click();
  await page.getByRole('tab',{name:'All categories'}).click();
  const chart=page.locator('.money-sankey-chart'),band=page.locator('.money-sankey-band').first();
@@ -356,12 +390,19 @@ test('category expansion uses final geometry width and folding reclaims it',{tim
  await page.waitForFunction(()=>{const chart=document.querySelector('.money-sankey-chart'),stage=chart?.closest('.money-sankey');return chart?._fullLayout?.width===stage?.clientWidth;});
  const initial=await chart.evaluate(node=>node._fullLayout.width),anchor=await band.evaluate(node=>node.getBoundingClientRect().top-node.closest('.money-sankey-layer').getBoundingClientRect().top);
  await page.locator('.money-sankey-explore-row').filter({hasText:'Synthetic food'}).getByRole('button',{name:'Expand'}).click();
+ await assertStyleOwners();
  await page.locator('.money-sankey-explore-row').filter({hasText:'Dining'}).getByRole('button',{name:'Expand'}).click();
+ await assertStyleOwners();
  await page.getByText('Restaurant · expense',{exact:false}).waitFor();
  await page.waitForFunction(width=>document.querySelector('.money-sankey-chart')?._fullLayout?.width>width+200,initial);
  assert.equal(await band.evaluate(node=>node.getBoundingClientRect().top-node.closest('.money-sankey-layer').getBoundingClientRect().top),anchor,'account group heading remains anchored');
  const expanded=await chart.evaluate(node=>node._fullLayout.width);
  await page.locator('.money-sankey-explore-row').filter({hasText:'Synthetic food'}).getByRole('button',{name:'Fold'}).click();
+ await assertStyleOwners();
+ await page.locator('.money-sankey-explore-row').filter({hasText:'Synthetic food'}).getByRole('button',{name:'Expand'}).click();
+ await assertStyleOwners();
+ await page.locator('.money-sankey-explore-row').filter({hasText:'Synthetic food'}).getByRole('button',{name:'Fold'}).click();
+ await assertStyleOwners();
  await page.waitForFunction(width=>document.querySelector('.money-sankey-chart')?._fullLayout?.width===width,initial);
  assert.ok(expanded>initial);
 });
@@ -481,6 +522,12 @@ test('folding an upstream investment hierarchy reclaims only displaced account-g
   return route.fulfill({json:{...common,cashflows:q.get('currency')==='CAD'?products:[],holdings:[],coverage:{cashflows:{complete:true}}}});
  });
  await page.goto(url);await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+ const assertCurrentStyleClasses=async()=>{
+  await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+  const counts=await page.evaluate(()=>['.money-sankey-canvas','.money-sankey-layer','.money-sankey-chart'].map(selector=>[...document.querySelector(selector).classList].filter(name=>name.startsWith('finance-sankey-layout-')).length));
+  assert.deepEqual(counts,[2,2,2],'Each persistent chart element keeps only its two current draw-pass classes');
+ };
+ await assertCurrentStyleClasses();
  const roleBand=page.locator('.money-sankey-band[data-role="debt"]');
  const readGeometry=()=>roleBand.evaluate(node=>{const layer=document.querySelector('.money-sankey-layer');return {top:node.getBoundingClientRect().top-layer.getBoundingClientRect().top,height:layer.getBoundingClientRect().height};});
  const baseline=await readGeometry();
@@ -488,16 +535,22 @@ test('folding an upstream investment hierarchy reclaims only displaced account-g
  await page.getByRole('tab',{name:'All categories'}).click();
  await page.getByRole('button',{name:'Expand Products'}).click();
  await page.waitForFunction(minimumHeight=>{const band=document.querySelector('.money-sankey-band[data-role="debt"]');return band&&band.getBoundingClientRect().top>200&&document.querySelector('.money-sankey-layer').getBoundingClientRect().height>minimumHeight;},baseline.height);
+ await assertCurrentStyleClasses();
  const expanded=await readGeometry();assert.ok(expanded.top>baseline.top);
  const loanGroup=page.locator('.money-sankey-controls .money-sankey-group').filter({hasText:'Loans'});
  await loanGroup.locator('[data-group-select]').click();await page.locator('.flow-inspector').waitFor();await page.keyboard.press('Escape');
  await loanGroup.getByRole('button',{name:/Fold Loans/}).click();
+ await assertCurrentStyleClasses();
  await page.getByRole('button',{name:'Fold Products'}).click();
  await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+ await assertCurrentStyleClasses();
  const folded=await readGeometry();
  assert.ok(Math.abs(folded.top-baseline.top)<2,`folding Products must restore the Loans heading: ${JSON.stringify({baseline,expanded,folded})}`);
  assert.ok(Math.abs(folded.height-baseline.height)<2,`the map height must return to baseline: ${JSON.stringify({baseline,expanded,folded})}`);
  assert.equal(await page.locator('.money-sankey-controls .money-sankey-group').filter({hasText:'Loans'}).locator('[data-group-select]').getAttribute('aria-pressed'),'true','the selected downstream group remains selected through reflow');
+ const investmentGroup=page.locator('.money-sankey-controls .money-sankey-group').filter({hasText:'Investments'});
+ await investmentGroup.getByRole('button',{name:/Fold Investments/}).click();await assertCurrentStyleClasses();
+ await investmentGroup.getByRole('button',{name:/Expand Investments/}).click();await assertCurrentStyleClasses();
 });
 test('raw-member aggregates refresh current counts and close when only a same-ID foreign stream remains',{timeout:45000},async t=>{
  const {page,url,calls}=await fixture(t);let cadState='initial';

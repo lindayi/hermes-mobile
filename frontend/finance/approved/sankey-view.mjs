@@ -38,9 +38,9 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  const layoutStyle=(node,properties)=>{
   const name=`finance-sankey-layout-${styleNumber++}`;node.classList.add(name);
   const declarations=Object.entries(properties).map(([key,value])=>`${key}:${value}`).join(';');
-  styleRules.push(sheet.cssRules.length);sheet.insertRule(`.${name}{${declarations}}`,sheet.cssRules.length);
+  const index=sheet.cssRules.length;sheet.insertRule(`.${name}{${declarations}}`,index);styleRules.push({index,node,name});
  };
- const clearLayoutStyles=()=>{for(const index of styleRules.splice(0).reverse())sheet.deleteRule(index);styleNumber=0;};
+ const clearLayoutStyles=()=>{for(const {index,node,name} of styleRules.splice(0).reverse()){sheet.deleteRule(index);node.classList.remove(name);}styleNumber=0;};
  const control=(label,action,ariaLabel=label)=>{const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('aria-label',ariaLabel);button.addEventListener('click',action);return button;};
  const zoomOut=control('−',()=>{zoom=Math.max(.65,Math.round((zoom-.15)*100)/100);void draw();},'Zoom out');
  const zoomLabel=document.createElement('output');zoomLabel.setAttribute('aria-live','polite');
