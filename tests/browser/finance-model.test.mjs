@@ -112,6 +112,14 @@ test('flow API forwards bounded selector field allowlist without accepting arbit
  await api('flow',{direction:'incoming',source_account:'A',target_account:'B',link_type:'own_cash',transfer_status:'unmatched',evil:'no'});
  assert.equal(url,'/hermes/app-api/finance/flow?direction=incoming&source_account=A&target_account=B&link_type=own_cash&transfer_status=unmatched');
 });
+test('compensation transport preserves an explicit payroll ID selector',async()=>{
+ const {financeAPI}=await import(moduleURL);let url;
+ const api=financeAPI(async u=>{url=new URL(u,'https://synthetic.invalid');return {ok:true,json:async()=>({})};});
+ await api('compensation',{start:'2026-08-14',end:'2026-08-14',currency:'CAD',scope:'all',payroll_id:'same-date-b'});
+ assert.equal(url.searchParams.get('payroll_id'),'same-date-b');
+ assert.equal(url.searchParams.get('start'),'2026-08-14');assert.equal(url.searchParams.get('end'),'2026-08-14');
+ assert.equal(url.searchParams.get('currency'),'CAD');assert.equal(url.searchParams.get('scope'),'all');
+});
 test('empty exact category survives transport while ordinary empty filters stay omitted',async()=>{
  const {financeAPI}=await import(moduleURL);let url;
  const api=financeAPI(async u=>{url=new URL(u,'https://synthetic.invalid');return {ok:true,json:async()=>({})};});

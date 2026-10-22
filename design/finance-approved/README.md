@@ -1,0 +1,11 @@
+# Approved finance migration input
+
+This directory is reference source for issue127, not a public route or deployment source. The owner has accepted this visualization and now requests normal main-app integration. Port its behavior into frontend/finance, adapting entrypoint scoping, filters, lifecycle and build. Do not link to or iframe a preview. Remove this temporary reference tree once runtime and regression tests have been ported and its provenance recorded in the finance specification.
+
+Only generic previously public source and explicitly synthetic regression fixtures are included. No private snapshots, source documents, reports, screenshots or database values belong here. source-manifest.json pins imported input, not a completed integrated candidate.
+
+The accepted prototype used Plotly4.1.2 core plus Sankey through a small esbuild bundle, with injected stylesheet extracted to a static CSS asset for CSP. No vendor-generated bundle is included here. Use pinned dependency/source and deterministic normal build; no runtime CDN, inline script/style policy weakening or committing generated outputs. Existing build is deploy/frontend_release.py with content-addressed assets. Inspect dependency package availability/build support rather than guess.
+
+Reference app.mjs uses global selectors, a fixed initial lastQuarter() and self-start listeners. These must become a mounted/scoped Finance view with actual query inputs and cleanup; do not copy its top-level document ownership into an already mounted app. Retained chart visibility behavior is required, but denial/owner/pagehide clears data. CAD combined presentation needs a truthful UI distinct from original USD selection. Keep exact selector provenance. Existing main Finance filters, sections, Back, metadata and inspector requirements remain.
+
+Port pure model/client/layout regression assertions to the managed tests/browser area with real production imports; a green reference copy alone is not integration proof. Add actual integrated route RED/GREEN and generated browser checks at desktop/mobile, query changes, denied/session return, generic groups and exact evidence. All financial assertions use synthetic values. Do not report reference historical checks as freshly executed final-head tests.

@@ -485,6 +485,47 @@ def test_compensation_children_only_cover_newest_payroll_not_lexical_first(env):
     assert empty['payroll'] == empty['components'] == empty['links'] == []
 
 
+def test_compensation_selects_same_date_details_by_payroll_id_without_borrowing(env):
+    client, path, _, _ = env
+    with sqlite3.connect(path) as db:
+        for payroll_id, code in [('same-date-a', 'COMP_A'), ('same-date-b', 'COMP_B')]:
+            insert(db, 'payroll_cashflow_bridge', payroll_id=payroll_id, pay_date='2025-02-10',
+                   currency='CAD', gross_minor=10000, net_minor=7000)
+            insert(db, 'payroll_components', payroll_id=payroll_id, code=code, amount_minor=1000)
+            insert(db, 'payroll_component_links', payroll_id=payroll_id, code=code, tx_id=payroll_id)
+            tx(db, 'bank:' + payroll_id, tx_id=payroll_id)
+    default = client.get(BASE + '/compensation', params={
+        'start': '2025-02-10', 'end': '2025-02-10', 'currency': 'CAD', 'scope': 'all',
+    })
+    assert default.status_code == 200, default.text
+    assert default.json()['coverage']['selected_payroll_id'] == 'same-date-a'
+    selected = client.get(BASE + '/compensation', params={
+        'start': '2025-02-10', 'end': '2025-02-10', 'currency': 'CAD',
+        'scope': 'all', 'payroll_id': 'same-date-b',
+    })
+    assert selected.status_code == 200, selected.text
+    data = selected.json()
+    assert {row['payroll_id'] for row in data['payroll']} == {'same-date-a', 'same-date-b'}
+    assert data['coverage']['selected_payroll_id'] == 'same-date-b'
+    assert {row['code'] for row in data['components']} == {'COMP_B'}
+    assert {row['payroll_id'] for row in data['links']} == {'same-date-b'}
+    assert data['links'][0]['linked_record']['record_id'] == 'bank:same-date-b'
+    missing = client.get(BASE + '/compensation', params={
+        'start': '2025-02-10', 'end': '2025-02-10', 'currency': 'CAD',
+        'scope': 'all', 'payroll_id': 'missing-payroll',
+    })
+    assert missing.status_code == 200, missing.text
+    assert missing.json()['coverage']['selected_payroll_id'] is None
+    assert missing.json()['components'] == missing.json()['links'] == []
+    outside = client.get(BASE + '/compensation', params={
+        'start': '2025-02-10', 'end': '2025-02-10', 'currency': 'USD',
+        'scope': 'all', 'payroll_id': 'same-date-b',
+    })
+    assert outside.status_code == 200, outside.text
+    assert outside.json()['coverage']['selected_payroll_id'] is None
+    assert outside.json()['payroll'] == outside.json()['components'] == outside.json()['links'] == []
+
+
 @pytest.mark.parametrize('component_count', [1000, 1001])
 def test_compensation_oversized_selected_component_group_is_withheld(env, component_count):
     client, path, _, _ = env

@@ -1,0 +1,50 @@
+.money-sankey .js-plotly-plot,.money-sankey .plot-container,.money-sankey .svg-container{width:100%;height:100%}
+.money-sankey-chart svg.main-svg{width:auto;height:auto;min-width:0;max-height:none}
+.money-sankey .sankey-node,.money-sankey .sankey-link{transition:opacity .12s ease}
+.money-sankey .sankey-node.is-dim,.money-sankey .sankey-link.is-dim{opacity:.12!important}
+.money-sankey .sankey-link.is-selected{fill-opacity:.78!important;stroke-opacity:.78!important}
+.money-sankey-bands{position:absolute;inset:0;pointer-events:none;z-index:2}
+.money-sankey-chart{position:relative}
+.money-sankey-band{position:absolute;display:flex;align-items:flex-start;justify-content:space-between;gap:4px;pointer-events:none;z-index:2}
+.money-sankey-band button{min-width:var(--money-sankey-control-size,44px);min-height:var(--money-sankey-control-size,44px);background:var(--panel);font-size:11px;pointer-events:auto}
+.money-sankey-band button:first-child{max-width:calc(100% - 48px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.money-sankey-enclosure{position:absolute;border:1px solid var(--border);border-radius:9px;background:color-mix(in srgb,var(--tint) 24%,transparent);pointer-events:none}
+.money-sankey-group{display:flex;gap:5px;margin:0 0 6px}
+.money-sankey-group button{min-height:44px;font-size:11px}
+.money-sankey-group button:first-child{flex:1;text-align:left}
+.money-sankey-toggle{width:var(--money-sankey-control-size,44px);padding:0}
+.money-sankey-controls{display:flex;flex-wrap:wrap;gap:6px}
+.money-sankey-status{min-height:24px;color:var(--muted);font-size:11px;padding:8px 14px}
+.money-sankey{position:relative;max-height:62vh;min-height:360px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.money-sankey-chart{position:relative}
+.money-sankey .sankey-node,.money-sankey .sankey-link{cursor:pointer}
+.money-sankey .sankey-node text{fill:var(--text)!important}
+@media(max-width:600px){.money-sankey{max-height:55vh;min-height:320px}.money-sankey-group{flex:1 1 100%}}
+@media(prefers-reduced-motion:reduce){.money-sankey .sankey-node,.money-sankey .sankey-link{transition:none}}
+.money-map{--bg:#f4f3ee;--panel:#fffefa;--rail:#efeee7;--text:#22332f;--muted:#616d67;--border:#d7dcd3;--teal:#327b65;--amber:#b36d45;--blue:#647f9f;--tint:#edf2e9}
+@media(prefers-color-scheme:dark){.money-map{--bg:#171d1b;--panel:#202724;--rail:#141a18;--text:#e3e9e3;--muted:#a0aaa1;--border:#37413a;--teal:#8bc1a4;--amber:#e4ad76;--blue:#9dbfcb;--tint:#29382f}}
+.private-paused #content{visibility:hidden;pointer-events:none}
+.private-pause{align-items:center;justify-content:space-between;gap:12px;padding:12px 0;color:var(--muted);font-size:11px}
+.private-pause button{min-height:44px}
+.money-sankey-view-controls{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:8px 0}
+.money-sankey-explore{margin:8px 0}
+.money-sankey-explore>summary{padding:10px 12px;min-height:44px;border:1px solid var(--border);border-radius:6px;background:var(--panel)}
+.money-sankey-explore-tabs{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0}
+.money-sankey-explore-tabs button[aria-selected=true]{background:var(--tint);border-color:var(--teal)}
+.money-sankey-explore-list{display:grid;gap:5px;max-height:320px;overflow:auto}
+.money-sankey-explore-list button{min-height:44px;text-align:left;overflow-wrap:anywhere}
+.money-sankey-explore-row{display:flex;gap:5px;align-items:center}
+.money-sankey-explore-row button:first-child{flex:1}
+.money-sankey-view-controls button{min-width:44px;min-height:44px;padding:8px;font-size:12px}
+.money-sankey-view-controls output{min-width:46px;text-align:center;font-size:11px;font-variant-numeric:tabular-nums}
+.money-sankey-stream-finder{margin:8px 0}
+.money-sankey-stream-finder>summary{padding:10px 12px;min-height:44px;border:1px solid var(--border);border-radius:6px;background:var(--panel)}
+.money-sankey-stream-finder>input{width:min(100%,420px);margin:8px 0}
+.money-sankey-stream-finder>[role=status]{font-size:11px;color:var(--muted)}
+.money-sankey-stream-results{display:grid;gap:5px;max-height:260px;overflow:auto}
+.money-sankey-stream-results button{min-height:44px;text-align:left;overflow-wrap:anywhere}
+.money-sankey-canvas{position:relative;min-width:100%;min-height:280px}
+.money-sankey-layer{position:absolute;left:0;top:0;transform-origin:top left}
+.money-sankey{width:100%}
+.money-sankey .money-sankey-chart{flex:none}
+@media(max-width:600px){.money-sankey-view-controls button{flex:1 1 44px}.private-pause{align-items:flex-start;flex-direction:column}}

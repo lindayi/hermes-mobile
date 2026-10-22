@@ -345,6 +345,14 @@ _ISSUE124_MONEY_MAP_FIXTURE = {
     'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
 }
 
+_ISSUE127_FINANCE_INTEGRATION_FIXTURE = {
+    'backend/finance.py': '0a2f9c020602893badc98246860f838fff384c1ac018cdefcd2dfa2df1953b49',
+    '.github/workflows/ci.yml': '5025e464918a2e8ea1f483596cc256210cf7709913041ee07b79d89743d7a857',
+    'deploy/frontend_release.py': 'b2132ef75f0f187b119304207882777a2cf88d837dd284d66cc041ec28421881',
+    'package.json': '476c6215e7f46554703a81a4b68d86c56dc5edec98e9302ada5bb542487206db',
+    'package-lock.json': '7c33641b35ce9d606f6c4db17deb5c2e95c7ad69c52dd57ac24781a0d1da2261',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
@@ -368,7 +376,8 @@ def _source_files():
             | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
             | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
             | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
-            | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE)
+            | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
+            | _ISSUE127_FINANCE_INTEGRATION_FIXTURE)
 
 
 def _source_ci():
@@ -857,6 +866,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
     pending |= set(_ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE)
     pending |= set(_ISSUE122_FINANCE_FIXTURE)
+    pending |= set(_ISSUE127_FINANCE_INTEGRATION_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -941,12 +951,20 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
         ).items() if path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     }
-    for path, digest in (_PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE).items():
+    for path, digest in (
+            _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
+            | _ISSUE124_MONEY_MAP_FIXTURE).items():
+        if path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE:
+            continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
-    } == _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
+        if path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+    } == {
+        path: digest for path, digest in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE.items()
+        if path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+    }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path in _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE
@@ -973,6 +991,8 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
                          | _ISSUE98_PHOTO_POLICY_FIXTURE
                          | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
                          | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE).items():
+        if path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE:
+            continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
@@ -1174,24 +1194,44 @@ def test_issue124_money_map_source_pin_supersedes_only_finance(phase):
     assert ISSUE124_MONEY_MAP_OVERLAY == _ISSUE124_MONEY_MAP_FIXTURE
     root = Path(__file__).resolve().parents[1]
     for path, digest in _ISSUE124_MONEY_MAP_FIXTURE.items():
-        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+        current_digest = _ISSUE127_FINANCE_INTEGRATION_FIXTURE.get(path, digest)
+        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == current_digest
     evidence = _phase_evidence(phase)
     assert _blockers(evidence, phase) == set()
+    evidence['main']['files']['backend/finance.py'] = _ISSUE124_MONEY_MAP_FIXTURE['backend/finance.py']
+    assert _blockers(evidence, phase) == {'execution-source-contract'}
     evidence['main']['files']['backend/finance.py'] = _ISSUE122_FINANCE_FIXTURE['backend/finance.py']
     assert _blockers(evidence, phase) == {'execution-source-contract'}
 
 
 def test_issue122_finance_source_family_is_complete_and_independent():
+    from deploy.autonomy_policy import ISSUE122_FINANCE_OVERLAY
     assert set(_ISSUE122_FINANCE_FIXTURE) == {
         'backend/app.py', 'backend/finance.py', 'backend/finance_market.py',
         'deploy/frontend_release.py',
     }
-    assert {path: SOURCE_FINGERPRINTS[path] for path in _ISSUE122_FINANCE_FIXTURE} == (
-        _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
-    )
+    assert ISSUE122_FINANCE_OVERLAY == _ISSUE122_FINANCE_FIXTURE
+    expected = (_ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
+                | _ISSUE127_FINANCE_INTEGRATION_FIXTURE)
+    assert {path: SOURCE_FINGERPRINTS[path] for path in _ISSUE122_FINANCE_FIXTURE} == {
+        path: digest for path, digest in expected.items()
+        if path in _ISSUE122_FINANCE_FIXTURE
+    }
     assert set(_ISSUE122_FINANCE_FIXTURE) <= SOURCE_CONTROL_PYTHON_FILES
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract'
                for path in _ISSUE122_FINANCE_FIXTURE)
+
+
+def test_issue127_finance_build_pins_are_complete_and_independent():
+    from deploy.autonomy_policy import ISSUE127_FINANCE_INTEGRATION_OVERLAY
+    assert set(_ISSUE127_FINANCE_INTEGRATION_FIXTURE) == {
+        'backend/finance.py', '.github/workflows/ci.yml', 'deploy/frontend_release.py',
+        'package.json', 'package-lock.json',
+    }
+    assert ISSUE127_FINANCE_INTEGRATION_OVERLAY == _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+    root = Path(__file__).resolve().parents[1]
+    assert all(hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+               for path, digest in _ISSUE127_FINANCE_INTEGRATION_FIXTURE.items())
 
 
 @pytest.mark.parametrize('phase', PHASES)

@@ -281,6 +281,15 @@ ISSUE124_MONEY_MAP_OVERLAY = {
     'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
 }
 SOURCE_FINGERPRINTS.update(ISSUE124_MONEY_MAP_OVERLAY)
+# Issue #127 adds Finance build inputs and the read-only payslip-ID selector.
+ISSUE127_FINANCE_INTEGRATION_OVERLAY = {
+    'backend/finance.py': '0a2f9c020602893badc98246860f838fff384c1ac018cdefcd2dfa2df1953b49',
+    '.github/workflows/ci.yml': '5025e464918a2e8ea1f483596cc256210cf7709913041ee07b79d89743d7a857',
+    'deploy/frontend_release.py': 'b2132ef75f0f187b119304207882777a2cf88d837dd284d66cc041ec28421881',
+    'package.json': '476c6215e7f46554703a81a4b68d86c56dc5edec98e9302ada5bb542487206db',
+    'package-lock.json': '7c33641b35ce9d606f6c4db17deb5c2e95c7ad69c52dd57ac24781a0d1da2261',
+}
+SOURCE_FINGERPRINTS.update(ISSUE127_FINANCE_INTEGRATION_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
