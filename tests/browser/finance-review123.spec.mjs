@@ -120,7 +120,7 @@ test('payroll drill uses the actual linked record posted date and clears unrelat
  const bank={...credit,record_id:'bank:synthetic-paynet',tx_id:'synthetic-paynet',date:'2024-01-02',flow:'income',category_id:'income.payroll',amount_minor:350000,description:'Synthetic payroll bank net'};
  const payroll={payroll_id:'synthetic-payroll',pay_date:'2024-01-01',currency:bank.currency,gross_minor:500000,net_minor:350000};
  const links=[{payroll_id:payroll.payroll_id,code:'NET',tx_id:bank.tx_id,status:'matched',linked_record:{record_id:bank.record_id,date:bank.date,account:bank.account,currency:bank.currency,dataset:bank.dataset}},{payroll_id:payroll.payroll_id,code:'SAVINGS',event_id:'synthetic-event',status:'recorded',linked_record:null},{payroll_id:payroll.payroll_id,code:'MISSING',tx_id:'synthetic-missing',linked_record:null},{payroll_id:payroll.payroll_id,code:'LEGACY',tx_id:'synthetic-legacy'}];
- const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation:()=>({payroll:[payroll],links})}});
+ const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation:()=>({payroll:[payroll],links,coverage:{selected_payroll_id:payroll.payroll_id}})}});
  await page.goto(url);await ready(page);await page.locator('#filters').getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('investment');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
  await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  await page.getByText('Payroll links · table alternative',{exact:true}).click();
