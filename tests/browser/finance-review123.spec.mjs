@@ -139,7 +139,8 @@ test('incomplete selected payroll component coverage hides waterfall without hid
  const {page,calls,url}=await fixture(t,{rows:[bank],responses:{compensation}});await page.goto(url);await ready(page);
  await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  assert.equal(await page.locator('[data-chart="waterfall"]').count(),0);
- await page.getByText('Payroll breakdown unavailable: component coverage is incomplete.',{exact:true}).waitFor();
+ const warningText='Payroll breakdown unavailable: component coverage is incomplete.';
+ const warning=page.getByText(warningText,{exact:true});await warning.waitFor();
  await page.getByText('All selected payslips · table alternative',{exact:true}).click();
  const sample=page.getByRole('table',{name:'All selected payslips',exact:true});await sample.getByRole('button',{name:'Inspect '+pay.pay_date,exact:true}).waitFor();await sample.getByText('CAD 3,500.00',{exact:true}).waitFor();
  await page.getByText('Grant reference values · table alternative',{exact:true}).click();await page.getByRole('table',{name:'Grant reference values',exact:true}).getByText('USD 1,000.00',{exact:true}).waitFor();
@@ -149,7 +150,7 @@ test('incomplete selected payroll component coverage hides waterfall without hid
  await page.getByRole('table',{name:'Transactions',exact:true}).getByText(bank.description,{exact:true}).waitFor();
  complete=true;await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  assert.equal(await page.locator('[data-chart="waterfall"]').count(),1);
- assert.equal(await page.getByText('Payroll breakdown unavailable: component coverage is incomplete. Bank net and recorded evidence remain available.',{exact:true}).count(),0);
+ assert.equal(await warning.count(),0);
  await page.getByText('Selected payslip components · table alternative',{exact:true}).click();const components=page.getByRole('table',{name:'Selected payslip components',exact:true}),tax=components.locator('tbody tr').filter({hasText:'TAX'});await tax.getByText('TAX',{exact:true}).waitFor();assert.equal((await tax.locator('td').nth(2).textContent()).trim(),'CAD 1,500.00');assert.equal((await tax.locator('td').nth(3).textContent()).trim(),'-CAD 1,500.00');assert.equal((await tax.locator('td').nth(4).textContent()).trim(),'CAD 3,000.00');
 });
 

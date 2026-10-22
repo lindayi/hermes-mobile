@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {makeAPI,createPager} from '../../../frontend/finance/approved/finance-client.mjs';
+import {createModel,ranked,selectionMembers} from '../../../frontend/finance/approved/live-model.mjs';
 const CAD=await import('../../../frontend/finance/approved/cad-view.mjs').catch(e=>{if(e.code==='ERR_MODULE_NOT_FOUND')return {};throw e;});
 const fx={pair:'USDCAD',rate:1.125,as_of:'2026-08-31',source:'synthetic',status:'ok'};
 const query={start:'2026-07-01',end:'2026-09-30',scope:'personal',dataset:'all',category:'',category_mode:'exact',q:'synthetic'};
@@ -27,6 +28,23 @@ test('CAD-first merge namespaces USD graph, keeps original evidence and sends ev
  for(const currency of ['CAD','USD'])for(const endpoint of ['flow','investments','compensation'])assert.deepEqual(svc.calls.find(c=>c.endpoint===endpoint&&c.q.currency===currency).q,{...query,currency});
  assert.deepEqual(svc.calls.find(c=>c.endpoint==='quotes').q,{});assert.ok(svc.calls.every(c=>c.signal===controller.signal));
  assert.deepEqual(usd,sample('USD'));
+});
+
+test('mixed-origin spending ranking labels a CAD refund and converted USD purchase neutrally',async()=>{
+ const cad=sample('CAD',[['refund','b','a',100,'expense','expense.food']]);cad.nodes[1].label='Food';
+ const usd=sample('USD',[['purchase','a','b',200,'expense','expense.food']]);usd.nodes[1].label='Food';
+ const result=await CAD.loadCADQuarter(service(cad,usd,{fx:{...fx,rate:1.4}}).api,query);
+ for(const reverse of [false,true]){
+  const raw=structuredClone(result);if(reverse){raw.nodes.reverse();raw.edges.reverse();}
+  const p=createModel(raw).project(),rows=ranked(p);assert.equal(rows.length,1);
+  const row=rows[0];assert.equal(row.label,'Food');assert.equal(row.gross,280);assert.equal(row.offset,100);assert.equal(row.net,180);assert.equal(row.share,1);
+  const selected=selectionMembers(p,{node:row.id,edges:row.edges.map(edge=>edge.id)});
+  assert.deepEqual(selected.map(member=>member.selector.filters.currency).sort(),['CAD','USD']);
+  const purchase=selected.find(member=>member.originalCurrency==='USD');assert.equal(purchase.originalAmountMinor,200);assert.equal(purchase.amount_minor,280);
+ }
+ const onlyUSD=await CAD.loadCADQuarter(service(sample('CAD',[]),usd,{fx:{...fx,rate:1.4}}).api,query);
+ assert.equal(ranked(createModel(onlyUSD).project())[0].label,'Food (USD)');
+ assert.deepEqual(cad.edges[0].amount_minor,100);assert.deepEqual(usd.edges[0].amount_minor,200);
 });
 
 test('headers sum individually rounded original edge signs, never convert a net total',async()=>{

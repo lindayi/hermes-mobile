@@ -12,7 +12,7 @@ const rootPath = (kind, path) => {
 // exact outgoing graph geometry, including expanded hierarchy links.
 export function ranked(p, focus = '') {
   const nodes = new Map(p.nodes.map(n => [n.id, n]));
-  const groups = new Map();
+  const groups = new Map(), origins = new Map();
   const isAccount = id => ['account', 'account-group'].includes(nodes.get(id)?.kind);
   for (const edge of p.edges) {
     if (focus) {
@@ -33,6 +33,10 @@ export function ranked(p, focus = '') {
       const id = categoryNode?.id ?? key('live-category', 'expense', categoryPath);
       if (!groups.has(id)) groups.set(id, { id, categoryPath, label: categoryNode?.label ?? labelFor(categoryPath), amount: 0, gross: 0, offset: 0, net: 0, share: 0, edges: [] });
       const group = groups.get(id);
+      if (!origins.has(id)) origins.set(id, new Set());
+      origins.get(id).add(member.originalCurrency ?? member.currency);
+      // A combined net category is not the native-currency label of one node.
+      if (origins.get(id).size > 1) group.label = labelFor(categoryPath);
       if (direction > 0) group.gross += member.amount_minor; else group.offset += member.amount_minor;
       group.net = group.amount = group.gross - group.offset;
       if (!group.edges.includes(edge)) group.edges.push(edge);
