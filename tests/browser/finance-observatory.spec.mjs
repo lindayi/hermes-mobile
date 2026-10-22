@@ -114,12 +114,16 @@ test('seven finance surfaces: real filters, diagrams, evidence, mobile tables an
 test('secondary records stay available on demand across all seven Finance views',{timeout:45000},async t=>{
  const {page,url}=await fixture(t);await page.goto(url);await openAnalysis(page);
  const openTable=async name=>{await page.getByText(`${name} · table alternative`,{exact:true}).click();return page.getByRole('table',{name,exact:true});};
+ const waitForMapLayout=()=>page.waitForFunction(()=>{const stage=document.querySelector('.money-sankey');return !stage||(stage.getAttribute('aria-busy')==='false'&&stage.dataset.layoutWidth===String(stage.clientWidth));});
  const checkMobile=async view=>{
   await page.setViewportSize({width:390,height:900});
+  await waitForMapLayout();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${view} fits 390px`);
-  assert.equal(await page.locator('button:visible,input:visible,select:visible,summary:visible').evaluateAll(nodes=>nodes.every(node=>Math.round(node.getBoundingClientRect().height)>=44)),true,`${view} controls remain at least 44px tall`);
+  const shortControls=await page.locator('button:visible,input:visible,select:visible,summary:visible').evaluateAll(nodes=>nodes.flatMap(node=>{const rect=node.getBoundingClientRect();if(Math.round(rect.height)>=44)return [];return [{tag:node.tagName,role:node.getAttribute('role'),label:node.getAttribute('aria-label'),text:(node.innerText||node.textContent||'').trim().slice(0,100),className:String(node.className),height:rect.height,width:rect.width,bounds:{top:rect.top,right:rect.right,bottom:rect.bottom,left:rect.left},minHeight:getComputedStyle(node).minHeight,display:getComputedStyle(node).display}];}));
+  assert.deepEqual(shortControls,[],`${view} controls remain at least 44px tall; undersized visible controls: ${JSON.stringify(shortControls)}`);
  };
  await page.getByRole('tab',{name:'Overview',exact:true}).click();
+ await page.locator('.money-sankey .sankey-link').first().waitFor();await waitForMapLayout();
  const overviewDetails=page.locator('[data-secondary]');if(!await overviewDetails.evaluate(node=>node.open))await overviewDetails.locator(':scope > summary').click();
  await page.getByRole('heading',{name:'Financial position',exact:true}).waitFor();
  await page.getByText('Financial position & cash-flow analysis',{exact:true}).waitFor();await checkMobile('Overview');

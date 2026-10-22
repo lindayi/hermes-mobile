@@ -9,7 +9,7 @@ const html=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;
 export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=globalThis.Plotly}={}){
  if(!Plotly)throw new Error('Finance Sankey renderer is unavailable');
  const model=createModel(raw),expanded=[],collapsed=window.matchMedia('(max-width: 600px)').matches?model.project().accountGroups.map(group=>group.id):[],anchors={};
- const stage=document.createElement('div');stage.className='money-sankey';
+ const stage=document.createElement('div');stage.className='money-sankey';stage.setAttribute('aria-busy','true');
  const canvas=document.createElement('div');canvas.className='money-sankey-canvas';
  const layer=document.createElement('div');layer.className='money-sankey-layer';
  const chart=document.createElement('div');chart.className='money-sankey-chart';chart.setAttribute('role','group');chart.setAttribute('aria-label','Recorded money movement Sankey');
@@ -30,7 +30,8 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  finder.append(finderSummary,finderInput,finderStatus,finderResults);
  const status=document.createElement('p');status.className='money-sankey-status';status.setAttribute('role','status');
  layer.append(chart,bands);canvas.append(layer);stage.append(canvas);root.replaceChildren(viewControls,controls,jump,explore,finder,stage,status);
- let directory,p,geometry,disposed=false,selected=null,zoom=1,finderOffset=0;
+ let directory,p,geometry,disposed=false,selected=null,zoom=1,finderOffset=0,drawSequence=0;
+ const finishDraw=sequence=>{if(sequence!==drawSequence)return;stage.dataset.layoutWidth=String(stage.clientWidth);stage.setAttribute('aria-busy','false');};
  const sheet=[...document.styleSheets].find(item=>item.ownerNode?.id==='plotly.js-style-global');
  if(!sheet)throw new Error('Finance Sankey stylesheet is unavailable');
  const styleRules=[];let styleNumber=0;
@@ -138,10 +139,10 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  };
  finderInput.addEventListener('input',()=>{finderOffset=0;renderFinder();});
  async function draw(){
-  if(disposed)return;clearLayoutStyles();
+  if(disposed)return;const sequence=++drawSequence;stage.setAttribute('aria-busy','true');clearLayoutStyles();
   directory=model.project(expanded,[]);p=model.project(expanded,collapsed);
   const active=new Set(p.edges.flatMap(edge=>[edge.source,edge.target])),nodes=p.nodes.filter(node=>active.has(node.id));
-  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;return;}
+  if(!nodes.length||!p.edges.length){try{Plotly.purge(chart);}catch{}chart.replaceChildren();chart.textContent='No recorded movements match these filters.';geometry={bands:[],width:Math.max(720,stage.clientWidth||900),height:280};layoutStyle(canvas,{minHeight:'280px'});renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;finishDraw(sequence);return;}
   const projected={...p,nodes},width=Math.max(720,stage.clientWidth||900);
   geometry=groupedLayout(projected,{width,anchors});
   const flowHeight=Math.max(200,...[...new Set(geometry.x)].map(x=>geometry.x.filter(value=>value===x).length*4+160));
@@ -173,6 +174,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   chart.querySelectorAll('.sankey-link').forEach((link,index)=>{const edge=p.edges[index];if(!edge)return;link.dataset.edge=edge.id;link.setAttribute('tabindex','0');link.setAttribute('role','button');link.setAttribute('aria-label',`Inspect ${edge.label||'recorded movement'}`);link.addEventListener('keydown',event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();select({edges:[edge.id],label:edge.label});open([edge]);}});});
   chart.querySelectorAll('.sankey-node').forEach((node,index)=>{const item=nodes[index];if(!item)return;node.dataset.node=item.id;node.setAttribute('tabindex','0');node.setAttribute('role','button');node.setAttribute('aria-label',`Inspect ${item.label}`);node.addEventListener('keydown',event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===item.id||edge.target===item.id);select({node:item.id,label:item.label});open(edges);}});});
   if(selected)select(selected);
+  finishDraw(sequence);
  }
  const onResize=()=>{if(!disposed)void draw();};window.addEventListener('resize',onResize);void draw();
  return {model,rebind,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select,snapshot(){return {expanded:[...expanded],collapsed:[...collapsed],anchors:{...anchors},zoom,exploreMode,selected:selected?{...selected}:null,exploreOpen:explore.open,finderOpen:finder.open,finderQuery:finderInput.value,finderOffset,scrollTop:stage.scrollTop,scrollLeft:stage.scrollLeft};},restore(state){if(!state||disposed)return;expanded.splice(0,expanded.length,...(Array.isArray(state.expanded)?state.expanded.filter(id=>model.kind(id)!==undefined):[]));const groups=new Set(model.project().accountGroups.map(group=>group.id));collapsed.splice(0,collapsed.length,...(Array.isArray(state.collapsed)?state.collapsed.filter(id=>groups.has(id)):[]));for(const [id,top] of Object.entries(state.anchors||{}))if(groups.has(id)&&Number.isFinite(top))anchors[id]=top;zoom=Number.isFinite(state.zoom)?Math.min(1.5,Math.max(.65,state.zoom)):1;exploreMode=['accounts','spending','categories'].includes(state.exploreMode)?state.exploreMode:'spending';explore.open=!!state.exploreOpen;finder.open=!!state.finderOpen;finderInput.value=typeof state.finderQuery==='string'?state.finderQuery:'';finderOffset=Number.isSafeInteger(state.finderOffset)?Math.max(0,state.finderOffset):0;selected=state.selected||null;if(selected?.group&&!groups.has(selected.group))selected=null;if(selected&&!selected.group&&!selected.node&&!Array.isArray(selected.memberIds))selected=null;void draw().then(()=>{if(selected){const members=membersFor(selected);if(Array.isArray(selected.memberIds)&&!members.length&&!selected.group)selected=null;else select(selected);}stage.scrollTop=Number.isFinite(state.scrollTop)?state.scrollTop:0;stage.scrollLeft=Number.isFinite(state.scrollLeft)?state.scrollLeft:0;});}};
