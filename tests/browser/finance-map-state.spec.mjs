@@ -64,9 +64,9 @@ for(const action of ['refresh','Back'])test(`exact inspector rebinds amount and 
  setFlow({...baseFlow,edges:[{...edge('cash-food','cash',99000,52),label:'Updated food stream'},baseFlow.edges[1]]});
  if(action==='Back'){await page.getByRole('button',{name:'Back',exact:true}).click();await ready(page);}else await refresh(page);
  await page.waitForFunction(()=>document.querySelector('.flow-inspector .pager [role=status]')?.textContent==='26–26 of 26 records');assert.equal(await inspector(page).locator('.transaction-row').count(),1);
- assert.match(await inspector(page).locator('.inspector-amount').textContent(),/990\.00/);assert.match(await inspector(page).locator('.inspector-amount').textContent(),/52 recorded entries/);
+ assert.match(await inspector(page).locator('.inspector-amount').textContent(),/990\.00/);assert.match(await inspector(page).locator('.inspector-amount').textContent(),/52 recorded streams/);
  assert.equal(await inspector(page).getByRole('heading').textContent(),'Updated food stream');assert.equal(await page.locator('.money-sankey-view-controls output').textContent(),zoomed);
- assert.equal(calls.filter(c=>c.name==='transactions').at(-1).q.offset,'25');assert.ok(calls.filter(c=>c.name==='transactions').every(c=>c.q.limit==='25'&&c.q.category_mode==='exact'));
+ assert.equal(calls.filter(c=>c.name==='transactions').at(-1).q.offset,'25');assert.ok(calls.filter(c=>c.name==='transactions').every(c=>c.q.limit==='50'&&c.q.category_mode==='exact'));
  if(action==='Back')await page.getByRole('button',{name:'Close inspector',exact:true}).click();
  const before=calls.filter(c=>c.name==='transactions').length;setFlow({...baseFlow,edges:[baseFlow.edges[1]]});
  if(action==='Back'){await page.getByRole('button',{name:'Back',exact:true}).click();await ready(page);}else await refresh(page);

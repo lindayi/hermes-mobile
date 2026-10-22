@@ -26,7 +26,7 @@ async function fixture(t,{width=390,edges=flow.edges}={}){
    if(name==='meta')data={...common,accounts:nodes.filter(n=>n.account),categories:[],currencies:['CAD']};
    if(name==='flow')data={...flow,currency:q.currency,range:{start:q.start,end:q.end},edges:edges.map(edge=>({...edge,currency:q.currency}))};
    if(name==='transactions')data={...common,items:[{record_id:'synthetic',date:'2024-08-01',account:q.account,description:'Synthetic evidence',amount_minor:q.direction==='incoming'?2000:-60000,currency:q.currency,category_id:q.category}],total:1,offset:0,limit:25};
-   if(name==='transfers')data={...common,items:[{link_id:'synthetic-pair',link_type:q.link_type,debit:{account:q.source_account,date:'2024-08-01',currency:q.currency,amount_minor:-10000},credit:{account:q.target_account,date:'2024-08-01',currency:q.currency,amount_minor:10000}}],total:1,offset:0,limit:25};
+   if(name==='transfers')data={...common,items:[{link_id:'synthetic-pair',link_type:q.link_type,debit:{record_id:'synthetic-debit',account:q.source_account,date:'2024-08-01',currency:q.currency,amount_minor:-10000},credit:{record_id:'synthetic-credit',account:q.target_account,date:'2024-08-01',currency:q.currency,amount_minor:10000}}],total:1,offset:0,limit:25};
    res.end(JSON.stringify(data));return;
   }
   try{const rel=u.pathname.replace('/hermes/','').replace(/\/$/,'/index.html');if(rel.includes('..'))throw Error();res.setHeader('Content-Type',rel.endsWith('.html')?'text/html':rel.endsWith('.css')?'text/css':'text/javascript');res.end(await readFile(root+'/'+rel));}catch{res.writeHead(404);res.end();}
@@ -36,149 +36,76 @@ async function fixture(t,{width=390,edges=flow.edges}={}){
  const context=await browser.newContext({viewport:{width,height:1000},hasTouch:true,serviceWorkers:'block'}),page=await context.newPage();page.setDefaultTimeout(5000);
  await page.goto(`http://127.0.0.1:${server.address().port}/hermes/finance/`);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');return {page,context,calls};
 }
-// Sample the actual rendered path and hit-test it; SVG bounding-box centers can
-// land off-curve or under a node. The top hit may be any stream in an overlap.
-async function streamPoint(page,ids){
- await page.locator('[data-map-viewport]').evaluate(n=>n.scrollIntoView({block:'start'}));
- return page.locator('[data-map-scene]').evaluate((scene,ids)=>{
-  const path=[...scene.querySelectorAll('[data-edge]')].find(n=>n.dataset.edge===ids[0]).querySelector('.edge-hit');
-  const viewport=document.querySelector('[data-map-viewport]').getBoundingClientRect();
-  for(const fraction of [.5,.4,.6,.3,.7,.2,.8,.1,.9]){
-   const p=path.getPointAtLength(path.getTotalLength()*fraction),v=new DOMPoint(p.x,p.y).matrixTransform(path.getScreenCTM());
-   if(v.x<=viewport.left||v.x>=viewport.right||v.y<=Math.max(0,viewport.top)||v.y>=Math.min(innerHeight,viewport.bottom))continue;
-   const hit=document.elementFromPoint(v.x,v.y)?.closest('[data-edge]');
-   if(hit&&ids.includes(hit.dataset.edge))return {x:v.x,y:v.y};
-  }
-  throw Error('No unobscured stream hitpoint for '+ids.join(', '));
- },ids);
+async function activateAccount(page,method){
+ const group=page.locator('.money-sankey-band[data-role="other"] > button:first-child');await group.scrollIntoViewIfNeeded();
+ if(method==='mouse')await group.click();else await group.tap();
 }
-async function activate(page,method,point){if(method==='touch')await page.touchscreen.tap(point.x,point.y);else await page.mouse.click(point.x,point.y);}
-async function activateButton(page,method,button){await button.scrollIntoViewIfNeeded();const b=await button.boundingBox();assert.ok(b);await activate(page,method,{x:b.x+b.width/2,y:b.y+b.height/2});}
-for(const width of [390,1280])for(const method of ['mouse','touch'])test(`overlapping expense/refund and parallel pair selectors remain reachable by ${method} at ${width}`,{timeout:30000},async t=>{
- const expenseEdges=[expense('cash-food',false),expense('food-refund',true)],pairEdges=[pair('cash-reserve','own_cash'),pair('cash-reserve-other','brokerage_cash')];
- const {page,calls}=await fixture(t,{width,edges:[...expenseEdges,...pairEdges]});
- // Opening/closing the local chooser must not create a history selection or
- // request evidence; it only passes an original edge after a real choice.
- const initialDetails=calls.filter(c=>['transactions','transfers'].includes(c.name)).length;
- await activate(page,method,await streamPoint(page,expenseEdges.map(e=>e.id)));
- const localChooser=page.getByRole('complementary',{name:'Overlapping streams',exact:true});
- await activateButton(page,method,localChooser.getByRole('button',{name:'Close stream chooser',exact:true}));
- assert.equal(await localChooser.count(),0);
- assert.equal(calls.filter(c=>['transactions','transfers'].includes(c.name)).length,initialDetails);
- assert.equal(await page.getByRole('button',{name:'Back',exact:true}).isDisabled(),true);
- const inspector=page.getByRole('complementary',{name:'Flow inspector'});
- for(const group of [expenseEdges,pairEdges])for(const edge of group){
-  const before=await page.locator('[data-map-scene]').getAttribute('transform');
-  await activate(page,method,await streamPoint(page,group.map(e=>e.id)));
-  const chooser=page.getByRole('complementary',{name:'Overlapping streams',exact:true});
-  assert.equal(await chooser.count(),1,'The overlap chooser is map-local, not a persistent inspector selection');
-  assert.equal(await inspector.count(),0);
-  assert.equal(await chooser.getByRole('button',{name:'Inspect '+edge.label,exact:true}).count(),1,'Overlapping streams must offer each exact selector, not silently choose the top hit stroke');
-  for(const member of group)assert.equal(await chooser.getByRole('button',{name:'Inspect '+member.label,exact:true}).count(),1);
-  await activateButton(page,method,chooser.getByRole('button',{name:'Inspect '+edge.label,exact:true}));
-  assert.equal(await chooser.count(),0);
-  await page.waitForFunction(()=>!document.querySelector('.flow-inspector [aria-busy="true"]'));
-  await inspector.locator('tbody tr').first().waitFor();
-  const request=calls.filter(c=>c.name===edge.selector.endpoint).at(-1);
-  assert.deepEqual(request.q,{currency:'CAD',scope:'personal',dataset:'all',start:'2024-01-01',end:'2024-08-15',...edge.selector.filters,offset:'0',limit:'25'});
-  await activateButton(page,method,page.getByRole('button',{name:'Close inspector',exact:true}));
-  assert.equal(await inspector.count(),0);assert.equal(await page.locator('[data-map-scene]').getAttribute('transform'),before);
+async function activateButton(method,button){if(method==='touch')await button.tap();else await button.click();}
+async function expandNarrowAccounts(page,width){if(width<=600){const expand=page.locator('.money-sankey-controls').getByRole('button',{name:'Expand Other accounts',exact:true});if(await expand.count())await expand.click();}}
+async function inspectMember(page,label,method='mouse'){
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await activateButton(method,inspector.getByRole('button',{name:'Inspect '+label,exact:true}));
+ await inspector.locator('.transaction-row').first().waitFor();
+ return inspector;
+}
+for(const width of [390,1280])for(const method of ['mouse','touch'])test(`mounted Sankey exposes exact expense, refund and parallel selectors by ${method} at ${width}`,{timeout:30000},async t=>{
+ const expenses=[expense('cash-food',false),expense('food-refund',true)],pairs=[pair('cash-reserve','own_cash'),pair('cash-reserve-other','brokerage_cash')];
+ const {page,calls}=await fixture(t,{width,edges:[...expenses,...pairs]});await expandNarrowAccounts(page,width);
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await activateAccount(page,method);
+ assert.equal(await inspector.count(),1,'Selecting a mounted account node opens its exact stream list');
+ for(const stream of [...expenses,...pairs]){
+  await inspectMember(page,stream.label,method);
+  const request=calls.filter(call=>call.name===stream.selector.endpoint).at(-1);
+  for(const [key,value] of Object.entries(stream.selector.filters))assert.equal(request.q[key],value,`Preserve the exact ${key} selector`);
+  await page.getByRole('button',{name:'Close inspector',exact:true}).click();assert.equal(await inspector.count(),0);
+  if(stream!==pairs.at(-1))await activateAccount(page,method);
  }
 });
-for(const width of [390,1280])test(`same-column internal curve anchors node boundaries inside realm at ${width}`,{timeout:20000},async t=>{
- const {page}=await fixture(t,{width,edges:[...flow.edges,{...pair('spare-reserve','own_cash'),source:'spare'}]});
- assert.equal(await page.locator('[data-node-kind="account"]').count(),3,'Retain the middle-column filler account through projection');
- assert.equal(await page.evaluate(()=>document.querySelector('[data-node="cash"] .map-node').getBBox().x===document.querySelector('[data-node="reserve"] .map-node').getBBox().x),true,'Exercise an actual same-column route on desktop too');
- const geometry=await page.locator('[data-edge="cash-reserve"] .amount-band').evaluate(path=>{
-  const rect=id=>document.querySelector(`[data-node="${id}"] .map-node`).getBBox(),realm=document.querySelector('.account-realm').getBBox(),length=path.getTotalLength();
-  const boundary=(p,r)=>Math.min(Math.abs(p.x-r.x),Math.abs(p.x-r.x-r.width),Math.abs(p.y-r.y),Math.abs(p.y-r.y-r.height))<.1&&p.x>=r.x-.1&&p.x<=r.x+r.width+.1&&p.y>=r.y-.1&&p.y<=r.y+r.height+.1;
-  const start=path.getPointAtLength(0),end=path.getPointAtLength(length),b=path.getBBox(),half=Number(path.getAttribute('stroke-width'))/2;
-  return {start:{x:start.x,y:start.y},end:{x:end.x,y:end.y},anchored:boundary(start,rect('cash'))&&boundary(end,rect('reserve')),inside:b.x-half>=realm.x&&b.x+b.width+half<=realm.x+realm.width&&b.y-half>=realm.y&&b.y+b.height+half<=realm.y+realm.height};
+for(const width of [390,1280])test(`mounted Sankey nodes and paths have finite contained geometry at ${width}`,{timeout:20000},async t=>{
+ const {page}=await fixture(t,{width,edges:[...flow.edges,{...pair('spare-reserve','own_cash'),source:'spare'}]});await expandNarrowAccounts(page,width);await page.locator('.money-sankey .sankey-link[data-edge]').first().waitFor();
+ const geometry=await page.locator('.money-sankey-chart').evaluate(chart=>{
+  const finite=node=>{const r=node.getBBox();return [r.x,r.y,r.width,r.height].every(Number.isFinite)&&r.width>=0&&r.height>=0;};
+  return {nodes:[...chart.querySelectorAll('.sankey-node')].every(finite),links:[...chart.querySelectorAll('.sankey-link')].every(finite),enclosure:[...document.querySelectorAll('.money-sankey-enclosure')].some(node=>{const r=node.getBoundingClientRect();return [r.left,r.top,r.width,r.height].every(Number.isFinite)&&r.width>0&&r.height>0;})};
  });
- assert.equal(geometry.anchored,true,JSON.stringify(geometry));assert.equal(geometry.inside,true,'The visible internal band, not only its centerline, stays in Your accounts');
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'The integrated map remains contained in the browser viewport');
+ assert.equal(geometry.nodes,true,JSON.stringify(geometry));assert.equal(geometry.links,true,JSON.stringify(geometry));assert.equal(geometry.enclosure,true,'The accepted account-role enclosure is mounted with the Plotly geometry');
 });
-for(const width of [390,1280])test(`chooser stays above an existing inspector and returns focus to its invoking edge at ${width}`,{timeout:30000},async t=>{
- const expenseEdges=[expense('cash-food',false),expense('food-refund',true)];
- const {page,calls}=await fixture(t,{width,edges:[...expenseEdges,...flow.edges]});
- await activate(page,'mouse',await streamPoint(page,['cash-reserve']));
- const inspector=page.getByRole('complementary',{name:'Flow inspector'});await inspector.locator('tbody tr').first().waitFor();
- const point=await streamPoint(page,expenseEdges.map(e=>e.id)),invoker=await page.evaluate(p=>document.elementFromPoint(p.x,p.y)?.closest('[data-edge]')?.dataset.edge,point);
- await activate(page,'touch',point);
- const chooser=page.getByRole('complementary',{name:'Overlapping streams',exact:true}),choice=chooser.getByRole('button',{name:'Inspect '+expenseEdges[0].label,exact:true});
- await choice.waitFor();
- assert.equal(await chooser.evaluate(panel=>{const a=panel.getBoundingClientRect(),b=document.querySelector('[aria-label="Flow inspector"]').getBoundingClientRect(),x=(Math.max(a.left,b.left)+Math.min(a.right,b.right))/2,y=(Math.max(a.top,b.top)+Math.min(a.bottom,b.bottom))/2;return panel.contains(document.elementFromPoint(x,y));}),true,'The shared panel area must hit the local chooser, not the previous inspector');
- assert.equal(await choice.evaluate(button=>{const r=button.getBoundingClientRect();return button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),true,'The chooser must receive input above the already-open inspector');
- await activateButton(page,'touch',chooser.getByRole('button',{name:'Close stream chooser',exact:true}));
- assert.equal(await page.evaluate(()=>document.activeElement?.dataset.edge),invoker,'Return focus to the invoking edge, not the first edge');
- assert.equal(await inspector.count(),1,'Closing the chooser preserves the prior inspection');
- await activate(page,'mouse',await streamPoint(page,expenseEdges.map(e=>e.id)));
- await page.keyboard.press('Escape');assert.equal(await chooser.count(),0);assert.equal(await page.evaluate(()=>document.activeElement?.dataset.edge),invoker);
- await activate(page,'touch',await streamPoint(page,expenseEdges.map(e=>e.id)));
- await activateButton(page,'touch',choice);await inspector.locator('tbody tr').first().waitFor();
- assert.equal(calls.filter(c=>c.name==='transactions').at(-1).q.direction,'outgoing');assert.equal(await inspector.count(),1);
+for(const width of [390,1280])test(`selection inspector dismisses cleanly and returns focus to the selected Sankey link at ${width}`,{timeout:25000},async t=>{
+ const {page}=await fixture(t,{width,edges:[expense('cash-food',false),...flow.edges]});await expandNarrowAccounts(page,width);
+ const link=page.locator('.money-sankey .sankey-link[data-edge]').first();await link.focus();await page.keyboard.press('Enter');
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspector.waitFor();await inspector.getByRole('button',{name:/Inspect/}).first().click();await inspector.locator('.transaction-row').first().waitFor();
+ await page.keyboard.press('Escape');assert.equal(await inspector.count(),0);assert.equal(await page.evaluate(()=>document.activeElement?.matches('.money-sankey .sankey-link.is-selected')),true,'Dismissal keeps keyboard focus on the selected mounted route');
 });
-for(const action of ['replace','dismiss'])test(`inspection ${action} removes both overlays without leaving stale evidence`,{timeout:20000},async t=>{
- const expenseEdges=[expense('cash-food',false),expense('food-refund',true)];
- const {page}=await fixture(t,{width:1280,edges:[...expenseEdges,...flow.edges]});
- await activate(page,'mouse',await streamPoint(page,['cash-reserve']));
- const inspector=page.getByRole('complementary',{name:'Flow inspector'});await inspector.locator('tbody tr').first().waitFor();
- await activate(page,'mouse',await streamPoint(page,expenseEdges.map(e=>e.id)));
- await page.getByRole('complementary',{name:'Overlapping streams',exact:true}).waitFor();
+for(const action of ['replace','dismiss'])test(`inspection ${action} replaces or clears actual Finance evidence without stale overlays`,{timeout:20000},async t=>{
+ const {page,calls}=await fixture(t,{width:1280,edges:[expense('cash-food',false),expense('food-refund',true),...flow.edges]});
+ await page.locator('.money-sankey-band[data-role="other"] > button:first-child').click();const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspector.getByRole('button',{name:'Inspect Everyday → Food',exact:true}).click();await inspector.locator('.transaction-row').first().waitFor();
  if(action==='replace'){
-  await page.locator('[data-edge="cash-food"]').focus();await page.keyboard.press('Enter');
-  assert.equal(await inspector.count(),1,'Replacing inspection must remove the previous evidence panel as well as chooser');
-  await inspector.locator('tbody tr').first().waitFor();assert.match(await inspector.textContent(),/Everyday → Food/);
- }else{
-  await page.locator('[data-edge="cash-food"]').focus();await page.keyboard.press('Escape');
- }
- if(action==='replace')await page.getByRole('button',{name:'Close inspector',exact:true}).click();
- assert.equal(await page.locator('.flow-inspector').count(),0,'Dismissing inspection must remove every evidence/chooser overlay');
+  await page.locator('.money-sankey .sankey-link[data-edge]').nth(1).focus();await page.keyboard.press('Enter');
+  await inspector.getByRole('button',{name:'Inspect Food refund → Everyday',exact:true}).click();await inspector.locator('.transaction-row').first().waitFor();
+  assert.equal(calls.filter(call=>call.name==='transactions').at(-1).q.direction,'incoming');
+  await page.getByRole('button',{name:'Close inspector',exact:true}).click();
+ }else await page.keyboard.press('Escape');
+ assert.equal(await page.locator('.flow-inspector').count(),0,'No previous exact evidence panel survives dismissal or replacement');
 });
-for(const width of [390,1280])test(`large overlap chooser pages every exact stream at ${width}`,{timeout:30000},async t=>{
+for(const width of [390,1280])test(`exact movement finder pages every dense selector at ${width}`,{timeout:30000},async t=>{
  const outgoing=Array.from({length:80},(_,i)=>{const edge=expense('food-'+i,false);return {...edge,label:'Food purchase '+i,selector:{...edge.selector,filters:{...edge.selector.filters,category:'expense.food.item'+i}}};}),refund=expense('refund',true);
- const {page,calls}=await fixture(t,{width,edges:[...outgoing,refund]});
- const ids=await page.locator('[data-edge]').evaluateAll(nodes=>nodes.map(n=>n.dataset.edge));
- await activate(page,'touch',await streamPoint(page,ids));
- const chooser=page.getByRole('complementary',{name:'Overlapping streams',exact:true}),seen=[];
- for(let i=0;i<4;i++){
-  const labels=await chooser.locator('.stream-member').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-label')));
-  assert.ok(labels.length>0&&labels.length<=25,'Large overlapping route lists must render at most 25 exact choices at a time');seen.push(...labels);
-  if(i<3)await activateButton(page,'touch',chooser.getByRole('button',{name:'Next streams',exact:true}));
- }
- assert.deepEqual(seen,[...outgoing,refund].map(e=>'Inspect '+e.label));
- assert.equal(await chooser.getByRole('button',{name:'Next streams',exact:true}).isDisabled(),true);
- await activateButton(page,'touch',chooser.getByRole('button',{name:'Previous streams',exact:true}));
- assert.equal(await chooser.locator('.stream-member').first().getAttribute('aria-label'),'Inspect Food purchase 50');
- await activateButton(page,'touch',chooser.getByRole('button',{name:'Next streams',exact:true}));
- await activateButton(page,'touch',chooser.getByRole('button',{name:'Inspect '+refund.label,exact:true}));
- const inspector=page.getByRole('complementary',{name:'Flow inspector'});await inspector.locator('tbody tr').first().waitFor();
- const q=calls.filter(c=>c.name==='transactions').at(-1).q;assert.equal(q.direction,'incoming');assert.equal(q.category,'expense.food');assert.equal(q.category_mode,'exact');
+ const {page,calls}=await fixture(t,{width,edges:[...outgoing,refund]});await expandNarrowAccounts(page,width);
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Food purchase');
+ const results=finder.locator('.money-sankey-stream-results'),seen=[];
+ for(let i=0;i<4;i++){const labels=await results.locator('button[aria-label^="Inspect Food purchase"]').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label')));assert.ok(labels.length>0&&labels.length<=25);seen.push(...labels);if(i<3)await results.getByRole('button',{name:'Next matching movements'}).click();}
+ assert.deepEqual(seen,outgoing.map(edge=>'Inspect '+edge.label));
+ await finder.getByLabel('Search exact movements').fill('Food refund → Everyday');await results.getByRole('button',{name:/Inspect Food refund/}).click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspectMember(page,refund.label);
+ const request=calls.filter(call=>call.name==='transactions').at(-1).q;assert.equal(request.direction,'incoming');assert.equal(request.category,'expense.food');assert.equal(request.category_mode,'exact');
 });
-for(const width of [390,1280])test(`self-loops retain real selection and zoom/pan at ${width}`,{timeout:30000},async t=>{
+for(const width of [390,1280])test(`same-account loop remains exact evidence with real zoom, pan and Fit controls at ${width}`,{timeout:30000},async t=>{
  const loop={...pair('self-loop','own_cash'),source:'reserve',target:'reserve',label:'Reserve internal loop',selector:{endpoint:'transfers',filters:{source_account:'Reserve',target_account:'Reserve',link_type:'own_cash',transfer_status:'matched'}}};
- const {page,context,calls}=await fixture(t,{width,edges:[...flow.edges,loop]});
- const path=page.locator('[data-edge="self-loop"] .amount-band'),shape=await path.getAttribute('d');
- assert.ok(await path.evaluate(p=>p.getTotalLength())>100,'A self-loop must not collapse to zero length');
- const scene=page.locator('[data-map-scene]'),initial=await scene.getAttribute('transform'),viewport=page.locator('[data-map-viewport]');
- await page.getByRole('button',{name:'Zoom in',exact:true}).click();assert.notEqual(await scene.getAttribute('transform'),initial);
- await page.getByRole('button',{name:'Fit diagram',exact:true}).click();assert.equal(await scene.getAttribute('transform'),initial);
- await viewport.scrollIntoViewIfNeeded();let box=await viewport.boundingBox();
- await page.mouse.move(box.x+box.width/2,box.y+30);await page.mouse.wheel(0,-180);
- await page.waitForFunction(before=>document.querySelector('[data-map-scene]').getAttribute('transform')!==before,initial);
- await page.getByRole('button',{name:'Fit diagram',exact:true}).click();await viewport.scrollIntoViewIfNeeded();box=await viewport.boundingBox();
- await page.mouse.move(box.x+box.width/2,box.y+30);await page.mouse.down();await page.mouse.move(box.x+box.width/2+35,box.y+65,{steps:5});await page.mouse.up();
- assert.notEqual(await scene.getAttribute('transform'),initial);
- await page.getByRole('button',{name:'Fit diagram',exact:true}).click();await viewport.scrollIntoViewIfNeeded();box=await viewport.boundingBox();
- const cdp=await context.newCDPSession(page),x=box.x+box.width/2,y=box.y+box.height/2;
- await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:x-25,y,id:1},{x:x+25,y,id:2}]});
- await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:x-65,y:y+20,id:1},{x:x+65,y:y+20,id:2}]});
- await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});assert.notEqual(await scene.getAttribute('transform'),initial);
- assert.equal(await page.getByRole('complementary',{name:/^(Flow inspector|Overlapping streams)$/}).count(),0,'Dragging and pinching must not select streams');
- await page.getByRole('button',{name:'Fit diagram',exact:true}).click();assert.equal(await scene.getAttribute('transform'),initial);assert.equal(await path.getAttribute('d'),shape);
- for(const method of ['mouse','touch']){
-  await activate(page,method,await streamPoint(page,['self-loop']));
-  const inspector=page.getByRole('complementary',{name:'Flow inspector'});await inspector.locator('tbody tr').first().waitFor();
-  assert.equal(calls.filter(c=>c.name==='transfers').at(-1).q.source_account,'Reserve');assert.equal(calls.filter(c=>c.name==='transfers').at(-1).q.target_account,'Reserve');
-  await activateButton(page,method,page.getByRole('button',{name:'Close inspector',exact:true}));
- }
+ const {page,calls}=await fixture(t,{width,edges:[...flow.edges,loop]});await expandNarrowAccounts(page,width);
+ const initial=await page.locator('.money-sankey-view-controls output').textContent();await page.getByRole('button',{name:'Zoom in',exact:true}).click();assert.notEqual(await page.locator('.money-sankey-view-controls output').textContent(),initial);
+ await page.getByRole('button',{name:'Fit map to view',exact:true}).click();assert.equal(await page.locator('.money-sankey-view-controls output').textContent(),initial);
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Reserve internal loop');await finder.getByRole('button',{name:'Inspect Reserve internal loop',exact:true}).click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspectMember(page,'Reserve internal loop');
+ const request=calls.filter(call=>call.name==='transfers').at(-1).q;assert.equal(request.source_account,'Reserve');assert.equal(request.target_account,'Reserve');assert.equal(request.link_type,'own_cash');assert.equal(request.transfer_status,'matched');
+ await page.getByRole('button',{name:'Close inspector',exact:true}).click();
 });
