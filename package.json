@@ -1,14 +1,9 @@
 {
   "name": "hermes-mobile-checks",
   "private": true,
-  "description": "Pinned test and deterministic Finance asset build dependencies",
+  "description": "Pinned test dependencies",
   "devDependencies": {
-    "esbuild": "0.28.2",
     "jsdom": "29.1.1",
-    "playwright": "1.58.2",
-    "plotly.js-dist-min": "4.1.2"
-  },
-  "scripts": {
-    "build:finance": "node scripts/build_finance_plotly.mjs"
+    "playwright": "1.58.2"
   }
 }

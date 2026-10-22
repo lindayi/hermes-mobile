@@ -206,5 +206,4 @@ h2,h3,.brand{font-family:"Helvetica Neue",Arial,sans-serif;letter-spacing:-.015e
 .auth-shell header{margin-bottom:48px}
 .auth-card h1{font-size:40px}
 .auth-card>.muted{font-size:16px;margin-bottom:28px}
-.account-finance-link{display:inline-flex;align-items:center;min-height:44px;padding:8px 0;font-weight:600}
 @media(min-width:760px){.auth-shell header{margin-bottom:56px}.auth-card h1{font-size:42px}.page-heading h1{font-size:34px}}

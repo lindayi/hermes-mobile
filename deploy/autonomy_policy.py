@@ -33,7 +33,7 @@ SOURCE_CONTROL_ROOTS = frozenset({
 SOURCE_CONTROL_PYTHON_FILES = frozenset({
     'backend/app.py', 'backend/attachments.py', 'backend/auth.py', 'backend/auth_store.py',
     'backend/background_delivery.py', 'backend/catalog_search.py', 'backend/chat_snapshot.py',
-    'backend/clarifications.py', 'backend/finance.py', 'backend/finance_market.py',
+    'backend/clarifications.py',
     'backend/configuration.py', 'backend/model_controls.py', 'backend/native_api_service.py',
     'backend/native_notifications.py', 'backend/native_run_controls.py',
     'backend/context_compression_presentation.py', 'backend/delivery.py',
@@ -131,8 +131,6 @@ REQUIRED_FILES = (
     'backend/configuration.py',
     'backend/context_compression_presentation.py',
     'backend/delivery.py',
-    'backend/finance.py',
-    'backend/finance_market.py',
     'backend/hermes_client.py',
     'backend/jobs.py',
     'backend/model_controls.py',
@@ -267,29 +265,30 @@ ISSUE115_REVIEW_EVIDENCE_OVERLAY = {
     'deploy/review_evidence.py': 'e2f9a8c2082ca5b4c180395bd915d983ed9ba3aeaa8670d0083696c17500d3d6',
 }
 SOURCE_FINGERPRINTS.update(ISSUE115_REVIEW_EVIDENCE_OVERLAY)
-# Issue #122 owner-only finance and nested frontend entrypoints. Retain the
-# historical app/build pins above; these values attest source consistency only.
-ISSUE122_FINANCE_OVERLAY = {
+# Retain historical shell/build pins from issue #122; feature-only modules are
+# no longer part of the Mobile source inventory (issue #131).
+ISSUE122_SHELL_BUILD_OVERLAY = {
     'backend/app.py': '0140f22b01003b04bd64372991452888e5985a17b44d34b005855bbedad1a568',
-    'backend/finance.py': '21d442ad8bc6002711ab82dcb4f4975da93d6365face11941430ad44b3ebeae5',
-    'backend/finance_market.py': '4fb17c3fc66e3d094291b3192eee02366ee879da3298c027eb27e51b39e8e731',
     'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
 }
-SOURCE_FINGERPRINTS.update(ISSUE122_FINANCE_OVERLAY)
-# Issue #124 adds the read-only money map; historical source pins remain above.
-ISSUE124_MONEY_MAP_OVERLAY = {
-    'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
-}
-SOURCE_FINGERPRINTS.update(ISSUE124_MONEY_MAP_OVERLAY)
-# Issue #127 adds Finance build inputs and the read-only payslip-ID selector.
-ISSUE127_FINANCE_INTEGRATION_OVERLAY = {
-    'backend/finance.py': '0a2f9c020602893badc98246860f838fff384c1ac018cdefcd2dfa2df1953b49',
+SOURCE_FINGERPRINTS.update(ISSUE122_SHELL_BUILD_OVERLAY)
+# Retain historical build/workflow pins from issue #127.
+ISSUE127_BUILD_OVERLAY = {
     '.github/workflows/ci.yml': '5025e464918a2e8ea1f483596cc256210cf7709913041ee07b79d89743d7a857',
     'deploy/frontend_release.py': 'b2132ef75f0f187b119304207882777a2cf88d837dd284d66cc041ec28421881',
     'package.json': '476c6215e7f46554703a81a4b68d86c56dc5edec98e9302ada5bb542487206db',
     'package-lock.json': '7c33641b35ce9d606f6c4db17deb5c2e95c7ad69c52dd57ac24781a0d1da2261',
 }
-SOURCE_FINGERPRINTS.update(ISSUE127_FINANCE_INTEGRATION_OVERLAY)
+SOURCE_FINGERPRINTS.update(ISSUE127_BUILD_OVERLAY)
+# Issue #131 removes personal feature registration and build dependencies.
+ISSUE131_MOBILE_SCOPE_OVERLAY = {
+    '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
+    'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
+    'deploy/frontend_release.py': 'c4dfb36c57abdb22e3f1ad7b6f2b5455bccfaa854cf6aafa9419d0c780511d95',
+    'package.json': '89b9b012176674bada40c7a010516703f85ed8cbe778e007db10084f35c15931',
+    'package-lock.json': '63199915d106fefd775451eb7d4aed9a3c2d04ca6f670ef9f27ba0cd6098218a',
+}
+SOURCE_FINGERPRINTS.update(ISSUE131_MOBILE_SCOPE_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
@@ -354,8 +353,6 @@ SOURCE_BLOCKERS = {
     'backend/chat_snapshot.py': 'execution-source-contract',
     'backend/context_compression_presentation.py': 'execution-source-contract',
     'backend/delivery.py': 'execution-source-contract',
-    'backend/finance.py': 'execution-source-contract',
-    'backend/finance_market.py': 'execution-source-contract',
     'backend/hermes_client.py': 'execution-source-contract',
     'backend/jobs.py': 'execution-source-contract',
     'backend/native_catalog.py': 'execution-source-contract',

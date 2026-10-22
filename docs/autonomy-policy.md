@@ -115,22 +115,25 @@ resolves relative package imports and initializers and rejects unresolved local 
 unsupported dynamic imports. It does not discover arbitrary subprocess roots or
 establish complete execution-source coverage by itself.
 
-### Issue #122 finance source family
+### Issue #131 public Mobile source scope
 
-The issue #122 overlay pins `backend/app.py`, `backend/finance.py`,
-`backend/finance_market.py`, and `deploy/frontend_release.py` for the owner-only,
-read-only Finance Observatory and its nested frontend entrypoint. The finance
-modules are explicit members of the fixed local Python closure and required
-source inventory, with the existing `execution-source-contract` blocker. Tests
-retain independent literal digests and reject missing, malformed, mutated, or
-superseded source pins in every transition phase. Earlier app/build literals and
-`SOURCE_BASELINES` remain historical provenance, not current candidate values.
-These pins establish source consistency only: they do not establish exact-head
-Copilot review, hosted CI, merge authorization, or deployment evidence. Issue #124
-adds a later finance-only overlay for the explorable money map, preserving issue
-#122's literal history. Refresh the current policy and independent fixture literals
-together after source changes; never derive expected digests from candidate files
-at test runtime. No review, CI, authorization or deployment policy is changed.
+The personal application is no longer part of Mobile's source inventory, Python
+closure, frontend release, or package dependencies. Issue #131 pins the resulting
+`backend/app.py`, `deploy/frontend_release.py`, `package.json`,
+`package-lock.json`, and `.github/workflows/ci.yml`. The app registration is
+restored to its pre-feature bytes;
+the frontend builder retains generic nested entrypoint versioning without a
+feature-specific build subprocess. Historical shell, build, and workflow literals
+from issues #122 and #127 remain available, as do earlier unrelated overlays and
+`SOURCE_BASELINES`. Removed modules are not required by any current phase.
+
+Tests retain independent literal digests and reject missing, malformed, mutated,
+or superseded current source pins in every transition phase. Refresh policy and
+independent fixture literals together; never derive expected digests from candidate
+files at test runtime. Source consistency does not establish exact-head Copilot
+review, hosted CI, merge authorization, or deployment evidence. No review, CI,
+authorization or deployment protection changes. Source merge is not activation;
+independent routing must be verified before any guarded deployment of this removal.
 
 ### Historical issue #100 authorization and rendered-review candidate
 
