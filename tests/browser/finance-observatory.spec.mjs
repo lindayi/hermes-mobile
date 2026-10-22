@@ -595,3 +595,92 @@ test('raw-member aggregates refresh current counts and close when only a same-ID
  await page.getByRole('button',{name:'Back'}).click();await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
  assert.equal(await page.locator('.flow-inspector').count(),0,'Back must not restore a removed CAD member from a saved aggregate');
 });
+
+const payrollHeaders=[
+ {payroll_id:'pay-a',pay_date:'2024-08-15',currency:'CAD',gross_minor:500000,net_minor:350000,net_difference_minor:0},
+ {payroll_id:'pay-b',pay_date:'2024-08-01',currency:'CAD',gross_minor:600000,net_minor:420000,net_difference_minor:0},
+];
+function payrollDetail(id,evidenceLabel=id){
+ const payroll=payrollHeaders.find(row=>row.payroll_id===id);
+ const record={record_id:`record-${id}`,date:payroll.pay_date,account:id==='pay-a'?'Fixture cash A':'Fixture investment B',currency:'CAD',dataset:id==='pay-a'?'bank':'investment'};
+ return {...common,payroll:payrollHeaders,components:[{payroll_id:id,code:`component-${id}`,kind:'earning',amount_minor:payroll.gross_minor,cash_effect_minor:payroll.net_minor,ytd_minor:payroll.gross_minor}],links:[{payroll_id:id,code:`link-${id}`,status:'matched',evidence:evidenceLabel,linked_record:record}],coverage:{selected_payroll_id:id,payroll:{complete:true},components:{complete:true},links:{complete:true}},awards:[],vesting:[]};
+}
+function openPayrollLinks(page){
+ const panel=page.locator('.panel').filter({has:page.getByRole('heading',{name:'Payroll-linked evidence'})});
+ return panel.locator('details').evaluate(node=>node.open).then(async open=>{if(!open)await panel.locator('details > summary').click();return panel;});
+}
+async function openCompensation(page){
+ await page.getByRole('tab',{name:'Compensation',exact:true}).click();
+ await page.getByLabel('Select payslip').waitFor();
+ return page.getByLabel('Select payslip');
+}
+
+test('Compensation resumes safely and keeps selected-payslip links bound to its detail',{timeout:45000},async t=>{
+ const {page,url}=await fixture(t),initial=payrollDetail('pay-a','A cached evidence');
+ let releaseStale,staleStarted;
+ const staleGate=new Promise(resolve=>releaseStale=resolve),started=new Promise(resolve=>staleStarted=resolve);
+ let bRequests=0,linkedQuery;
+ await page.route('**/finance/compensation**',async route=>{
+  const id=new URL(route.request().url()).searchParams.get('payroll_id');
+  if(!id)return route.fulfill({json:initial});
+  if(id==='pay-b'&&++bRequests===1){staleStarted();await staleGate;return route.fulfill({json:payrollDetail('pay-b','B stale detail')});}
+  return route.fulfill({json:payrollDetail(id,`${id==='pay-a'?'A':'B'} current detail`)});
+ });
+ await page.route('**/finance/transactions**',route=>{
+  linkedQuery=Object.fromEntries(new URL(route.request().url()).searchParams);
+  return route.fulfill({json:{...common,items:[{record_id:linkedQuery.record_id,date:linkedQuery.start,account:linkedQuery.account,description:'B linked investment record',amount_minor:12500,currency:linkedQuery.currency}],total:1,limit:25,offset:0}});
+ });
+ await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ const picker=await openCompensation(page),linksPanel=await openPayrollLinks(page);
+ await linksPanel.getByText('A cached evidence',{exact:true}).waitFor();
+ await picker.selectOption('pay-b');await started;
+ await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));});
+ await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));});
+ await page.waitForFunction(()=>!document.body.classList.contains('private-paused'));
+ releaseStale();
+ await page.waitForTimeout(20);
+ assert.equal(await page.getByText('B stale detail',{exact:true}).count(),0,'a detail request started before hiding cannot repaint after resume');
+ await picker.selectOption('pay-a');
+ await openPayrollLinks(page);
+ await linksPanel.getByText('A cached evidence',{exact:true}).waitFor();
+ await picker.selectOption('pay-b');
+ await page.getByText('B current detail',{exact:true}).waitFor({state:'attached'});
+ await openPayrollLinks(page);
+ await linksPanel.getByText('B current detail',{exact:true}).waitFor();
+ await linksPanel.getByRole('button',{name:'Inspect linked entry'}).click();
+ await page.getByText('B linked investment record',{exact:true}).waitFor();
+ assert.deepEqual(linkedQuery,{start:'2024-08-01',end:'2024-08-01',currency:'CAD',scope:'all',dataset:'all',account:'Fixture investment B',record_id:'record-pay-b',offset:'0',limit:'25'});
+});
+
+test('Compensation clears prior payroll links while loading and when selected detail is invalid or unavailable',{timeout:45000},async t=>{
+ const {page,url}=await fixture(t),initial=payrollDetail('pay-a','A source evidence');
+ let bRequests=0;
+ await page.route('**/finance/compensation**',route=>{
+  const id=new URL(route.request().url()).searchParams.get('payroll_id');
+  if(!id)return route.fulfill({json:initial});
+  if(id==='pay-b'&&++bRequests===1)return route.fulfill({json:payrollDetail('pay-a','A stale evidence')});
+  return route.fulfill({status:503,json:{error:'synthetic unavailable'}});
+ });
+ await page.goto(url);await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ const picker=await openCompensation(page),linksPanel=await openPayrollLinks(page);
+ await linksPanel.getByText('A source evidence',{exact:true}).waitFor();
+ await picker.selectOption('pay-b');
+ assert.equal(await linksPanel.getByText('A source evidence',{exact:true}).count(),0,'old payroll links clear before the next detail request');
+ await page.getByText(/detailed source record is unavailable/i).waitFor();
+ assert.equal(await linksPanel.getByText('A stale evidence',{exact:true}).count(),0,'wrong-payroll detail cannot restore another slip’s links');
+ await picker.selectOption('pay-a');
+ await openPayrollLinks(page);
+ await linksPanel.getByText('A source evidence',{exact:true}).waitFor();
+ await picker.selectOption('pay-b');
+ assert.equal(await linksPanel.getByText('A source evidence',{exact:true}).count(),0,'old links clear while failed detail is pending');
+ await page.getByText(/Payslip detail unavailable/).waitFor();
+ assert.equal(await linksPanel.getByText('A source evidence',{exact:true}).count(),0,'failed detail does not borrow another payslip’s links');
+ await picker.selectOption('pay-a');
+ await picker.evaluate(node=>window.__detachedPayrollPicker=node);
+ await page.getByRole('tab',{name:'Overview',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+ await page.evaluate(()=>{window.__detachedPayrollPicker.value='pay-b';window.__detachedPayrollPicker.dispatchEvent(new Event('change',{bubbles:true}));});
+ await openCompensation(page);
+ assert.equal(await page.getByLabel('Select payslip').inputValue(),'pay-a','a detached Compensation handler cannot change selection after a route reload');
+ assert.equal(bRequests,2,'a detached Compensation handler cannot start another detail request');
+});
