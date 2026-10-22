@@ -8,7 +8,7 @@ const html=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;
 
 export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=globalThis.Plotly}={}){
  if(!Plotly)throw new Error('Finance Sankey renderer is unavailable');
- const model=createModel(raw),expanded=[],collapsed=model.project().accountGroups.map(group=>group.id),anchors={};
+ const model=createModel(raw),expanded=[],collapsed=window.matchMedia('(max-width: 600px)').matches?model.project().accountGroups.map(group=>group.id):[],anchors={};
  const stage=document.createElement('div');stage.className='money-sankey';
  const canvas=document.createElement('div');canvas.className='money-sankey-canvas';
  const layer=document.createElement('div');layer.className='money-sankey-layer';
@@ -30,7 +30,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  finder.append(finderSummary,finderInput,finderStatus,finderResults);
  const status=document.createElement('p');status.className='money-sankey-status';status.setAttribute('role','status');
  layer.append(chart,bands);canvas.append(layer);stage.append(canvas);root.replaceChildren(viewControls,controls,jump,explore,finder,stage,status);
- let directory,p,geometry,disposed=false,selected=null,zoom=1;
+ let directory,p,geometry,disposed=false,selected=null,zoom=1,finderOffset=0;
  const sheet=[...document.styleSheets].find(item=>item.ownerNode?.id==='plotly.js-style-global');
  if(!sheet)throw new Error('Finance Sankey stylesheet is unavailable');
  const styleRules=[];let styleNumber=0;
@@ -67,7 +67,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   const modes=[['accounts','Accounts'],['spending','Spending'],['categories','All categories']];
   exploreTabs.replaceChildren(...modes.map(([id,label])=>{const tab=control(label,()=>{exploreMode=id;renderExplore();},label);tab.setAttribute('role','tab');tab.setAttribute('aria-selected',String(id===exploreMode));return tab;}));
   const list=[];
-  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.groupId===group.id))list.push(control(node.label,()=>{const edges=[...p.edges,...p.internalEdges].filter(edge=>edge.source===node.id||edge.target===node.id||edge.members?.some(member=>member.source===node.id||member.target===node.id));select({edges:edges.map(edge=>edge.id),label:node.label});open(edges);},`Inspect account ${node.label}`));
+  if(exploreMode==='accounts')for(const group of p.accountGroups)for(const node of directory.nodes.filter(n=>n.groupId===group.id))list.push(control(node.label,()=>{const members=[...new Map([...p.edges,...p.internalEdges].flatMap(edge=>edge.members||[]).filter(member=>member.source===node.id||member.target===node.id).map(member=>[member.id,member])).values()];select({memberIds:members.map(member=>member.id),label:node.label});open(members);},`Inspect account ${node.label}`));
   if(exploreMode==='spending')for(const row of ranked(p)){
    const currency=raw.currency,fmt=value=>new Intl.NumberFormat('en-CA',{style:'currency',currency}).format(value/100);
    const button=control(`${row.label} · ${fmt(row.net)} net`,()=>{select({edges:row.edges.map(edge=>edge.id),label:row.label});open(row.edges);},`Inspect net spending ${row.label} · gross ${fmt(row.gross)} · refunds ${fmt(row.offset)}`);
@@ -95,8 +95,15 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   const streams=edges.flatMap(edge=>Number.isSafeInteger(edge.amount)&&Array.isArray(edge.members)?edge.members:[edge]);
   const members=[...new Map(streams.map(edge=>[edge.id,edge])).values()];
   if(!members.length)return;
-  const edge={id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,label:members.length===1?members[0].label:`${members.length} exact streams`,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency,members};
+  const projectionIds=[...new Set(edges.filter(edge=>Number.isSafeInteger(edge.amount)&&Array.isArray(edge.members)).map(edge=>edge.id))];
+  const edge={id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,projectionIds,label:members.length===1?members[0].label:`${members.length} exact streams`,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency,members};
   inspect(edge);
+ };
+ const rebind=edge=>{
+  const ids=new Set(edge?.projectionIds||[]);if(!ids.size)return null;
+  const members=[...new Map([...p.edges,...p.internalEdges].filter(item=>ids.has(item.id)).flatMap(item=>item.members||[]).map(member=>[member.id,member])).values()];
+  if(!members.length)return null;
+  return {...edge,id:'sankey-selection:'+members.map(member=>member.id).join('|'),label:members.length===1?members[0].label:`${members.length} exact streams`,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||edge.currency};
  };
  const groupControls=()=>{
   controls.replaceChildren();
@@ -121,11 +128,15 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   jump.onchange=()=>{const band=geometry.bands.find(item=>item.id===jump.value);if(band)stage.scrollTo({top:band.top*zoom,left:band.x*geometry.width*zoom,behavior:'smooth'});};
  };
  const renderFinder=()=>{
-  const term=finderInput.value.trim().toLocaleLowerCase(),streams=[...new Map(p.edges.flatMap(edge=>edge.members||[edge]).map(edge=>[edge.id,edge])).values()],matches=term?streams.filter(edge=>`${edge.label} ${edge.source} ${edge.target}`.toLocaleLowerCase().includes(term)):[],shown=matches.slice(0,25);
-  finderStatus.textContent=term?`${shown.length} of ${matches.length} matching movements shown.`:'Search to choose an exact movement when streams are hard to distinguish.';
-  finderResults.replaceChildren(...shown.map(edge=>control(`${edge.label||'Recorded movement'} · ${new Intl.NumberFormat('en-CA',{style:'currency',currency:edge.currency}).format(edge.amount_minor/100)}`,()=>{select({edges:[edge.id],label:edge.label});open([edge]);},`Inspect ${edge.label||'recorded movement'}`)));
+  const term=finderInput.value.trim().toLocaleLowerCase(),streams=[...new Map(p.edges.flatMap(edge=>edge.members||[edge]).map(edge=>[edge.id,edge])).values()],matches=term?streams.filter(edge=>`${edge.label} ${edge.source} ${edge.target}`.toLocaleLowerCase().includes(term)):[];
+  finderOffset=Math.min(finderOffset,Math.max(0,Math.floor((matches.length-1)/25)*25));
+  const shown=matches.slice(finderOffset,finderOffset+25);
+  finderStatus.textContent=term?`${matches.length?finderOffset+1:0}–${Math.min(finderOffset+shown.length,matches.length)} of ${matches.length} matching movements.`:'Search to choose an exact movement when streams are hard to distinguish.';
+  const previous=control('Previous',()=>{finderOffset=Math.max(0,finderOffset-25);renderFinder();},'Previous matching movements');previous.disabled=finderOffset===0;
+  const next=control('Next',()=>{finderOffset=Math.min(Math.max(0,matches.length-1),finderOffset+25);renderFinder();},'Next matching movements');next.disabled=finderOffset+25>=matches.length;
+  finderResults.replaceChildren(...shown.map(edge=>control(`${edge.label||'Recorded movement'} · ${new Intl.NumberFormat('en-CA',{style:'currency',currency:edge.currency}).format(edge.amount_minor/100)}`,()=>{select({memberIds:[edge.id],label:edge.label});open([edge]);},`Inspect ${edge.label||'recorded movement'}`)),previous,next);
  };
- finderInput.addEventListener('input',renderFinder);
+ finderInput.addEventListener('input',()=>{finderOffset=0;renderFinder();});
  async function draw(){
   if(disposed)return;clearLayoutStyles();
   directory=model.project(expanded,[]);p=model.project(expanded,collapsed);
@@ -155,5 +166,5 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   if(selected)select(selected);
  }
  const onResize=()=>{if(!disposed)void draw();};window.addEventListener('resize',onResize);void draw();
- return {model,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select,snapshot(){return {expanded:[...expanded],collapsed:[...collapsed],anchors:{...anchors},zoom,exploreMode,selected:selected?{...selected}:null,exploreOpen:explore.open,finderOpen:finder.open,finderQuery:finderInput.value,scrollTop:stage.scrollTop,scrollLeft:stage.scrollLeft};},restore(state){if(!state||disposed)return;expanded.splice(0,expanded.length,...(Array.isArray(state.expanded)?state.expanded.filter(id=>model.kind(id)!==undefined):[]));const groups=new Set(model.project().accountGroups.map(group=>group.id));collapsed.splice(0,collapsed.length,...(Array.isArray(state.collapsed)?state.collapsed.filter(id=>groups.has(id)):[]));for(const [id,top] of Object.entries(state.anchors||{}))if(groups.has(id)&&Number.isFinite(top))anchors[id]=top;zoom=Number.isFinite(state.zoom)?Math.min(1.5,Math.max(.65,state.zoom)):1;exploreMode=['accounts','spending','categories'].includes(state.exploreMode)?state.exploreMode:'spending';explore.open=!!state.exploreOpen;finder.open=!!state.finderOpen;finderInput.value=typeof state.finderQuery==='string'?state.finderQuery:'';selected=state.selected||null;if(selected?.group&&!groups.has(selected.group))selected=null;if(selected&&!selected.group&&!selected.node&&!Array.isArray(selected.memberIds))selected=null;void draw().then(()=>{if(selected){const members=membersFor(selected);if(Array.isArray(selected.memberIds)&&!members.length&&!selected.group)selected=null;else select(selected);}stage.scrollTop=Number.isFinite(state.scrollTop)?state.scrollTop:0;stage.scrollLeft=Number.isFinite(state.scrollLeft)?state.scrollLeft:0;});}};
+ return {model,rebind,destroy(){if(disposed)return;disposed=true;window.removeEventListener('resize',onResize);clearLayoutStyles();try{Plotly.purge(chart);}catch{}root.replaceChildren();},select,snapshot(){return {expanded:[...expanded],collapsed:[...collapsed],anchors:{...anchors},zoom,exploreMode,selected:selected?{...selected}:null,exploreOpen:explore.open,finderOpen:finder.open,finderQuery:finderInput.value,finderOffset,scrollTop:stage.scrollTop,scrollLeft:stage.scrollLeft};},restore(state){if(!state||disposed)return;expanded.splice(0,expanded.length,...(Array.isArray(state.expanded)?state.expanded.filter(id=>model.kind(id)!==undefined):[]));const groups=new Set(model.project().accountGroups.map(group=>group.id));collapsed.splice(0,collapsed.length,...(Array.isArray(state.collapsed)?state.collapsed.filter(id=>groups.has(id)):[]));for(const [id,top] of Object.entries(state.anchors||{}))if(groups.has(id)&&Number.isFinite(top))anchors[id]=top;zoom=Number.isFinite(state.zoom)?Math.min(1.5,Math.max(.65,state.zoom)):1;exploreMode=['accounts','spending','categories'].includes(state.exploreMode)?state.exploreMode:'spending';explore.open=!!state.exploreOpen;finder.open=!!state.finderOpen;finderInput.value=typeof state.finderQuery==='string'?state.finderQuery:'';finderOffset=Number.isSafeInteger(state.finderOffset)?Math.max(0,state.finderOffset):0;selected=state.selected||null;if(selected?.group&&!groups.has(selected.group))selected=null;if(selected&&!selected.group&&!selected.node&&!Array.isArray(selected.memberIds))selected=null;void draw().then(()=>{if(selected){const members=membersFor(selected);if(Array.isArray(selected.memberIds)&&!members.length&&!selected.group)selected=null;else select(selected);}stage.scrollTop=Number.isFinite(state.scrollTop)?state.scrollTop:0;stage.scrollLeft=Number.isFinite(state.scrollLeft)?state.scrollLeft:0;});}};
 }

@@ -24,6 +24,7 @@ function updateBack(){back.disabled=!history.length;}
 function indexMapEdge(edge,seen=new Set()){if(!edge||typeof edge.id!=='string'||seen.has(edge.id))return;seen.add(edge.id);mapEdges.set(edge.id,edge);for(const member of array(edge.members))indexMapEdge(member,seen);}
 function currentSelectionEdge(edge){
  if(!edge?.aggregateSelection)return mapEdges.get(edge?.id)||null;
+ if(edge.projectionIds?.length&&sankeyViewInstance){const rebound=sankeyViewInstance.rebind(edge);if(!rebound)return null;indexMapEdge(rebound);return rebound;}
  const current=mapEdges.get(edge.id)||edge,members=[...new Map(array(current.members).map(member=>[member.id,mapEdges.get(member.id)]).filter(([,member])=>member)).values()];
  if(!members.length)return null;
  const rebound={...current,id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||current.currency};

@@ -1,19 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
+import {execFileSync} from 'node:child_process';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const root=process.env.HERMES_FRONTEND_DIR||fileURLToPath(new URL('../../frontend/',import.meta.url));
+let plotlyBuilt=false;
+function buildPlotly(){if(plotlyBuilt)return;execFileSync(process.execPath,[fileURLToPath(new URL('../../scripts/build_finance_plotly.mjs',import.meta.url))],{cwd:fileURLToPath(new URL('../..',import.meta.url))});plotlyBuilt=true;}
 const common={meta:{generated_at:'2024-08-15T12:00:00Z',warnings:[]},currency:'CAD',range:{start:'2024-01-01',end:'2024-08-15'}};
 const nodes=[['salary','Salary','income'],['cash','Everyday','account'],['spare','Spare','account'],['reserve','Reserve','account'],['food','Food','expense']].map(([id,label,kind])=>({id,label,kind,...(kind==='account'?{account:label}:{})}));
 const pair=(id,link_type)=>({id,source:'cash',target:'reserve',kind:'transfer',label:'Everyday → Reserve · '+link_type,amount_minor:10000,currency:'CAD',count:1,selector:{endpoint:'transfers',filters:{source_account:'Everyday',target_account:'Reserve',link_type,transfer_status:'matched'}}});
 const expense=(id,incoming)=>({id,source:incoming?'food':'cash',target:incoming?'cash':'food',kind:'expense',label:incoming?'Food refund → Everyday':'Everyday → Food',amount_minor:incoming?2000:60000,currency:'CAD',count:1,selector:{endpoint:'transactions',filters:{account:'Everyday',category:'expense.food',category_mode:'exact',flow:'expense',direction:incoming?'incoming':'outgoing'}}});
 const flow={...common,coverage:{complete:true},nodes,edges:[pair('cash-reserve','own_cash')]};
 async function fixture(t,{width=390,edges=flow.edges}={}){
+ buildPlotly();
  const calls=[];
- const server=createServer(async(req,res)=>{const u=new URL(req.url,'http://fixture');if(u.pathname==='/hermes/app-api/auth/me'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({user:{id:'synthetic-owner',role:'owner',profile:'default',status:'ready'}}));return;}if(u.pathname.startsWith('/hermes/app-api/finance/')){const name=u.pathname.split('/').pop(),q=Object.fromEntries(u.searchParams);calls.push({name,q});res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');let data={...common};if(name==='meta')data={...common,accounts:nodes.filter(n=>n.account),categories:[],currencies:['CAD']};if(name==='flow')data={...flow,edges};if(name==='transactions')data={...common,items:[{record_id:'synthetic',date:'2024-08-01',account:q.account,description:'Synthetic evidence',amount_minor:q.direction==='incoming'?2000:-60000,currency:'CAD',category_id:q.category}],total:1,offset:0,limit:25};if(name==='transfers')data={...common,items:[{link_id:'synthetic-pair',link_type:q.link_type,debit:{account:q.source_account,date:'2024-08-01',currency:'CAD',amount_minor:-10000},credit:{account:q.target_account,date:'2024-08-01',currency:'CAD',amount_minor:10000}}],total:1,offset:0,limit:25};res.end(JSON.stringify(data));return;}try{const rel=u.pathname.replace('/hermes/','').replace(/\/$/,'/index.html');if(rel.includes('..'))throw Error();res.setHeader('Content-Type',rel.endsWith('.html')?'text/html':rel.endsWith('.css')?'text/css':'text/javascript');res.end(await readFile(root+'/'+rel));}catch{res.writeHead(404);res.end();}});
+ const server=createServer(async(req,res)=>{
+  const u=new URL(req.url,'http://fixture');
+  if(u.pathname==='/hermes/app-api/auth/me'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({user:{id:'synthetic-owner',role:'owner',profile:'default',status:'ready'}}));return;}
+  if(u.pathname.startsWith('/hermes/app-api/finance/')){
+   const name=u.pathname.split('/').pop(),q=Object.fromEntries(u.searchParams);calls.push({name,q});res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
+   let data={...common};
+   if(name==='meta')data={...common,accounts:nodes.filter(n=>n.account),categories:[],currencies:['CAD']};
+   if(name==='flow')data={...flow,currency:q.currency,range:{start:q.start,end:q.end},edges:edges.map(edge=>({...edge,currency:q.currency}))};
+   if(name==='transactions')data={...common,items:[{record_id:'synthetic',date:'2024-08-01',account:q.account,description:'Synthetic evidence',amount_minor:q.direction==='incoming'?2000:-60000,currency:q.currency,category_id:q.category}],total:1,offset:0,limit:25};
+   if(name==='transfers')data={...common,items:[{link_id:'synthetic-pair',link_type:q.link_type,debit:{account:q.source_account,date:'2024-08-01',currency:q.currency,amount_minor:-10000},credit:{account:q.target_account,date:'2024-08-01',currency:q.currency,amount_minor:10000}}],total:1,offset:0,limit:25};
+   res.end(JSON.stringify(data));return;
+  }
+  try{const rel=u.pathname.replace('/hermes/','').replace(/\/$/,'/index.html');if(rel.includes('..'))throw Error();res.setHeader('Content-Type',rel.endsWith('.html')?'text/html':rel.endsWith('.css')?'text/css':'text/javascript');res.end(await readFile(root+'/'+rel));}catch{res.writeHead(404);res.end();}
+ });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',args:['--no-sandbox','--disable-dev-shm-usage']});t.after(()=>browser.close());
  const context=await browser.newContext({viewport:{width,height:1000},hasTouch:true,serviceWorkers:'block'}),page=await context.newPage();page.setDefaultTimeout(5000);
