@@ -48,7 +48,7 @@ export function createPager(members,api,account=''){
    const added=[];
    for(const item of data.items){
     if(selector.endpoint==='transactions'){if(!stream.excludeRecordIds?.includes(item.record_id)&&accepts(item))added.push(transaction(item,stream.evidenceNote||''));}
-    else for(const side of ['debit','credit'])if(item[side]&&accepts(item[side]))added.push({...transaction(item[side],stream.evidenceNote||''),description:'Transfer · '+String(item.link_type||'').replaceAll('_',' '),transfer:item.link_id,side,counterparty:item[side==='debit'?'credit':'debit']?.account});
+    else for(const side of ['debit','credit'])if(item[side]&&accepts(item[side]))added.push({...transaction(item[side],stream.evidenceNote||''),description:'Transfer · '+String(item.link_type||'').replaceAll('_',' '),transfer:item.link_id,side,counterparty:item[side==='debit'?'credit':'debit']?.account,transferEvidence:item.evidence??item.rationale??'',transferConfidence:item.confidence??null,transferProtectedBoundary:item.protected_boundary});
    }
    for(const row of added)state.records.set(row.id+'|'+row.account,row);
    state.offset+=data.items.length;if(state.offset>=data.total)index++;
