@@ -55,7 +55,7 @@ for(const holdings of [[],[{security_key:'SYNTHETIC_PLAN',quantity:'10',quantity
  await page.getByRole('tab',{name:'Investments',exact:true}).click();await ready(page);
  await page.getByText('No supported share symbols supplied by the ledger. Market estimates unavailable.',{exact:true}).waitFor();
  assert.equal(await page.getByText('Loading public quote coverage…',{exact:true}).count(),0);
- await page.getByText('Separate estimates only. Public prices never overwrite ledger values. Unquoted or unsupported units are not included in current estimates.',{exact:true}).waitFor();
+ await page.getByText('Estimates stay separate from ledger values; unsupported units are excluded.',{exact:true}).waitFor();
  assert.equal(calls.filter(c=>c.name==='quotes').length,0);
 });
 
@@ -64,6 +64,7 @@ test('clicked transfer counterpart replaces source-date, account and scope predi
  await page.getByLabel('From',{exact:true}).fill('2023-12-31');await page.getByLabel('Through',{exact:true}).fill('2023-12-31');await page.locator('#filters').getByLabel('Account').selectOption('Synthetic cash');await page.getByLabel('Dataset').selectOption('bank');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
  await page.getByRole('tab',{name:'Transfers',exact:true}).click();await ready(page);
  await page.getByLabel('Search transfers').fill('year boundary');await page.getByRole('button',{name:'Search',exact:true}).click();await ready(page);
+ await page.getByText('Transfer evidence · table alternative',{exact:true}).click();
  await page.getByRole('button',{name:'Synthetic protected',exact:true}).click();await ready(page);
  assert.deepEqual(last(calls,'transactions'),{start:'2024-01-01',end:'2024-01-01',currency:'CAD',scope:'all',account:'Synthetic protected',dataset:'all',record_id:credit.record_id,offset:'0',limit:'25'});
  assert.deepEqual(await formValues(page),{start:'2024-01-01',end:'2024-01-01',currency:'CAD',scope:'all',account:'Synthetic protected',dataset:'all'});
@@ -80,14 +81,14 @@ test('network account nodes keep paired transfers, source dates and scope when f
  const {page,calls,url}=await fixture(t,{responses:{transfers}});await page.goto(url);await ready(page);
  await page.getByLabel('From',{exact:true}).fill(debit.date);await page.getByLabel('Through',{exact:true}).fill(debit.date);await page.getByLabel('Dataset').selectOption('bank');await page.getByRole('button',{name:'Apply filters'}).click();await ready(page);
  await page.getByRole('tab',{name:'Transfers',exact:true}).click();await ready(page);
- assert.equal(await page.getByRole('table',{name:'Transfer evidence',exact:true}).locator('tbody tr').count(),2);
+ await page.getByText('Transfer evidence · table alternative',{exact:true}).click();assert.equal(await page.getByRole('table',{name:'Transfer evidence',exact:true}).locator('tbody tr').count(),2);
  for(const account of [credit.account,debit.account]){
   await page.getByRole('button',{name:'Inspect account '+account,exact:true}).click();await ready(page);
   assert.equal(await page.getByRole('tab',{name:'Transfers',exact:true}).getAttribute('aria-selected'),'true');
   assert.equal(calls.filter(c=>c.name==='transactions').length,0);
   assert.deepEqual(last(calls,'transfers'),{start:debit.date,end:debit.date,currency:'CAD',scope:'personal',dataset:'bank',account,offset:'0',limit:'25'});
   assert.deepEqual(await formValues(page),{start:debit.date,end:debit.date,currency:'CAD',scope:'personal',dataset:'bank',account});
-  const table=page.getByRole('table',{name:'Transfer evidence',exact:true});assert.equal(await table.locator('tbody tr').count(),1);
+  await page.getByText('Transfer evidence · table alternative',{exact:true}).click();const table=page.getByRole('table',{name:'Transfer evidence',exact:true});assert.equal(await table.locator('tbody tr').count(),1);
   await table.getByText(debit.date,{exact:true}).waitFor();await table.getByText(credit.date,{exact:true}).waitFor();await table.getByRole('button',{name:credit.account,exact:true}).waitFor();
   assert.equal(await page.locator('[data-page-status]').textContent(),'1–1 of 1 records');
  }
@@ -141,7 +142,7 @@ test('incomplete selected payroll component coverage hides waterfall without hid
  await page.getByText('Payroll breakdown unavailable: component coverage is incomplete.',{exact:true}).waitFor();
  await page.getByText('All selected payslips · table alternative',{exact:true}).click();
  const sample=page.getByRole('table',{name:'All selected payslips',exact:true});await sample.getByRole('button',{name:'Inspect '+pay.pay_date,exact:true}).waitFor();await sample.getByText('CAD 3,500.00',{exact:true}).waitFor();
- await page.getByRole('table',{name:'Grant reference values',exact:true}).getByText('USD 1,000.00',{exact:true}).waitFor();
+ await page.getByText('Grant reference values · table alternative',{exact:true}).click();await page.getByRole('table',{name:'Grant reference values',exact:true}).getByText('USD 1,000.00',{exact:true}).waitFor();
  await page.getByText('Payroll links · table alternative',{exact:true}).click();
  await page.getByRole('table',{name:'Payroll links',exact:true}).getByRole('button',{name:'Inspect linked entry'}).click();await ready(page);
  assert.equal(last(calls,'transactions').record_id,bank.record_id);assert.equal(last(calls,'transactions').start,bank.date);
@@ -149,7 +150,7 @@ test('incomplete selected payroll component coverage hides waterfall without hid
  complete=true;await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  assert.equal(await page.locator('[data-chart="waterfall"]').count(),1);
  assert.equal(await page.getByText('Payroll breakdown unavailable: component coverage is incomplete. Bank net and recorded evidence remain available.',{exact:true}).count(),0);
- const components=page.getByRole('table',{name:'Selected payslip components',exact:true}),tax=components.locator('tbody tr').filter({hasText:'TAX'});await tax.getByText('TAX',{exact:true}).waitFor();assert.equal((await tax.locator('td').nth(2).textContent()).trim(),'CAD 1,500.00');assert.equal((await tax.locator('td').nth(3).textContent()).trim(),'-CAD 1,500.00');assert.equal((await tax.locator('td').nth(4).textContent()).trim(),'CAD 3,000.00');
+ await page.getByText('Selected payslip components · table alternative',{exact:true}).click();const components=page.getByRole('table',{name:'Selected payslip components',exact:true}),tax=components.locator('tbody tr').filter({hasText:'TAX'});await tax.getByText('TAX',{exact:true}).waitFor();assert.equal((await tax.locator('td').nth(2).textContent()).trim(),'CAD 1,500.00');assert.equal((await tax.locator('td').nth(3).textContent()).trim(),'-CAD 1,500.00');assert.equal((await tax.locator('td').nth(4).textContent()).trim(),'CAD 3,000.00');
 });
 
 test('alluvial keeps skewed category bands, nodes and labels inside its viewBox with a twelve-category bound',{timeout:20000},async t=>{
@@ -168,11 +169,11 @@ test('unknown and unsupported source currencies never inherit the selected CAD l
  const holdings=currencies.map((currency,i)=>({account:'Synthetic cash',name:`Synthetic holding ${i}`,currency,market_value_minor:100000}));
  const {page,url}=await fixture(t,{responses:{compensation:()=>({awards}),investments:()=>({holdings})}});await page.goto(url);await ready(page);
  await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
- const grants=page.getByRole('table',{name:'Grant reference values',exact:true});
+ await page.getByText('Grant reference values · table alternative',{exact:true}).click();const grants=page.getByRole('table',{name:'Grant reference values',exact:true});
  for(let i=0;i<4;i++)assert.equal(await grants.locator('tbody tr').nth(i).locator('td').nth(4).textContent(),'Unavailable');
  await grants.locator('tbody tr').nth(4).getByText('CAD 1,000.00',{exact:true}).waitFor();await grants.locator('tbody tr').nth(5).getByText('USD 1,000.00',{exact:true}).waitFor();
  await page.getByRole('tab',{name:'Investments',exact:true}).click();await ready(page);
- const rows=page.getByRole('table',{name:'Recorded holdings',exact:true}).locator('tbody tr');
+ await page.getByText('Recorded holdings · table alternative',{exact:true}).click();const rows=page.getByRole('table',{name:'Recorded holdings',exact:true}).locator('tbody tr');
  for(let i=0;i<4;i++)assert.equal(await rows.nth(i).locator('td').nth(5).textContent(),'Unavailable');
  await rows.nth(4).getByText('CAD 1,000.00',{exact:true}).waitFor();await rows.nth(5).getByText('USD 1,000.00',{exact:true}).waitFor();
 });
@@ -192,7 +193,7 @@ test('vesting policy defaults to full horizon and explicitly selects vest dates 
  const {page,calls,url}=await fixture(t,{responses:{compensation:q=>({awards,vesting:q.vesting_policy==='range'?vesting.filter(v=>(!q.start||v.vest_date>=q.start)&&(!q.end||v.vest_date<=q.end)):vesting})}});
  await page.goto(url);await ready(page);await page.getByLabel('From',{exact:true}).fill('2024-01-01');await page.getByLabel('Through',{exact:true}).fill('2024-01-02');await page.getByRole('button',{name:'Apply filters',exact:true}).click();await ready(page);await page.getByRole('tab',{name:'Compensation',exact:true}).click();await ready(page);
  assert.equal(last(calls,'compensation').vesting_policy,'horizon');assert.equal(last(calls,'compensation').start,'2024-01-01');assert.equal(last(calls,'compensation').end,'2024-01-02');assert.equal(await page.getByLabel('Vesting date policy').inputValue(),'horizon');
- const openTables=async()=>{await page.getByText('Vesting schedule · table alternative',{exact:true}).click();};
+ const openTables=async()=>{await page.getByText('Vesting schedule · table alternative',{exact:true}).click();await page.getByText('Grant reference values · table alternative',{exact:true}).click();};
  await openTables();
  const schedule=page.getByRole('table',{name:'Vesting schedule',exact:true});assert.equal(await schedule.locator('tbody tr').count(),vesting.length);await schedule.getByText('2025-01-01',{exact:true}).waitFor();await schedule.getByText('2023-01-01',{exact:true}).waitFor();
  assert.equal(await page.getByLabel('From').inputValue(),'2024-01-01');assert.equal(await page.getByLabel('Through').inputValue(),'2024-01-02');
