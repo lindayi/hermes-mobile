@@ -3,7 +3,7 @@ const id = (...parts) => JSON.stringify(['product', ...parts]);
 const groupId = JSON.stringify(['account-group', 'investments']);
 const inRange = (date, range) => typeof date === 'string' && date.slice(0, 10) >= range.start && date.slice(0, 10) <= range.end;
 
-export function enrichProducts(input, { investments = {} } = {}) {
+export function enrichProducts(input, { investments = {}, filters = {} } = {}) {
   const raw = structuredClone(input);
   const accounts = new Map(raw.nodes.filter(n => n.kind === 'account').map(n => [n.id, n]));
   for (const account of accounts.values()) {
@@ -57,16 +57,35 @@ export function enrichProducts(input, { investments = {} } = {}) {
         originalId: edge.originalId ?? edge.id, originalAmount: edge.originalAmount ?? edge.amount_minor, originalSelector: structuredClone(edge.originalSelector ?? edge.selector),
         evidenceRecordIds: [recordId], selector: { ...edge.selector, filters: { ...edge.selector.filters, dataset: 'investment', record_id: recordId } } });
     }
-    // Zero-cash rows are source evidence, never invented ribbon widths or values.
-    for (const row of events.filter(row => row.cash_amount_minor === 0)) {
-      const filters = {...edge.selector.filters,dataset:'investment',record_id:'investment:'+row.event_id};
-      delete filters.direction;
-      const owner=raw.nodes.find(n=>n.id===rootId);
-      const evidenceMember={id:id('zero-evidence',edge.id,row.event_id),kind:'investment',label:'Zero-cash '+row.classification+' · '+row.security_key,currency:row.currency,amount_minor:0,evidenceNote:'Zero-cash source entry; no flow or holding value inferred.',selector:{...edge.selector,filters}};
-      (owner.evidenceMembers??=[]).push(evidenceMember);
-      const product=raw.nodes.find(n=>n.id===id('security',account.id,row.currency,row.security_key));
-      (product.evidenceMembers??=[]).push(evidenceMember);
-    }
+  }
+  const eligibleDataset=!filters.dataset||['all','investment'].includes(filters.dataset);
+  const eligibleCurrency=!filters.currency||filters.currency===raw.currency;
+  const start=filters.start||raw.range.start,end=filters.end||raw.range.end;
+  const zeroRows=(investments.cashflows??[]).filter(row=>
+    row.cash_amount_minor===0&&['buy','sell'].includes(row.classification)&&typeof row.event_id==='string'&&row.event_id.length>0
+    &&typeof row.security_key==='string'&&row.security_key.length>0&&typeof row.date==='string'
+    &&row.currency===raw.currency&&eligibleCurrency&&eligibleDataset
+    &&(!filters.account||filters.account===row.account)&&(!filters.flow||filters.flow==='investment')
+    &&(!filters.direction)&&(!filters.category||filters.category===`investment.trade.${row.classification}`)
+    &&(!filters.record_id||filters.record_id==='investment:'+row.event_id)&&!filters.q&&inRange(row.date,{start,end}));
+  const zeroCounts=new Map();
+  for(const row of zeroRows){const key=JSON.stringify([row.account,row.currency,row.event_id]);zeroCounts.set(key,(zeroCounts.get(key)||0)+1);}
+  for(const row of zeroRows){
+    const account=[...accounts.values()].find(node=>node.account===row.account);
+    if(!account||zeroCounts.get(JSON.stringify([row.account,row.currency,row.event_id]))!==1)continue;
+    account.accountGroup='investments';
+    const rootId=id('group',account.id,row.currency);
+    let owner=raw.nodes.find(node=>node.id===rootId);
+    if(!owner){owner={id:rootId,label:'Products',kind:'product-group',semantic:true,ownerAccountId:account.id,groupId};raw.nodes.push(owner);}
+    const productId=id('security',account.id,row.currency,row.security_key);
+    let product=raw.nodes.find(node=>node.id===productId);
+    if(!product){product={id:productId,label:row.security_key,security_key:row.security_key,kind:'product',semantic:true,parentId:rootId,ownerAccountId:account.id,groupId};raw.nodes.push(product);}
+    const recordId='investment:'+row.event_id;
+    const selectorFilters={...filters,account:row.account,currency:row.currency,dataset:'investment',category:`investment.trade.${row.classification}`,category_mode:'exact',flow:'investment',record_id:recordId};
+    delete selectorFilters.direction;delete selectorFilters.q;
+    const evidenceMember={id:id('zero-evidence',account.id,row.currency,row.event_id),kind:'investment',label:'Zero-cash '+row.classification+' · '+row.security_key,currency:row.currency,amount_minor:0,evidenceNote:'Zero-cash source entry; no flow or holding value inferred.',selector:{endpoint:'transactions',filters:selectorFilters}};
+    owner.evidenceMembers=[...new Map([...(owner.evidenceMembers??[]),evidenceMember].map(member=>[member.id,member])).values()];
+    product.evidenceMembers=[...new Map([...(product.evidenceMembers??[]),evidenceMember].map(member=>[member.id,member])).values()];
   }
   raw.edges = result;
   const used = new Set(result.flatMap(edge => [edge.source, edge.target]));

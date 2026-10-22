@@ -95,6 +95,36 @@ test('converted CAD movement keeps its original USD selector and signed evidence
  assert.equal(evidenceQuery.get('currency'),'USD');
  assert.equal((await inspector.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'-USD 123.45');
 });
+test('a zero-cash purchase beside a sale is findable and opens its exact original record',{timeout:30000},async t=>{
+ const {page,url,calls}=await fixture(t);
+ await page.route('**/finance/flow?**',route=>{
+  const q=new URL(route.request().url()).searchParams,currency=q.get('currency');
+  const nodes=[{id:'fixture-broker',label:'Fixture investments',account:'Fixture investments',kind:'account'},
+   {id:'sale-source',label:'Investment sale proceeds',kind:'investment'}];
+  const edges=currency==='CAD'?[{id:'sale-edge',source:'sale-source',target:'fixture-broker',kind:'investment',label:'Recorded sale',amount_minor:1000,count:1,currency:'CAD',selector:{endpoint:'transactions',filters:{start:q.get('start'),end:q.get('end'),currency:'CAD',scope:q.get('scope'),dataset:q.get('dataset'),account:'Fixture investments',category:'investment.trade.sell',category_mode:'exact',flow:'investment',direction:'incoming'}}}]:[];
+  return route.fulfill({json:{...common,currency,range:{start:q.get('start'),end:q.get('end')},nodes,edges,coverage:{complete:true}}});
+ });
+ await page.route('**/finance/investments?**',route=>{
+  const q=new URL(route.request().url()).searchParams;
+  const cashflows=q.get('currency')==='CAD'?[{event_id:'sale-event',account:'Fixture investments',security_key:'PAID',classification:'sell',date:'2026-08-02',currency:'CAD',cash_amount_minor:1000},{event_id:'zero-buy',account:'Fixture investments',security_key:'ZERO_BUY',classification:'buy',date:'2026-08-03',currency:'CAD',cash_amount_minor:0}]:[];
+  return route.fulfill({json:{...common,cashflows,holdings:[],coverage:{cashflows:{complete:true}}}});
+ });
+ await page.route('**/finance/transactions?**',route=>{
+  const q=new URL(route.request().url()).searchParams;calls.push({name:'transactions',query:Object.fromEntries(q)});
+  return route.fulfill({json:{...common,items:[{record_id:'investment:zero-buy',entry_id:'zero-buy',date:'2026-08-03',account:'Fixture investments',description:'Zero-cash purchase record',category_id:'investment.trade.buy',amount_minor:0,currency:'CAD'}],total:1,limit:50,offset:0}});
+ });
+ await page.goto(url);await page.locator('.money-sankey').waitFor();
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('ZERO_BUY');
+ const result=finder.getByRole('button',{name:/Inspect Zero-cash buy/});await result.waitFor();await result.click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByRole('button',{name:/Inspect Zero-cash buy/}).click();
+ await inspector.getByText('Zero-cash purchase record',{exact:true}).waitFor();
+ assert.equal((await inspector.locator('.tx-amount').textContent()).replace(/\u00a0/g,' '),'CAD 0.00');
+ const query=calls.findLast(call=>call.name==='transactions').query;
+ assert.equal(query.record_id,'investment:zero-buy');assert.equal(query.category,'investment.trade.buy');
+ assert.equal(query.direction,undefined);assert.equal(query.dataset,'investment');assert.equal(query.currency,'CAD');
+ assert.equal(query.account,'Fixture investments');assert.equal(query.scope,'personal');
+});
 test('approved map exposes explorer lists and reachable zoom, Fit, pan, and group controls',{timeout:30000},async t=>{const {page,url}=await fixture(t);await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();await page.getByRole('button',{name:'Fit map to view'}).click();await page.getByRole('button',{name:'Zoom in'}).click();await page.getByRole('button',{name:'Pan right'}).click();await page.getByText('Explore accounts, spending and categories',{exact:true}).click();await page.getByRole('tab',{name:'Accounts'}).click();await page.getByRole('button',{name:'Inspect account Synthetic cash'}).waitFor();await page.getByRole('tab',{name:'Spending'}).click();await page.getByRole('button',{name:/Inspect net spending Synthetic food/}).waitFor();await page.getByRole('tab',{name:'All categories'}).click();await page.locator('.money-sankey-explore-list button').filter({hasText:'Synthetic food'}).waitFor();});
 test('empty filtered Sankey renders a bounded empty state without missing geometry',{timeout:25000},async t=>{const {page,url}=await fixture(t);await page.route('**/finance/flow?**',route=>{const q=new URL(route.request().url()).searchParams;return route.fulfill({json:{...common,currency:q.get('currency'),range:{start:q.get('start'),end:q.get('end')},nodes:[],edges:[],coverage:{complete:true}}});});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(url);await page.getByText('No recorded movements match these filters.').waitFor();assert.deepEqual(errors,[]);});
 test('Back restores the expanded account group and exploration mode',{timeout:30000},async t=>{const {page,url}=await fixture(t);await page.goto(url);await page.locator('#content .money-sankey .sankey-link').first().waitFor();await page.getByText('Explore accounts, spending and categories',{exact:true}).click();const categories=page.getByRole('tab',{name:'All categories'});await categories.click();const expand=page.locator('.money-sankey-controls .money-sankey-toggle').first();if(await expand.getAttribute('aria-expanded')==='true'){await expand.click();await page.waitForFunction(()=>document.querySelector('.money-sankey-controls .money-sankey-toggle[aria-expanded="false"]'));}await expand.click();await page.waitForFunction(()=>document.querySelector('.money-sankey-controls .money-sankey-toggle[aria-expanded="true"]'));assert.equal(await categories.getAttribute('aria-selected'),'true');await page.getByRole('tab',{name:'Cash flow',exact:true}).click();await page.getByRole('button',{name:'Back'}).click();await page.locator('#content .money-sankey .sankey-link').first().waitFor();const restoredCategories=page.getByRole('tab',{name:'All categories'});await restoredCategories.waitFor();await page.waitForFunction(()=>document.querySelector('.money-sankey-controls .money-sankey-toggle[aria-expanded="true"]'));assert.equal(await restoredCategories.getAttribute('aria-selected'),'true','Back restores the All categories exploration mode');});

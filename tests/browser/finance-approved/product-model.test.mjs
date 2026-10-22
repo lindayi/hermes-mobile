@@ -55,6 +55,38 @@ test('zero-cash-only security stays selectable from its investment group without
   assert.equal(members.filter(member=>member.id.includes('event-zero-only')).length,1);
 });
 
+test('zero-cash purchases remain exact evidence beside a nonzero sale and in an all-zero account',()=>{
+  const x=fixture();
+  x.raw.edges[0].selector.filters.category='investment.trade.sell';
+  x.raw.edges[0].selector.filters.direction='incoming';
+  x.raw.edges[0].source='buys';x.raw.edges[0].target='cash';
+  x.raw.edges[0].amount_minor=100;
+  x.investments.cashflows=[
+    {event_id:'event-sale',account:'broker',security_key:'PAID',date:'2026-07-05',currency:'CAD',cash_amount_minor:100,classification:'sell'},
+    {event_id:'event-zero-buy',account:'broker',security_key:'ZERO_BUY',date:'2026-08-05',currency:'CAD',cash_amount_minor:0,classification:'buy'},
+  ];
+  const active={...range,currency:'CAD',scope:'personal',dataset:'all'};
+  const p=enrich(x.raw,{investments:x.investments,filters:active});
+  const product=p.nodes.find(node=>node.kind==='product'&&node.security_key==='ZERO_BUY');
+  const group=p.nodes.find(node=>node.kind==='product-group');
+  assert.ok(product,'A zero-cash purchase beside a sale has a selectable product');
+  const evidence=group.evidenceMembers.find(member=>member.id.includes('event-zero-buy'));
+  assert.ok(evidence,'The account product group retains the independent zero-cash purchase');
+  assert.deepEqual(evidence.selector.filters,{
+    ...active,account:'broker',category:'investment.trade.buy',category_mode:'exact',
+    flow:'investment',dataset:'investment',record_id:'investment:event-zero-buy',
+  });
+  assert.equal(evidence.amount_minor,0);
+  assert.equal(p.edges.reduce((sum,edge)=>sum+edge.amount_minor,0),100,'Evidence adds no ribbon width');
+
+  const quiet=fixture();quiet.raw.edges=[];quiet.raw.nodes=[quiet.raw.nodes[0]];
+  quiet.investments.cashflows=[{event_id:'all-zero',account:'broker',security_key:'ZERO_ONLY',date:'2026-08-05',currency:'CAD',cash_amount_minor:0,classification:'buy'}];
+  const allZero=enrich(quiet.raw,{investments:quiet.investments,filters:active});
+  assert.ok(allZero.nodes.find(node=>node.kind==='product'&&node.security_key==='ZERO_ONLY'));
+  assert.equal(allZero.nodes.find(node=>node.kind==='product-group').evidenceMembers[0].selector.filters.record_id,'investment:all-zero');
+  assert.equal(allZero.edges.length,0,'All-zero activity creates no movement edge');
+});
+
 
 test('unverifiable trade breakdown retains the whole original selector and amount inside its owner', () => {
   const cases = [

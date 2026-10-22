@@ -21,7 +21,7 @@ export async function loadQuarter(api,query,signal){
  },signal);
  const result=enrichFinance(raw,{investments,compensation:{...compensation,payrollDetails},records});result.notes.push(...new Set(unavailable));
  for(const [name,data,keys] of [['Investment',investments,['balances','cashflows']],['Payroll',compensation,['payroll','components','links']]])if(keys.some(k=>data.coverage?.[k]?.complete===false))result.notes.push(name+' detail partially recorded.');
- return enrichProducts(result,{investments});
+ return enrichProducts(result,{investments,filters:query});
 }
 // One shared pool per phase; never fan out an unbounded number of detail requests.
 async function boundedMap(items,work,signal){

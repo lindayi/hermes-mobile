@@ -24,7 +24,7 @@ function updateBack(){back.disabled=!history.length;}
 function indexMapEdge(edge,seen=new Set()){if(!edge||typeof edge.id!=='string'||seen.has(edge.id))return;seen.add(edge.id);mapEdges.set(edge.id,edge);for(const member of [...array(edge.members),...array(edge.evidenceMembers)])indexMapEdge(member,seen);}
 function currentSelectionEdge(edge){
  if(!edge?.aggregateSelection)return mapEdges.get(edge?.id)||null;
- if(edge.projectionIds?.length&&sankeyViewInstance){const rebound=sankeyViewInstance.rebind(edge);if(!rebound)return null;indexMapEdge(rebound);return rebound;}
+ if((edge.group||edge.projectionIds?.length)&&sankeyViewInstance){const rebound=sankeyViewInstance.rebind(edge);if(!rebound)return null;indexMapEdge(rebound);return rebound;}
  const current=mapEdges.get(edge.id)||edge,members=[...new Map(array(current.members).map(member=>[member.id,mapEdges.get(member.id)]).filter(([,member])=>member)).values()];
  if(!members.length)return null;
  const rebound={...current,id:'sankey-selection:'+members.map(member=>member.id).join('|'),aggregateSelection:true,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||current.currency};
@@ -52,7 +52,13 @@ async function loadInspector(){
  const streams=evidenceStreams(edge),pager=createPager(streams,(endpoint,filters,signal)=>api(endpoint,{...query,...filters,currency:filters.currency||edge.originalCurrency||edge.currency||query.currency},signal));
  const renderPage=async(loadMore=false)=>{
   try{
-   if(!pager.done&&(loadMore||pager.rows.length<current.offset+25))await pager.more(inspectorController.signal);
+   if(!pager.done&&(loadMore||pager.rows.length<current.offset+25)){
+    const target=current.offset+25;
+    for(let batch=0;batch<target&&!pager.done&&pager.rows.length<target;batch++){
+     await pager.more(inspectorController.signal);
+     if(token!==inspectorGeneration||viewToken!==generation||selection!==current)return;
+    }
+   }
    if(token!==inspectorGeneration||viewToken!==generation||selection!==current)return;
    if(pager.done)current.offset=Math.min(current.offset,Math.max(0,Math.floor((pager.rows.length-1)/25)*25));
    const rows=pager.rows.slice(current.offset,current.offset+25),last=current.offset+rows.length;

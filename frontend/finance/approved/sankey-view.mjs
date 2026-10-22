@@ -49,6 +49,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
  const pan=(label,left,top)=>control(label,()=>stage.scrollBy({left,top,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'}),`Pan ${label==='←'?'left':label==='→'?'right':label==='↑'?'up':'down'}`);
  viewControls.append(zoomOut,zoomLabel,zoomIn,fit,pan('←',-180,0),pan('↑',0,-180),pan('↓',0,180),pan('→',180,0));
  const membersFor=selection=>{
+  if(selection?.group)return selectionMembers(p,{group:selection.group});
   if(Array.isArray(selection?.memberIds)){
    const wanted=new Set(selection.memberIds),found=new Map();
    const visit=member=>{if(!member||found.has(member.id))return;if(wanted.has(member.id))found.set(member.id,member);for(const nested of member.members||[])visit(nested);};
@@ -102,9 +103,11 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   inspect(edge);
  };
  const rebind=edge=>{
-  const ids=new Set(edge?.projectionIds||[]);if(!ids.size)return null;
-  const current=[...p.edges,...p.internalEdges].filter(item=>ids.has(item.id)).flatMap(item=>item.members||[]),groupMembers=groupSelection(p,edge.group)?.evidenceMembers||[];
-  const members=[...new Map([...current,...groupMembers].map(member=>[member.id,member])).values()];
+  const ids=new Set(edge?.projectionIds||[]);
+  if(edge?.group&&!groupSelection(p,edge.group))return null;
+  if(!edge?.group&&!ids.size)return null;
+  const current=edge.group?selectionMembers(p,{group:edge.group}):[...p.edges,...p.internalEdges].filter(item=>ids.has(item.id)).flatMap(item=>item.members||[]);
+  const members=[...new Map(current.map(member=>[member.id,member])).values()];
   if(!members.length)return null;
   return {...edge,id:'sankey-selection:'+members.map(member=>member.id).join('|'),label:members.length===1?members[0].label:`${members.length} exact streams`,members,amount_minor:members.reduce((sum,member)=>sum+(Number.isSafeInteger(member.amount_minor)?member.amount_minor:0),0),currency:members[0].currency||edge.currency};
  };
@@ -131,7 +134,9 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   jump.onchange=()=>{const band=geometry.bands.find(item=>item.id===jump.value);if(band)stage.scrollTo({top:band.top*zoom,left:band.x*geometry.width*zoom,behavior:'smooth'});};
  };
  const renderFinder=()=>{
-  const term=finderInput.value.trim().toLocaleLowerCase(),streams=[...new Map(p.edges.flatMap(edge=>edge.members||[edge]).map(edge=>[edge.id,edge])).values()],matches=term?streams.filter(edge=>`${edge.label} ${edge.source} ${edge.target}`.toLocaleLowerCase().includes(term)):[];
+  const inventory=[...p.edges,...p.internalEdges].flatMap(edge=>edge.members?.length?edge.members:[edge]);
+  for(const node of raw.nodes)inventory.push(...(node.evidenceMembers||[]));
+  const term=finderInput.value.trim().toLocaleLowerCase(),streams=[...new Map(inventory.filter(edge=>typeof edge.id==='string').map(edge=>[edge.id,edge])).values()],matches=term?streams.filter(edge=>`${edge.label} ${edge.source} ${edge.target} ${edge.selector?.filters?.account||''} ${edge.selector?.filters?.category||''}`.toLocaleLowerCase().includes(term)):[];
   finderOffset=Math.min(finderOffset,Math.max(0,Math.floor((matches.length-1)/25)*25));
   const shown=matches.slice(finderOffset,finderOffset+25);
   finderStatus.textContent=term?`${matches.length?finderOffset+1:0}–${Math.min(finderOffset+shown.length,matches.length)} of ${matches.length} matching movements.`:'Search to choose an exact movement when streams are hard to distinguish.';
@@ -150,7 +155,7 @@ export function sankeyView(root,raw,{inspect=()=>{},selectedAccount='',Plotly=gl
   const flowHeight=Math.max(200,...[...new Set(geometry.x)].map(x=>geometry.x.filter(value=>value===x).length*4+160));
   let height=geometry.height;
   const index=new Map(nodes.map((node,i)=>[node.id,i]));
-  const applyLayout=()=>{layoutStyle(canvas,{width:`${geometry.width*zoom}px`,height:`${height*zoom}px`});layoutStyle(layer,{width:`${geometry.width}px`,height:`${height}px`,transform:`scale(${zoom})`});layoutStyle(chart,{width:`${geometry.width}px`,height:`${height}px`});};
+  const applyLayout=()=>{layoutStyle(canvas,{width:`${geometry.width*zoom}px`,height:`${height*zoom}px`});layoutStyle(layer,{width:`${geometry.width}px`,height:`${height}px`,transform:`scale(${zoom})`,'--money-sankey-control-size':`${45/zoom}px`});layoutStyle(chart,{width:`${geometry.width}px`,height:`${height}px`});};
   applyLayout();
   renderBands();groupControls();renderFinder();renderExplore();zoomLabel.textContent=`${Math.round(zoom*100)}%`;
   const labels=nodes.map(node=>`${html(node.label)}<br>${account(node)?'Account':html(node.kind.replaceAll('-',' '))}<br>${html(new Intl.NumberFormat('en-CA',{style:'currency',currency:raw.currency}).format((node.value??Math.max(node.incoming,node.outgoing))/100))}`);

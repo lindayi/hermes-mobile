@@ -16,7 +16,7 @@ const edge=(id,source,amount_minor=60000,count=26)=>({id,source,target:'food',ki
 const baseFlow={...common,nodes,edges:[edge('cash-food','cash'),edge('reserve-food','reserve',30000)],coverage:{complete:true}};
 async function fixture(t){
  buildPlotly();
- const calls=[];let graph=structuredClone(baseFlow);
+ const calls=[];let graph=structuredClone(baseFlow),transactionPage=null;
  const server=createServer(async(req,res)=>{
   const u=new URL(req.url,'http://fixture');
   if(u.pathname==='/hermes/app-api/auth/me'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({user:{id:'synthetic-owner',role:'owner',profile:'default',status:'ready'}}));return;}
@@ -25,7 +25,7 @@ async function fixture(t){
    let data={...common};
    if(name==='meta')data={...common,accounts:nodes.filter(n=>n.account),categories:[],currencies:['CAD','USD']};
    if(name==='flow'){const scoped=q.scope==='all'?{...graph,nodes:graph.nodes.filter(n=>n.id!=='reserve'),edges:graph.edges.filter(e=>e.source!=='reserve')}:graph;const edges=q.account?scoped.edges.filter(e=>e.selector?.filters?.account===q.account||e.selector?.filters?.source_account===q.account||e.selector?.filters?.target_account===q.account):scoped.edges;const endpoints=new Set(edges.flatMap(e=>[e.source,e.target]));data={...scoped,currency:q.currency,range:{start:q.start,end:q.end},nodes:scoped.nodes.filter(n=>n.kind==='account'?(!q.account||n.account===q.account):endpoints.has(n.id)),edges:edges.map(edge=>({...edge,currency:q.currency}))};}
-   if(name==='transactions')data={...common,items:Array.from({length:Number(q.offset)?1:25},(_,i)=>({record_id:'synthetic-'+(Number(q.offset||0)+i),date:'2024-08-01',account:q.account,description:'Synthetic evidence '+(Number(q.offset||0)+i+1),amount_minor:-2400,currency:q.currency})),total:26,offset:Number(q.offset||0),limit:25};
+   if(name==='transactions')data=transactionPage?transactionPage(q):{...common,items:Array.from({length:Number(q.offset)?1:25},(_,i)=>({record_id:'synthetic-'+(Number(q.offset||0)+i),date:'2024-08-01',account:q.account,description:'Synthetic evidence '+(Number(q.offset||0)+i+1),amount_minor:-2400,currency:q.currency})),total:26,offset:Number(q.offset||0),limit:25};
    res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');res.end(JSON.stringify(data));return;
   }
   try{const rel=u.pathname.replace('/hermes/','').replace(/\/$/,'/index.html');if(rel.includes('..'))throw Error();res.setHeader('Content-Type',rel.endsWith('.html')?'text/html':rel.endsWith('.css')?'text/css':'text/javascript');res.end(await readFile(root+'/'+rel));}catch{res.writeHead(404);res.end();}
@@ -33,7 +33,7 @@ async function fixture(t){
  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',args:['--no-sandbox','--disable-dev-shm-usage']});t.after(()=>browser.close());
  const context=await browser.newContext({viewport:{width:1280,height:900},serviceWorkers:'block'}),page=await context.newPage();page.setDefaultTimeout(5000);
- return {page,calls,setFlow:value=>graph=structuredClone(value),url:`http://127.0.0.1:${server.address().port}/hermes/finance/`};
+ return {page,calls,setFlow:value=>graph=structuredClone(value),setTransactionPage:value=>transactionPage=value,url:`http://127.0.0.1:${server.address().port}/hermes/finance/`};
 }
 
 const denseFlow={...common,coverage:{complete:true},nodes:[nodes[0],...Array.from({length:31},(_,i)=>({id:'food'+i,label:'Food '+i,kind:'expense'}))],edges:Array.from({length:30},(_,i)=>({...edge('food-stream-'+i,'cash',1000,1),target:'food'+i,label:'Food stream '+i,selector:{endpoint:'transactions',filters:{account:'Everyday account',category:'expense.food.item'+i,category_mode:'exact',flow:'expense',direction:'outgoing'}}}))};
@@ -54,6 +54,21 @@ for(const action of ['refresh','Back'])test(`group inspector rebuilds current me
  setFlow({...denseFlow,edges:denseFlow.edges.slice(0,10)});await page.getByRole('button',{name:'Back',exact:true}).click();await ready(page);
  assert.match(await inspector(page).textContent(),/10 exact streams/);assert.equal(await inspector(page).locator('.stream-member').count(),10);assert.equal(await inspector(page).getByRole('button',{name:'Previous streams',exact:true}).isDisabled(),true);
  const before=calls.filter(c=>c.name==='transactions').length;setFlow({...denseFlow,edges:[]});await refresh(page);assert.equal(await inspector(page).count(),0,'A group absent from the current projection closes');assert.equal(calls.filter(c=>c.name==='transactions').length,before);
+});
+
+for(const action of ['refresh','Back'])test(`role-group selection resolves added and removed members on ${action}`,{timeout:25000},async t=>{
+const {page,url,setFlow}=await fixture(t);setFlow(denseFlow);await page.goto(url);await ready(page);
+const group=page.locator('.money-sankey-group').filter({hasText:'Other accounts'}).getByRole('button').first();
+await group.click();await inspector(page).getByRole('heading',{name:'30 exact streams'}).waitFor();
+if(action==='Back'){await page.getByRole('tab',{name:'Transfers',exact:true}).click();await ready(page);}
+const added={...denseFlow.edges[0],id:'added-to-role',label:'Added role stream',amount_minor:7000,target:'food30',selector:{endpoint:'transactions',filters:{...denseFlow.edges[0].selector.filters,category:'expense.food.added'}}};
+setFlow({...denseFlow,edges:[...denseFlow.edges.filter(edge=>edge.id!=='food-stream-29'),added]});
+if(action==='Back'){await page.getByRole('button',{name:'Back',exact:true}).click();await ready(page);}else await refresh(page);
+await inspector(page).getByRole('heading',{name:'30 exact streams'}).waitFor();
+assert.match(await inspector(page).locator('.inspector-amount').textContent(),/360\.00/);
+await inspector(page).getByRole('button',{name:'Next streams',exact:true}).click();
+assert.deepEqual(await inspector(page).locator('.stream-member').allTextContents(),['Inspect Food stream 25','Inspect Food stream 26','Inspect Food stream 27','Inspect Food stream 28','Inspect Added role stream']);
+assert.equal(await inspector(page).getByRole('button',{name:'Previous streams',exact:true}).isDisabled(),false);
 });
 
 for(const action of ['refresh','Back'])test(`exact inspector rebinds amount and count on ${action}; removed selection closes`,{timeout:25000},async t=>{
@@ -117,6 +132,35 @@ const ready=page=>page.waitForFunction(()=>document.querySelector('#content')?.g
 const refresh=async page=>{await page.getByRole('button',{name:'Refresh data',exact:true}).click();await ready(page);};
 const inspector=page=>page.getByRole('complementary',{name:'Flow inspector'});
 const inspect=async(page,id)=>{const finder=page.locator('.money-sankey-stream-finder');if(!await finder.evaluate(node=>node.open))await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill(id);await finder.getByRole('button',{name:new RegExp('Inspect '+id)}).click();await inspector(page).getByRole('button',{name:new RegExp('Inspect '+id)}).click();await inspector(page).locator('.transaction-row').first().waitFor();};
+for(const action of ['refresh','Back'])test(`restored evidence pages load past 150 records and clamp when results shrink on ${action}`,{timeout:30000},async t=>{
+ const {page,url,calls,setTransactionPage}=await fixture(t);let total=350;
+ setTransactionPage(q=>{const offset=Number(q.offset||0),end=Math.min(offset+50,total);return {...common,items:Array.from({length:Math.max(0,end-offset)},(_,i)=>({record_id:`synthetic-${offset+i}`,date:'2024-08-01',account:'Everyday account',description:`Synthetic evidence ${offset+i}`,amount_minor:-2400,currency:'CAD'})),total,limit:50,offset};});
+ await page.goto(url);await ready(page);await inspect(page,'cash-food');
+ const next=inspector(page).getByRole('button',{name:'Next page',exact:true}),more=inspector(page).getByRole('button',{name:'Load more records',exact:true});
+ for(let pageNumber=0;pageNumber<7;pageNumber++){
+  for(let batch=0;!await next.count()&&batch<3;batch++){
+   assert.equal(await more.count(),1,`Missing pager action at ${await inspector(page).locator('.pager').textContent()}; requests ${JSON.stringify(calls.filter(call=>call.name==='transactions').map(call=>call.q.offset))}`);
+   const previousStatus=await inspector(page).locator('.pager [role=status]').textContent();
+   await more.click();
+   await page.waitForTimeout(100);
+   assert.notEqual(await inspector(page).locator('.pager [role=status]').textContent(),previousStatus,`Load more did not advance: ${JSON.stringify(calls.filter(call=>call.name==='transactions'))}`);
+  }
+  assert.equal(await next.count(),1,`No next page at ${await inspector(page).locator('.pager').textContent()}; requests ${JSON.stringify(calls.filter(call=>call.name==='transactions').map(call=>call.q.offset))}`);
+  await next.click();
+  const start=(pageNumber+1)*25+1,end=start+24;
+  await page.waitForFunction(({start,end})=>document.querySelector('.flow-inspector .pager [role=status]')?.textContent?.startsWith(`${start}–${end} of `),{start,end});
+ }
+ await page.waitForFunction(()=>document.querySelector('.flow-inspector .pager [role=status]')?.textContent?.startsWith('176–200 of '));
+ if(action==='Back'){await page.getByRole('tab',{name:'Transfers',exact:true}).click();await ready(page);}
+ if(action==='Back'){await page.getByRole('button',{name:'Back',exact:true}).click();await ready(page);}else await refresh(page);
+ await page.waitForFunction(()=>document.querySelector('.flow-inspector .pager [role=status]')?.textContent?.startsWith('176–200 of '));
+ let ids=await inspector(page).locator('.transaction-row').evaluateAll(rows=>rows.map(row=>row.dataset.recordId));
+ assert.deepEqual(ids,Array.from({length:25},(_,i)=>`synthetic-${175+i}`));
+ total=100;await refresh(page);
+ await page.waitForFunction(()=>document.querySelector('.flow-inspector .pager [role=status]')?.textContent==='76–100 of 100 records');
+ ids=await inspector(page).locator('.transaction-row').evaluateAll(rows=>rows.map(row=>row.dataset.recordId));
+ assert.deepEqual(ids,Array.from({length:25},(_,i)=>`synthetic-${75+i}`));
+});
 test('filters reset an unavailable map focus; Back restores the available focus and viewport',{timeout:20000},async t=>{
  const {page,url,calls}=await fixture(t);await page.goto(url);await ready(page);
  await page.getByText('Filters',{exact:true}).click();await page.locator('#filters').getByLabel('Account').selectOption('Reserve account');await page.getByRole('button',{name:'Apply filters',exact:true}).click();await ready(page);

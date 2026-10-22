@@ -14,7 +14,7 @@ const nodes=[['salary','Salary','income'],['cash','Everyday','account'],['spare'
 const pair=(id,link_type)=>({id,source:'cash',target:'reserve',kind:'transfer',label:'Everyday → Reserve · '+link_type,amount_minor:10000,currency:'CAD',count:1,selector:{endpoint:'transfers',filters:{source_account:'Everyday',target_account:'Reserve',link_type,transfer_status:'matched'}}});
 const expense=(id,incoming)=>({id,source:incoming?'food':'cash',target:incoming?'cash':'food',kind:'expense',label:incoming?'Food refund → Everyday':'Everyday → Food',amount_minor:incoming?2000:60000,currency:'CAD',count:1,selector:{endpoint:'transactions',filters:{account:'Everyday',category:'expense.food',category_mode:'exact',flow:'expense',direction:incoming?'incoming':'outgoing'}}});
 const flow={...common,coverage:{complete:true},nodes,edges:[pair('cash-reserve','own_cash')]};
-async function fixture(t,{width=390,edges=flow.edges,includeProduct=false}={}){
+async function fixture(t,{width=390,edges=flow.edges,includeProduct=false,graphNodes=nodes}={}){
  buildPlotly();
  const calls=[];
  const server=createServer(async(req,res)=>{
@@ -23,8 +23,8 @@ async function fixture(t,{width=390,edges=flow.edges,includeProduct=false}={}){
   if(u.pathname.startsWith('/hermes/app-api/finance/')){
    const name=u.pathname.split('/').pop(),q=Object.fromEntries(u.searchParams);calls.push({name,q});res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
    let data={...common};
-   if(name==='meta')data={...common,accounts:nodes.filter(n=>n.account),categories:[],currencies:['CAD']};
-   if(name==='flow')data={...flow,currency:q.currency,range:{start:q.start,end:q.end},edges:[...edges,...(includeProduct?[{id:'reserve-product-flow',source:'reserve',target:'reserve-product',kind:'investment',label:'Synthetic fund activity',amount_minor:10000,count:1,currency:q.currency,selector:{endpoint:'transactions',filters:{account:'Reserve',category:'investment.trade.synthetic',category_mode:'exact',flow:'investment',direction:'outgoing'}}}]:[])].map(edge=>({...edge,currency:q.currency}))};
+   if(name==='meta')data={...common,accounts:graphNodes.filter(n=>n.account),categories:[],currencies:['CAD']};
+   if(name==='flow')data={...flow,nodes:graphNodes,currency:q.currency,range:{start:q.start,end:q.end},edges:[...edges,...(includeProduct?[{id:'reserve-product-flow',source:'reserve',target:'reserve-product',kind:'investment',label:'Synthetic fund activity',amount_minor:10000,count:1,currency:q.currency,selector:{endpoint:'transactions',filters:{account:'Reserve',category:'investment.trade.synthetic',category_mode:'exact',flow:'investment',direction:'outgoing'}}}]:[])].map(edge=>({...edge,currency:q.currency}))};
    if(name==='transactions')data={...common,items:[{record_id:'synthetic',date:'2024-08-01',account:q.account,description:'Synthetic evidence',amount_minor:q.direction==='incoming'?2000:-60000,currency:q.currency,category_id:q.category}],total:1,offset:0,limit:25};
    if(name==='transfers')data={...common,items:[{link_id:'synthetic-pair',link_type:q.link_type,debit:{record_id:'synthetic-debit',account:q.source_account,date:'2024-08-01',currency:q.currency,amount_minor:-10000},credit:{record_id:'synthetic-credit',account:q.target_account,date:'2024-08-01',currency:q.currency,amount_minor:10000}}],total:1,offset:0,limit:25};
    res.end(JSON.stringify(data));return;
@@ -116,6 +116,63 @@ for(const width of [390,1280])test(`exact movement finder pages every dense sele
  await finder.getByLabel('Search exact movements').fill('Food refund → Everyday');await results.getByRole('button',{name:/Inspect Food refund/}).click();
  const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});await inspectMember(page,refund.label);
  const request=calls.filter(call=>call.name==='transactions').at(-1).q;assert.equal(request.direction,'incoming');assert.equal(request.category,'expense.food');assert.equal(request.category_mode,'exact');
+});
+test('folded account-role transfers remain searchable and inspectable without expanding the graph',{timeout:30000},async t=>{
+ const loop={...pair('folded-loop','own_cash'),label:'Everyday internal transfer',selector:{endpoint:'transfers',filters:{source_account:'Everyday',target_account:'Reserve',link_type:'own_cash',transfer_status:'matched'}}};
+ const {page,calls}=await fixture(t,{width:390,edges:[loop]});
+ assert.equal(await page.locator('.money-sankey-controls .money-sankey-toggle').first().getAttribute('aria-expanded'),'false','Mobile account roles start folded');
+ const finder=page.locator('.money-sankey-stream-finder');await finder.locator('summary').click();await finder.getByLabel('Search exact movements').fill('Everyday internal transfer');
+ const result=finder.getByRole('button',{name:/Inspect Everyday internal transfer/});await result.waitFor();
+ await result.click();const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByRole('button',{name:'Inspect Everyday internal transfer',exact:true}).click();await inspector.locator('.transaction-row').first().waitFor();
+ const q=calls.filter(call=>call.name==='transfers').at(-1).q;
+ assert.equal(q.source_account,'Everyday');assert.equal(q.target_account,'Reserve');assert.equal(q.transfer_status,'matched');
+ assert.deepEqual(await inspector.locator('.transaction-row').evaluateAll(rows=>rows.map(row=>row.dataset.recordId).sort()),['synthetic-credit','synthetic-debit']);
+});
+
+for(const width of [390,1280])test(`tall Sankey keeps its lowest account and product nodes visible at ${width}`,{timeout:30000},async t=>{
+ const accounts=Array.from({length:28},(_,i)=>({id:`tall-account-${i}`,label:`Tall account ${i}`,account:`Tall account ${i}`,accountGroup:'other',kind:'account'}));
+ const categories=Array.from({length:28},(_,i)=>({id:`tall-expense-${i}`,label:`Tall expense ${i}`,kind:'expense'}));
+ const edges=categories.map((node,i)=>({id:`tall-edge-${i}`,source:accounts[i].id,target:node.id,kind:'expense',label:`Tall stream ${i}`,amount_minor:1000+i,currency:'CAD',count:1,selector:{endpoint:'transactions',filters:{account:accounts[i].account,category:`expense.tall.${i}`,category_mode:'exact',flow:'expense',direction:'outgoing'}}}));
+ edges.push({id:'tall-product-edge',source:'reserve',target:'reserve-product',kind:'investment',label:'Tall product activity',amount_minor:12000,currency:'CAD',count:1,selector:{endpoint:'transactions',filters:{account:'Reserve',category:'investment.trade.synthetic',category_mode:'exact',flow:'investment',direction:'outgoing'}}});
+ const graphNodes=[...nodes,...accounts,...categories];
+ const {page}=await fixture(t,{width,edges,includeProduct:true,graphNodes});
+ if(width===390)await page.locator('.money-sankey-controls').getByRole('button',{name:'Expand Other accounts',exact:true}).click();
+ const chart=page.locator('.money-sankey-chart'),stage=page.locator('.money-sankey');
+ const svg=chart.locator('svg.main-svg').first();await svg.waitFor();
+ const metrics=await svg.evaluate(node=>({height:node.getBoundingClientRect().height,declared:Number(node.getAttribute('height')),viewBox:node.viewBox.baseVal.height}));
+ assert.ok(metrics.declared>680,JSON.stringify(metrics));assert.ok(metrics.height>=metrics.declared-1,`Tall Plotly SVG is not clipped: ${JSON.stringify(metrics)}`);
+ const last=chart.locator('.sankey-node[data-node="tall-account-27"]');await last.waitFor();
+ await page.waitForFunction(()=>document.querySelector('.money-sankey')?.getAttribute('aria-busy')==='false');
+ await stage.evaluate(node=>node.scrollTop=node.scrollHeight);
+ await last.scrollIntoViewIfNeeded();
+ const bounds=await page.evaluate(()=>{const node=document.querySelector('.sankey-node[data-node="tall-account-27"]'),stage=document.querySelector('.money-sankey'),r=node.getBoundingClientRect(),s=stage.getBoundingClientRect();return {node:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},stage:{left:s.left,right:s.right,top:s.top,bottom:s.bottom,scrollTop:stage.scrollTop,scrollHeight:stage.scrollHeight,clientHeight:stage.clientHeight}};});
+ assert.ok(bounds.node.bottom<=bounds.stage.bottom+1&&bounds.node.top>=bounds.stage.top-1,JSON.stringify(bounds));
+ const label=last.locator('text');assert.ok(await label.count()>0,'The lowest account label remains mounted with its bar');
+ const labelBounds=await label.first().boundingBox();assert.ok(labelBounds&&labelBounds.y>=bounds.stage.top-1&&labelBounds.y+labelBounds.height<=bounds.stage.bottom+1,JSON.stringify({bounds,labelBounds}));
+ const hit=await page.evaluate(()=>{const node=document.querySelector('.sankey-node[data-node="tall-account-27"]'),r=node.getBoundingClientRect(),target=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return target?.closest('.sankey-node')?.dataset.node||'';});
+ assert.equal(hit,'tall-account-27','The lowest account is visible and pointer-addressable after scrolling');
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+});
+
+for(const width of [390,1280])for(const method of ['mouse','touch'])test(`account heading and chevron remain 44px clickable at minimum zoom by ${method} at ${width}`,{timeout:30000},async t=>{
+ const {page}=await fixture(t,{width,edges:[expense('zoom-expense',false)]});
+ const zoomOut=page.getByRole('button',{name:'Zoom out',exact:true});for(let i=0;i<3;i++)await zoomOut.click();
+ await page.getByText('65%',{exact:true}).waitFor();
+ const band=page.locator('.money-sankey-band[data-role="other"]');
+ const buttons=band.locator('button');await buttons.first().waitFor();
+ for(const button of [buttons.first(),buttons.nth(1)]){
+  const box=await button.boundingBox();assert.ok(box&&box.width>=44&&box.height>=44,JSON.stringify(box));
+  const hit=await button.evaluate((node,{x,y})=>{const target=document.elementFromPoint(x,y);return target===node||node.contains(target);},{x:box.x+box.width/2,y:box.y+box.height/2});
+  assert.equal(hit,true,'The visible hit target belongs to the heading control');
+ }
+ if(method==='touch')await buttons.first().tap();else await buttons.first().click();
+ await page.getByRole('complementary',{name:'Flow inspector',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Close inspector',exact:true}).click();
+ const expanded=await buttons.nth(1).getAttribute('aria-expanded');
+ if(method==='touch')await buttons.nth(1).tap();else await buttons.nth(1).click();
+ await page.waitForFunction(value=>document.querySelector('.money-sankey-band[data-role="other"] .money-sankey-toggle')?.getAttribute('aria-expanded')!==value,expanded);
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
 });
 for(const width of [390,1280])test(`same-account loop remains exact evidence with real zoom, pan and Fit controls at ${width}`,{timeout:30000},async t=>{
  const loop={...pair('self-loop','own_cash'),source:'reserve',target:'reserve',label:'Reserve internal loop',selector:{endpoint:'transfers',filters:{source_account:'Reserve',target_account:'Reserve',link_type:'own_cash',transfer_status:'matched'}}};
