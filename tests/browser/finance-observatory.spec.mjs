@@ -145,7 +145,7 @@ test('exact-account exploration opens only that account’s streams within a col
  assert.match(await summary.textContent(),/^1 exact streams/);
  assert.equal(await inspector.getByRole('button',{name:'Inspect Sibling food stream',exact:true}).count(),1);
  assert.equal(await inspector.getByRole('button',{name:'Inspect Food purchase',exact:true}).count(),0);
- const request=page.waitForRequest(request=>request.url().includes('/finance/transactions?'));
+ const request=page.waitForResponse(response=>response.url().includes('/finance/transactions?'));
  await inspector.getByRole('button',{name:'Inspect Sibling food stream',exact:true}).click();
  assert.equal(new URL((await request).url()).searchParams.get('account'),'Synthetic sibling');
  assert.equal(calls.filter(call=>call.name==='transactions').at(-1).query.account,'Synthetic sibling');
@@ -338,14 +338,23 @@ test('unconverted USD activity has selectable native evidence with no dated FX',
  const {page,url}=await fixture(t);let inspectorCurrency='';
  await page.route('**/finance/flow?**',async route=>{
   const response=await route.fetch(),data=await response.json(),query=new URL(route.request().url()).searchParams;
-  if(query.get('currency')==='USD')data.edges=[{id:'usd-native-edge',source:'salary',target:'cash',kind:'income',label:'Original USD deposit',amount_minor:12345,count:1,currency:'USD',selector:{endpoint:'transactions',filters:{account:'Fixture cash',category:'income.salary',category_mode:'exact',flow:'income',direction:'incoming'}}}];
+  if(query.get('currency')==='USD')data.edges=[{id:'usd-native-edge',source:'salary',target:'cash',kind:'income',label:'Original USD deposit',amount_minor:12345,count:1,currency:'USD',evidenceNote:'Synthetic link status',selector:{endpoint:'transactions',filters:{account:'Fixture cash',category:'income.salary',category_mode:'exact',flow:'income',direction:'incoming'}}}];
   return route.fulfill({response,json:data});
  });
- await page.route('**/finance/transactions?**',route=>{inspectorCurrency=new URL(route.request().url()).searchParams.get('currency');return route.fulfill({json:{...common,items:[{...tx,entry_id:'usd-native',record_id:'usd-native-record',currency:'USD',amount_minor:12345,description:'Original USD evidence'}],total:1,limit:50,offset:0}});});
+ await page.route('**/finance/transactions?**',route=>{inspectorCurrency=new URL(route.request().url()).searchParams.get('currency');return route.fulfill({json:{...common,items:[{...tx,entry_id:'usd-native',record_id:'usd-native-record',currency:'USD',amount_minor:12345,drive_url:'https://drive.google.com/file/synthetic',description:'Original USD evidence'}],total:1,limit:50,offset:0}});});
  await page.goto(url);await page.locator('.money-map').getByText('USD activity is shown separately because a dated conversion rate is unavailable.',{exact:false}).waitFor();
  await page.getByText('Inspect original USD movements',{exact:true}).click();
  await page.getByRole('button',{name:/Inspect original USD movement/}).click();
  await page.getByText('Original USD evidence',{exact:true}).waitFor();
+ const rationale=page.locator('.flow-inspector details.evidence');await rationale.locator('summary').click();
+ assert.match(await rationale.innerText(),/Synthetic receipt/);
+ assert.match(await rationale.innerText(),/reviewed/);
+ assert.match(await rationale.innerText(),/fixture-source/);
+ assert.match(await rationale.innerText(),/Page: 2/);
+ assert.equal(await rationale.getByRole('link',{name:'Open source ↗'}).getAttribute('href'),'https://drive.google.com/file/synthetic');
+ assert.equal(await page.locator('.flow-inspector time').textContent(),'2024-08-01');
+ assert.equal((await page.locator('.flow-inspector .tx-amount').textContent()).replace(/\u00a0/g,' '),'USD 123.45');
+ assert.equal(await page.locator('.flow-inspector .evidence-note').textContent(),'Synthetic link status');
  assert.equal(inspectorCurrency,'USD');
 });
 
@@ -362,4 +371,18 @@ test('Back and refresh rebuild inspector selection from current stream identitie
  await page.getByRole('button',{name:'Refresh data'}).click();
  await page.locator('.flow-inspector').waitFor();
  await page.getByRole('button',{name:'Inspect Salary deposit'}).waitFor();
+});
+
+test('zero-cash investment evidence creates an owner from an empty API graph',{timeout:30000},async t=>{
+ const {page,url,calls}=await fixture(t);
+ await page.route('**/finance/flow?**',route=>{const q=new URL(route.request().url()).searchParams;return route.fulfill({json:{...common,currency:q.get('currency'),range:{start:q.get('start'),end:q.get('end')},nodes:[],edges:[],coverage:{complete:true}}});});
+ await page.route('**/finance/investments?**',route=>{const q=new URL(route.request().url()).searchParams;const cashflows=q.get('currency')==='CAD'?[{event_id:'empty-graph-zero',account:'Fixture orphan investment',security_key:'ZERO_ONLY',classification:'buy',cash_amount_minor:0,currency:'CAD',date:'2026-08-03'}]:[];return route.fulfill({json:{...common,balances:[],history:[],holdings:[],cashflows,coverage:{cashflows:{complete:true}}}});});
+ await page.route('**/finance/transactions?**',route=>{const query=Object.fromEntries(new URL(route.request().url()).searchParams);calls.push({name:'transactions',query});return route.fulfill({json:{...common,items:[{record_id:'investment:empty-graph-zero',entry_id:'empty-graph-zero',account:'Fixture orphan investment',date:'2026-08-03',description:'Zero-cash source evidence',category_id:'investment.trade.buy',amount_minor:0,currency:'CAD'}],total:1,limit:50,offset:0}});});
+ await page.goto(url);await page.locator('.money-sankey').waitFor();await page.getByText('No recorded movements match these filters.',{exact:true}).waitFor();
+ await page.locator('.money-sankey-controls [data-group-select]').filter({hasText:'Investments'}).click();
+ const inspector=page.getByRole('complementary',{name:'Flow inspector',exact:true});
+ await inspector.getByRole('button',{name:/Inspect Zero-cash buy · ZERO_ONLY/}).click();
+ await inspector.getByText('Zero-cash source evidence',{exact:true}).waitFor();
+ const query=calls.findLast(call=>call.name==='transactions').query;
+ assert.equal(query.record_id,'investment:empty-graph-zero');assert.equal(query.account,'Fixture orphan investment');assert.equal(query.category,'investment.trade.buy');assert.equal(query.flow,'investment');assert.equal(query.dataset,'investment');assert.equal(query.scope,'personal');assert.equal(query.currency,'CAD');
 });

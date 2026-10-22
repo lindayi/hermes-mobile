@@ -71,8 +71,15 @@ export function enrichProducts(input, { investments = {}, filters = {} } = {}) {
   const zeroCounts=new Map();
   for(const row of zeroRows){const key=JSON.stringify([row.account,row.currency,row.event_id]);zeroCounts.set(key,(zeroCounts.get(key)||0)+1);}
   for(const row of zeroRows){
-    const account=[...accounts.values()].find(node=>node.account===row.account);
-    if(!account||zeroCounts.get(JSON.stringify([row.account,row.currency,row.event_id]))!==1)continue;
+    if(zeroCounts.get(JSON.stringify([row.account,row.currency,row.event_id]))!==1)continue;
+    let account=[...accounts.values()].find(node=>node.account===row.account);
+    if(!account){
+      if(typeof row.account!=='string'||!row.account)continue;
+      let accountId=id('evidence-only-account',row.account);
+      for(let suffix=1;raw.nodes.some(node=>node.id===accountId);suffix++)accountId=id('evidence-only-account',row.account,suffix);
+      account={id:accountId,account:row.account,label:row.account,kind:'account',accountGroup:'investments',noPeriodFlows:true,evidenceOnly:true};
+      raw.nodes.push(account);accounts.set(accountId,account);
+    }
     account.accountGroup='investments';
     const rootId=id('group',account.id,row.currency);
     let owner=raw.nodes.find(node=>node.id===rootId);

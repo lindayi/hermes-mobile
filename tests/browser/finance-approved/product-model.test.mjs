@@ -87,6 +87,32 @@ test('zero-cash purchases remain exact evidence beside a nonzero sale and in an 
   assert.equal(allZero.edges.length,0,'All-zero activity creates no movement edge');
 });
 
+test('an empty flow graph gets a stable evidence-only owner for zero-cash activity',async()=>{
+  const raw={currency:'CAD',range,nodes:[],edges:[]};
+  const investments={coverage:{cashflows:{complete:true}},cashflows:[
+    {event_id:'empty-graph-zero',account:'broker',security_key:'ZERO_ONLY',date:'2026-08-05',currency:'CAD',cash_amount_minor:0,classification:'buy'},
+  ]};
+  const filters={...range,currency:'CAD',scope:'personal',dataset:'all'};
+  const result=enrich(raw,{investments,filters}),account=result.nodes.find(node=>node.kind==='account');
+  assert.ok(account,'The returned investment event supplies its evidence-only owner');
+  assert.equal(account.account,'broker');
+  assert.equal(account.accountGroup,'investments');
+  assert.equal(account.noPeriodFlows,true);
+  assert.equal(result.edges.length,0,'An evidence-only owner adds no movement');
+  assert.equal(account.value,undefined,'No account balance is invented');
+  const product=result.nodes.find(node=>node.kind==='product'&&node.security_key==='ZERO_ONLY');
+  assert.ok(product);
+  const graph=model.createModel(result),group=JSON.stringify(['account-group','investments']);
+  const selected=model.selectionMembers(graph.project(),{group});
+  assert.equal(selected.length,1);
+  assert.deepEqual(selected[0].selector.filters,{
+    ...filters,account:'broker',category:'investment.trade.buy',category_mode:'exact',
+    flow:'investment',dataset:'investment',record_id:'investment:empty-graph-zero',
+  });
+  const again=enrich(raw,{investments,filters});
+  assert.equal(again.nodes.find(node=>node.kind==='account').id,account.id,'The evidence owner identity is stable');
+});
+
 
 test('unverifiable trade breakdown retains the whole original selector and amount inside its owner', () => {
   const cases = [
