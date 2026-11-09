@@ -2324,6 +2324,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const modelOwner=state.user?.id;
     const modelControls=createModelControls({doc,win,api,sessionId:session.id,userId:modelOwner,isCurrent:()=>version===routeVersion && state.user?.id===modelOwner});
     modelControls.element.className='quiet model-control-button';
+    modelControls.reasoningElement.className='quiet model-control-button reasoning-control';
     const syncModelLock=()=>{
       if(version!==routeVersion || state.user?.id!==modelOwner)return;
       let currentAttempt=attempts.get(session.id);
@@ -2451,7 +2452,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       root.append(overlay);textarea.focus();textarea.setSelectionRange(start,end);
     },'quiet icon-button',{'aria-label':'Expand editor',title:'Expand editor'});
     const editorSlot=h('div',{class:'composer-editor'},textarea,expand);
-    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,photoTray,photoStatus,photoInput,steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,addPhotos,send));
+    const composer=h('form',{class:'composer',onsubmit:e=>{e.preventDefault();if(dispatch===submit || dispatch===steer)activate();}},editorSlot,photoTray,photoStatus,photoInput,steerHelp,steerStatus,steerRetries,h('div',{class:'composer-bottom'},modelControls.element,modelControls.reasoningElement,addPhotos,send));
     const technical=h('details',{class:'technical-strip',hidden:true});
     const renderTelemetry=data=>{
       if(version!==routeVersion || !data)return;

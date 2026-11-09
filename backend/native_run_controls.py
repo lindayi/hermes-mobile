@@ -1,4 +1,5 @@
 """Process-local compatibility for the dedicated mobile owner listener only."""
+import asyncio
 import json
 import base64
 import inspect
@@ -16,6 +17,9 @@ from aiohttp import web
 PHOTO_REQUEST_BYTES = 20_000_000
 TEXT_REQUEST_BYTES = 10_000_000
 PHOTO_OMITTED = '[screenshot] [photo attachment omitted after processing]'
+_MOBILE_REASONING_EFFORTS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh'})
+_MOBILE_MODEL_OPTIONS_UNAVAILABLE = {'available': False, 'models': [], 'default': None}
+_MOBILE_MODEL_CATALOG_LOCK = threading.Lock()
 _INLINE_PHOTO = re.compile(r'data:image/[^;,\s"\\]+;base64,[A-Za-z0-9+/=_-]*', re.I)
 _MOBILE_PHOTO_HOOK_ACTIVE = ContextVar('mobile_photo_hook_active', default=False)
 _PHOTO_HOOK_INSTALL_LOCK = threading.Lock()
@@ -58,6 +62,63 @@ def validate_photo_text_budget(body):
         for part in content])])
     if _compact_utf8_size(counted) > TEXT_REQUEST_BYTES:
         raise ValueError('Native text request exceeds the existing limit')
+
+
+def _mobile_model_options():
+    try:
+        from gateway.platforms import api_server
+        from hermes_cli.inventory import build_model_options_payload, load_picker_context
+        from hermes_cli import models as model_catalog
+
+        provider_catalog = build_model_options_payload(
+            load_picker_context(), include_unconfigured=True)
+        if not isinstance(provider_catalog, dict) or provider_catalog.get('provider') != 'copilot':
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
+        providers = provider_catalog.get('providers')
+        if not isinstance(providers, list):
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
+        rows = [row for row in providers if isinstance(row, dict)
+                and row.get('slug') == 'copilot' and row.get('authenticated') is True]
+        if len(rows) != 1 or not isinstance(rows[0].get('models'), list):
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
+        model_ids = list(dict.fromkeys(
+            model for model in rows[0]['models']
+            if isinstance(model, str)
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}', model)
+            and model not in ('default', 'hermes-agent')))
+        if not model_ids:
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
+
+        runtime = api_server._resolve_request_runtime_agent_kwargs('copilot')
+        token = runtime.get('api_key') if isinstance(runtime, dict) else None
+        catalog = None
+        if isinstance(token, str) and token:
+            with _MOBILE_MODEL_CATALOG_LOCK:
+                model_catalog._github_model_catalog_cache = None
+                model_catalog._github_model_catalog_cache_key = None
+                model_catalog._github_model_catalog_cache_time = 0.0
+                catalog = model_catalog.fetch_github_model_catalog(api_key=token)
+        entries = {item.get('id'): item for item in catalog
+                   if isinstance(item, dict) and isinstance(item.get('id'), str)} if isinstance(catalog, list) else {}
+        models = []
+        for model_id in model_ids:
+            efforts = []
+            entry = entries.get(model_id)
+            capabilities = entry.get('capabilities') if isinstance(entry, dict) else None
+            supports = capabilities.get('supports') if isinstance(capabilities, dict) else None
+            advertised = supports.get('reasoning_effort') if isinstance(supports, dict) else None
+            if isinstance(advertised, list):
+                efforts = list(dict.fromkeys(
+                    effort.strip().lower() for effort in advertised
+                    if isinstance(effort, str) and effort.strip().lower() in _MOBILE_REASONING_EFFORTS))
+            models.append({'id': model_id, 'provider': 'copilot', 'label': model_id,
+                           'reasoning_efforts': efforts})
+        default_model = provider_catalog.get('model')
+        default = ({'model': default_model, 'provider': 'copilot'}
+                   if isinstance(default_model, str) and default_model in model_ids else None)
+        return {'available': True, 'models': models, 'default': default}
+    except Exception:
+        return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
 
 
 def _canonical_photo_content(content):
@@ -337,6 +398,13 @@ def run_controls_adapter(base):
                 type(self)._photo_admission_wrapped = True
             return await super().connect(**kwargs)
 
+        async def _handle_mobile_model_options(self, request):
+            auth = self._check_auth(request)
+            if auth is not None:
+                return auth
+            result = await asyncio.to_thread(_mobile_model_options)
+            return web.json_response(result)
+
         async def _handle_runs(self, request):
             auth = self._check_auth(request)
             if auth is not None:
@@ -490,6 +558,11 @@ def run_controls_adapter(base):
             return callback
 
         def _create_agent(self, *args, **kwargs):
+            callback = kwargs.get('tool_progress_callback')
+            if (getattr(callback, '_mobile_run_id', None)
+                    and isinstance(kwargs.get('requested_model'), str)
+                    and kwargs['requested_model'].strip()):
+                kwargs['confirmed_runtime_lock'] = True
             agent = super()._create_agent(*args, **kwargs)
             if hasattr(agent, '_save_session_log'):
                 agent = private_photo_agent(agent)
@@ -663,7 +736,9 @@ def run_controls_adapter(base):
 
         def _http_route_table(self):
             routes = super()._http_route_table()
-            return [*routes, ('POST', '/v1/runs/{run_id}/clarifications/{question_id}',
+            return [*routes, ('GET', '/api/mobile/model-options',
+                              self._handle_mobile_model_options),
+                            ('POST', '/v1/runs/{run_id}/clarifications/{question_id}',
                               self._handle_clarification_answer)]
 
         async def _handle_steer_run(self, request):
@@ -788,6 +863,8 @@ def run_controls_adapter(base):
             if response.status != 200:
                 return response
             data = json.loads(response.text)
+            data['mobile_model_controls'] = {
+                'version': 1, 'reasoning_efforts': True, 'context_tiers': False}
             data['mobile_run_controls'] = {
                 'version': 1, 'steering': True, 'live_commentary': True,
                 'clarifications': True}

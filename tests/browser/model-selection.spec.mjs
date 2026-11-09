@@ -40,7 +40,7 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
   let reasoning=page.getByRole('combobox',{name:'Reasoning effort',exact:true});await reasoning.waitFor();
   assert.equal(await model.evaluate(el=>el.tagName),'SELECT');assert.equal(await model.inputValue(),'');
   assert.match(await model.locator('option:checked').textContent(),/Default/);
-  assert.deepEqual(await model.locator('option').allTextContents(),['Default — Model A','Model A (fixture)','Model B (fixture)']);
+  assert.deepEqual(await model.locator('option').allTextContents(),['Default — fixture-model-a','Model A (fixture)','Model B (fixture)']);
   assert.deepEqual(await reasoning.locator('option').allTextContents(),['Default','low','high']);
   assert.equal(await page.getByRole('combobox',{name:'Context',exact:true}).count(),0,'unsupported context tiers are not shown');
   await model.selectOption('0');await reasoning.selectOption('high');
@@ -61,7 +61,7 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
   await model.focus();await page.keyboard.press('Tab');assert.equal(await model.evaluate(el=>document.activeElement===el),false,'native select does not trap keyboard focus');
   await model.click();assert.equal(await page.locator('[role=dialog],.dialog-overlay').count(),0,'native popup never creates a heavy application overlay');await page.keyboard.press('Escape');
   await model.selectOption('0');assert.equal(await input.inputValue(),'Preserve my draft');assert.equal(posts.length,0);
-  assert.equal(await page.getByRole('combobox',{name:'Reasoning effort'}).count(),0);
+  assert.equal(await page.getByRole('combobox',{name:'Reasoning effort'}).count(),1);
   assert.equal(await page.getByRole('button',{name:'Apply',exact:true}).count(),0);
   const geometry=[];
   for(const theme of ['light','dark']){
@@ -88,6 +88,14 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
   await page.screenshot({path:join(artifacts,'model-390-active-stop.png')});
   for(const client of clients)client.write(`id: 1\nevent: done\ndata: ${JSON.stringify({status:'completed',output:'Synthetic response'})}\n\n`);
   await page.getByText('Synthetic response',{exact:true}).waitFor();assert.deepEqual(errors,[]);
+  await model.selectOption('1');await reasoning.selectOption('minimal');
+  await page.getByRole('textbox',{name:'Message Hermes',exact:true}).fill('Second turn uses Model B');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Stop run',exact:true}).waitFor();
+  assert.equal(posts.length,2);
+  assert.deepEqual(posts[1].selection,{provider:'fixture',model:modelB,reasoning_effort:'minimal'});
+  for(const client of clients)client.write(`id: 2\nevent: done\ndata: ${JSON.stringify({status:'completed',output:'Second synthetic response'})}\n\n`);
+  await page.getByText('Second synthetic response',{exact:true}).waitFor();assert.deepEqual(errors,[]);
   console.log(JSON.stringify({artifacts,frontend:dir,geometry}));
   assert.deepEqual(geometry.filter(({model,reasoning})=>model.height>44||reasoning.height>44),[],'native dropdowns stay compact 44px rows');
  }finally{await browser?.close();for(const res of clients)res.end();server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}

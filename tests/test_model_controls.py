@@ -1,4 +1,5 @@
 import json
+import re
 import httpx
 from fastapi.testclient import TestClient
 from test_auth import enroll, ORIGIN, BASE, BOOTSTRAP
@@ -18,12 +19,10 @@ def fixture(tmp_path, monkeypatch, responses=None):
         if request.url.path=='/v1/models':
             return httpx.Response(200,json={'data':[{'id':'hermes-agent'}]})
         if request.url.path=='/v1/capabilities':
-            return httpx.Response(200,json={'features':{'model_options':True,'run_submission':True}})
-        if request.url.path=='/api/model/options':
-            return httpx.Response(200,json={'model':'gpt-6-astra','provider':'copilot','providers':[
-                {'slug':'copilot','authenticated':True,'models':['gpt-6-astra','other']},
-                {'slug':'moa','authenticated':True,'models':['default']},
-                {'slug':'foreign','authenticated':False,'models':['bad']}]})
+            return httpx.Response(200,json={'features':{'model_options':True,'run_submission':True},
+                'mobile_model_controls':{'version':1,'reasoning_efforts':True,'context_tiers':False}})
+        if request.url.path=='/api/mobile/model-options':
+            return httpx.Response(200,json=catalog_with(['gpt-6-astra','other']))
         if request.url.path.endswith('/messages'):
             return httpx.Response(200,json={'session_id':'wa-1','data':[]})
         if request.method=='POST':
@@ -88,7 +87,7 @@ def test_invalid_selection_is_422_without_dispatch(tmp_path,monkeypatch):
     app,calls=fixture(tmp_path,monkeypatch)
     with TestClient(app,base_url=ORIGIN) as c:
         c.headers['Origin']=ORIGIN; enroll(c)
-        for selection in [{'model':'other','provider':'copilot','reasoning_effort':'high'}, {'model':'bad','provider':'foreign'}, {'model':'other','provider':'copilot','base_url':'https://evil'}]:
+        for selection in [{'model':'other','provider':'copilot','reasoning_effort':'low'}, {'model':'bad','provider':'foreign'}, {'model':'other','provider':'copilot','base_url':'https://evil'}]:
             r=c.post(BASE+'/runs',json={'session_id':'wa-1','input':'hello','idempotency_key':'bad','selection':selection})
             assert r.status_code==422,r.text
     assert not any(p[0]=='POST' for p in calls)
@@ -100,7 +99,8 @@ def test_selection_is_durable_and_uncertain_retry_does_not_dispatch(tmp_path,mon
     monkeypatch.setattr(module,'MODEL_OWNER_HOME',app.state.catalog.profiles['default'],raising=False)
     with TestClient(app,base_url=ORIGIN) as c:
         c.headers['Origin']=ORIGIN; enroll(c)
-        body={'session_id':'wa-1','input':'hello','idempotency_key':'selection-1','selection':{'model':'other','provider':'copilot'}}
+        body={'session_id':'wa-1','input':'hello','idempotency_key':'selection-1',
+              'selection':{'model':'other','provider':'copilot','reasoning_effort':'high'}}
         r=c.post(BASE+'/runs',json=body)
         assert r.status_code==200,r.text
         rid=r.json()['id']
@@ -108,9 +108,13 @@ def test_selection_is_durable_and_uncertain_retry_does_not_dispatch(tmp_path,mon
         assert c.post(BASE+'/runs',json=body).json()['id']==rid
         changed=dict(body,selection={'model':'gpt-6-astra','provider':'copilot'})
         assert c.post(BASE+'/runs',json=changed).status_code==409
+        changed=dict(body,selection={'model':'other','provider':'copilot','reasoning_effort':'low'})
+        assert c.post(BASE+'/runs',json=changed).status_code==409
     posts=[p for p in calls if p[0]=='POST']
     assert len(posts)==1
-    assert posts[0][2]=={'session_id':'wa-1','input':'hello','conversation_history':[],'model':'other','provider':'copilot'}
+    assert posts[0][2]=={'session_id':'wa-1','input':'hello','conversation_history':[],
+                         'model':'other','provider':'copilot',
+                         'model_options':{'reasoning_effort':'high'}}
 
 
 def test_reasoning_selection_reaches_native_run_request(tmp_path,monkeypatch):
@@ -145,7 +149,10 @@ def test_available_owner_catalog(tmp_path,monkeypatch):
         data=c.get(BASE+'/sessions/wa-1/model-options').json()
         assert data['available'] is True
         assert ('GET','/v1/models',None) in calls
-        assert data['models']==[{'id':m,'provider':'copilot','label':m,'reasoning_efforts':[]} for m in ['gpt-6-astra','other']]
+        assert ('GET','/api/mobile/model-options',None) in calls
+        assert data['models']==[
+            {'id':'gpt-6-astra','provider':'copilot','label':'gpt-6-astra','reasoning_efforts':['low']},
+            {'id':'other','provider':'copilot','label':'other','reasoning_efforts':['high']}]
 
 
 def test_owner_catalog_is_profile_bound_and_default_effort_only(tmp_path,monkeypatch):
@@ -161,16 +168,28 @@ def test_owner_catalog_is_profile_bound_and_default_effort_only(tmp_path,monkeyp
     assert calls==[]
 
 
-def catalog_with(models):
-    return {'provider':'copilot','model':'a','providers':[
-        {'slug':'copilot','authenticated':True,'models':models}]}
+def catalog_with(models, default='a'):
+    supported={'gpt-6-astra':['low'],'other':['high']}
+    records=[]
+    for model in models:
+        if (isinstance(model,str)
+                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}',model)
+                and model not in ('default','hermes-agent')):
+            records.append({'id':model,'provider':'copilot','label':model,
+                            'reasoning_efforts':supported.get(model,[])})
+    ids={record['id'] for record in records}
+    safe_default={'model':default,'provider':'copilot'} if isinstance(default,str) and default in ids else None
+    return {'available':bool(records),'models':records,'default':safe_default}
 
 
 @pytest.mark.parametrize('path,payload', [
     *[('/v1/capabilities', x) for x in [None, [], 'bad', {'features':None}, {'features':[]}, {'features':'bad'}]],
     *[('/v1/models', x) for x in [None, [], {'data':None}, {'data':{}}, {'data':[{'id':'hermes-agent'},None]}, {'data':[None]}, {'data':[{'id':'hermes-agent'},{'id':'hermes-agent'}]}]],
-    *[('/api/model/options', x) for x in [None, [], 'bad', {'provider':'copilot','providers':None}, {'provider':'copilot','providers':{}}, {'provider':'copilot','providers':[None]}, {'provider':'copilot','providers':[{'slug':'copilot','authenticated':True,'models':['a']},None]}]],
-    *[('/api/model/options', catalog_with(x)) for x in ['abc', {'a':True}, None, [None], ['a',{}], ['a',1]]],
+    *[('/api/mobile/model-options', x) for x in [None, [], 'bad',
+        {'available':True,'models':None,'default':None},
+        {'available':True,'models':{},'default':None},
+        {'available':True,'models':[None],'default':None},
+        {'available':True,'models':[{'id':'a'}],'default':None}]],
 ])
 def test_malformed_inventory_blocks_asgi_get_and_forged_post(tmp_path, monkeypatch, path, payload):
     app,calls=fixture(tmp_path,monkeypatch,{path:payload})
@@ -188,8 +207,9 @@ def test_malformed_inventory_blocks_asgi_get_and_forged_post(tmp_path, monkeypat
 
 @pytest.mark.parametrize('default', [{'secret':'REVIEW_SENTINEL'}, ['a'], None, 12, 'foreign', 'default', 'hermes-agent', 'a/b', 'x'*201])
 def test_default_projection_never_reflects_untrusted_metadata(tmp_path,monkeypatch,default):
-    catalog=catalog_with(['a']); catalog['model']=default
-    app,calls=fixture(tmp_path,monkeypatch,{'/api/model/options':catalog})
+    catalog=catalog_with(['a'])
+    catalog['default']=({'model':default,'provider':'copilot'} if isinstance(default,str) else default)
+    app,calls=fixture(tmp_path,monkeypatch,{'/api/mobile/model-options':catalog})
     import backend.app as module
     monkeypatch.setattr(module,'MODEL_OWNER_HOME',app.state.catalog.profiles['default'])
     with TestClient(app,base_url=ORIGIN) as c:
@@ -201,7 +221,7 @@ def test_default_projection_never_reflects_untrusted_metadata(tmp_path,monkeypat
 
 @pytest.mark.parametrize('models,expected', [([],[]), (['default','hermes-agent','a/b','x'*201],[]), (['a','a','b','x'*200,'x'*201],['a','b','x'*200])])
 def test_inventory_empty_bounds_and_dedup(tmp_path,monkeypatch,models,expected):
-    app,calls=fixture(tmp_path,monkeypatch,{'/api/model/options':catalog_with(models)})
+    app,calls=fixture(tmp_path,monkeypatch,{'/api/mobile/model-options':catalog_with(models)})
     import backend.app as module
     monkeypatch.setattr(module,'MODEL_OWNER_HOME',app.state.catalog.profiles['default'])
     with TestClient(app,base_url=ORIGIN) as c:

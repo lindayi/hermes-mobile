@@ -1,24 +1,49 @@
 export function createModelControls({doc, win, api, sessionId, userId, isCurrent}) {
   const element = doc.createElement('select');
-  element.hidden = true;
-  element.disabled = true;
+  const reasoningElement = doc.createElement('select');
+  element.hidden = reasoningElement.hidden = true;
+  element.disabled = reasoningElement.disabled = true;
   element.setAttribute('aria-label', 'Model');
-  element.title = 'Model for the next message. Provider fallback may still occur.';
-  let models = [], defaultModel = null;
-  let applied = null, locked = false, destroyed = false;
+  reasoningElement.setAttribute('aria-label', 'Reasoning effort');
+  element.title = 'Requested model for the next message. Explicit choices do not use fallback.';
+  reasoningElement.title = 'Reasoning effort for the next message.';
+  let models = [], defaultModel = null, appliedModel = null, appliedEffort = null;
+  let locked = false, destroyed = false;
   const current = () => !destroyed && isCurrent();
   const storageKey = `hermes:${userId}:model-controls:${JSON.stringify([userId, sessionId])}`;
-  let pendingSaved=false;
-  try {pendingSaved=win.sessionStorage.getItem(storageKey)!==null;} catch {}
-  function validSelection(value) {
+  let pendingSaved = false;
+  try { pendingSaved = win.sessionStorage.getItem(storageKey) !== null; } catch {}
+
+  function modelFor(selection) {
+    return models.find(model => model.id === selection?.model
+      && model.provider === selection?.provider) || null;
+  }
+  function selectedModel() {
+    return appliedModel || defaultModel;
+  }
+  function validSaved(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    if (Object.keys(value).some(key => !['model', 'provider', 'reasoning_effort'].includes(key))) return false;
-    const model = models.find(model => model.id === value.model && model.provider === value.provider);
-    return !!model && (!Object.hasOwn(value, 'reasoning_effort') || model.reasoning_efforts.includes(value.reasoning_effort));
+    const keys = Object.keys(value);
+    if (keys.some(key => !['model', 'provider', 'reasoning_effort'].includes(key))) return false;
+    const hasModel = Object.hasOwn(value, 'model'), hasProvider = Object.hasOwn(value, 'provider');
+    if (hasModel !== hasProvider || (!hasModel && !Object.hasOwn(value, 'reasoning_effort'))) return false;
+    if (hasModel) {
+      if (typeof value.model !== 'string' || typeof value.provider !== 'string'
+          || !modelFor(value)) return false;
+    }
+    if (Object.hasOwn(value, 'reasoning_effort')) {
+      const active = hasModel ? modelFor(value) : defaultModel;
+      if (typeof value.reasoning_effort !== 'string'
+          || !active?.reasoning_efforts.includes(value.reasoning_effort)) return false;
+    }
+    return true;
   }
   function persist() {
+    const saved = {};
+    if (appliedModel) Object.assign(saved, {model: appliedModel.id, provider: appliedModel.provider});
+    if (appliedEffort) saved.reasoning_effort = appliedEffort;
     try {
-      if (applied) win.sessionStorage.setItem(storageKey, JSON.stringify(applied));
+      if (Object.keys(saved).length) win.sessionStorage.setItem(storageKey, JSON.stringify(saved));
       else win.sessionStorage.removeItem(storageKey);
     } catch { /* Storage can be disabled in private browsing. */ }
   }
@@ -28,96 +53,141 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       if (raw === null) return;
       try {
         const saved = JSON.parse(raw);
-        if (validSelection(saved)) applied = saved;
+        if (validSaved(saved)) {
+          appliedModel = Object.hasOwn(saved, 'model') ? modelFor(saved) : null;
+          appliedEffort = saved.reasoning_effort || null;
+        }
       } catch { /* Malformed saved data is stale, not a selection. */ }
-      if (!applied) win.sessionStorage.removeItem(storageKey);
+      if (!appliedModel && !appliedEffort) win.sessionStorage.removeItem(storageKey);
     } catch { /* Missing browser storage is nonfatal. */ }
   }
   function validCatalog(value) {
     if (value?.available !== true || !Array.isArray(value.models) || !value.models.length) return false;
     const pairs = new Set();
     const text = value => typeof value === 'string' && value.trim().length > 0;
-    return value.models.every(model => {
-      if (!model || !['id', 'provider', 'label'].every(key => text(model[key]))) return false;
-      const efforts = model.reasoning_efforts;
-      if (!Array.isArray(efforts) || !efforts.every(text) || new Set(efforts).size !== efforts.length) return false;
+    const validModel = model => !!model
+      && ['id', 'provider', 'label'].every(key => text(model[key]))
+      && Array.isArray(model.reasoning_efforts)
+      && model.reasoning_efforts.every(text)
+      && new Set(model.reasoning_efforts).size === model.reasoning_efforts.length;
+    if (!value.models.every(validModel)) return false;
+    for (const model of value.models) {
       const pair = JSON.stringify([model.id, model.provider]);
       if (pairs.has(pair)) return false;
       pairs.add(pair);
-      return true;
-    });
+    }
+    if (value.default === null) return true;
+    return !!value.default && typeof value.default === 'object' && !Array.isArray(value.default)
+      && Object.keys(value.default).length === 2
+      && text(value.default.model) && text(value.default.provider)
+      && value.models.some(model => model.id === value.default.model
+        && model.provider === value.default.provider);
   }
-  const choices = new Map();
-  function option(value, text, selection = null) {
-    const result = doc.createElement('option');
-    result.value = value;
-    result.textContent = text;
-    choices.set(value, {option: result, selection});
-    return result;
+
+  const modelChoices = new Map(), reasoningChoices = new Map();
+  function addOption(select, choices, value, text, item = null) {
+    const option = doc.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    choices.set(value, {option, item});
+    select.append(option);
   }
-  function updateValue() {
-    const choice = [...choices.values()].find(({selection}) => applied
-      ? selection?.model === applied.model && selection?.provider === applied.provider && selection?.reasoning_effort === applied.reasoning_effort
-      : selection === null);
+  function renderModel() {
+    modelChoices.clear();
+    element.replaceChildren();
+    addOption(element, modelChoices, '',
+      defaultModel ? `Default — ${defaultModel.id}` : 'Default');
+    models.forEach((model, index) => addOption(
+      element, modelChoices, String(index), `${model.label} (${model.provider})`, model));
+    const choice = [...modelChoices.values()].find(({item}) => appliedModel
+      ? item?.id === appliedModel.id && item?.provider === appliedModel.provider
+      : item === null);
     if (choice) choice.option.selected = true;
-    else element.selectedIndex = -1;
+  }
+  function renderReasoning() {
+    reasoningChoices.clear();
+    reasoningElement.replaceChildren();
+    const model = selectedModel();
+    const efforts = model?.reasoning_efforts || [];
+    addOption(reasoningElement, reasoningChoices, '', 'Default');
+    efforts.forEach(effort => addOption(reasoningElement, reasoningChoices, effort, effort, effort));
+    reasoningElement.hidden = !efforts.length;
+    reasoningElement.disabled = locked || reasoningElement.hidden;
+    reasoningElement.value = appliedEffort && efforts.includes(appliedEffort) ? appliedEffort : '';
   }
   async function load() {
     try {
       const value = await api.request(`/sessions/${encodeURIComponent(sessionId)}/model-options`);
       if (!current() || !validCatalog(value)) return;
-      models = value.models.map(({id, provider, label, reasoning_efforts}) => ({id, provider, label, reasoning_efforts: [...reasoning_efforts]}));
-      defaultModel = validSelection(value.default) ? value.default : null;
+      models = value.models.map(({id, provider, label, reasoning_efforts}) => ({
+        id, provider, label, reasoning_efforts: [...reasoning_efforts]}));
+      defaultModel = value.default
+        ? models.find(model => model.id === value.default.model
+          && model.provider === value.default.provider) || null
+        : null;
       restore();
-      element.append(option('', defaultModel ? `Default — ${defaultModel.model}` : 'Default'));
-      models.forEach((model, index) => {
-        const label = `${model.label} (${model.provider})`;
-        const selection = {model: model.id, provider: model.provider};
-        element.append(option(String(index), label, selection));
-        if (model.reasoning_efforts.length) {
-          const group = doc.createElement('optgroup');
-          group.label = `${label} — reasoning effort`;
-          model.reasoning_efforts.forEach((effort, effortIndex) => group.append(option(`${index}:${effortIndex}`, `${label} — ${effort}`, {...selection, reasoning_effort: effort})));
-          element.append(group);
-        }
-      });
-      updateValue();
-      pendingSaved=false;
+      renderModel();
+      renderReasoning();
+      pendingSaved = false;
       element.hidden = false;
       element.disabled = locked;
     } catch { /* Unknown capabilities stay hidden, including authorization failures. */ }
   }
   void load();
 
-  function change() {
+  function changeModel() {
     if (!current()) return;
-    if (locked || element.hidden) { updateValue(); return; }
-    const choice = choices.get(element.value);
-    if (!choice || element.selectedOptions.length !== 1 || element.selectedOptions[0] !== choice.option) { updateValue(); return; }
-    const next = choice.selection;
-    if (next && !validSelection(next)) return;
-    applied = next;
+    if (locked || element.hidden) { renderModel(); return; }
+    const choice = modelChoices.get(element.value);
+    if (!choice || element.selectedOptions.length !== 1
+        || element.selectedOptions[0] !== choice.option) { renderModel(); return; }
+    const next = choice.item;
+    if (next?.id !== appliedModel?.id || next?.provider !== appliedModel?.provider) {
+      appliedModel = next;
+      appliedEffort = null;
+      persist();
+      renderModel();
+      renderReasoning();
+    }
+  }
+  function changeReasoning() {
+    if (!current()) return;
+    if (locked || reasoningElement.hidden) { renderReasoning(); return; }
+    const choice = reasoningChoices.get(reasoningElement.value);
+    if (!choice || reasoningElement.selectedOptions.length !== 1
+        || reasoningElement.selectedOptions[0] !== choice.option) { renderReasoning(); return; }
+    appliedEffort = choice.item;
     persist();
   }
-  element.addEventListener('change', change);
+  element.addEventListener('change', changeModel);
+  reasoningElement.addEventListener('change', changeReasoning);
+
   function setLocked(value) {
     if (destroyed) return;
     locked = !!value;
     element.disabled = locked || element.hidden;
+    reasoningElement.disabled = locked || reasoningElement.hidden;
   }
   function destroy() {
     if (destroyed) return;
     destroyed = true;
-    element.removeEventListener('change', change);
-    element.hidden = true;
-    element.disabled = true;
-    applied = null;
+    element.removeEventListener('change', changeModel);
+    reasoningElement.removeEventListener('change', changeReasoning);
+    element.hidden = reasoningElement.hidden = true;
+    element.disabled = reasoningElement.disabled = true;
+    appliedModel = null;
+    appliedEffort = null;
     models = [];
-    choices.clear();
+    modelChoices.clear();
+    reasoningChoices.clear();
   }
   function selection() {
-    return current() && applied ? {...applied} : null;
+    if (!current() || (!appliedModel && !appliedEffort)) return null;
+    const model = appliedModel || defaultModel;
+    if (!model) return null;
+    return {...{model: model.id, provider: model.provider},
+      ...(appliedEffort ? {reasoning_effort: appliedEffort} : {})};
   }
-  const canSubmit=()=>current() && !pendingSaved;
-  return {element, selection, setLocked, destroy, canSubmit};
+  const canSubmit = () => current() && !pendingSaved;
+  return {element, reasoningElement, selection, setLocked, destroy, canSubmit};
 }

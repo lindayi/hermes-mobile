@@ -3,13 +3,14 @@ import re
 from .hermes_client import IntegrationUnavailable
 
 UNAVAILABLE = {'available': False, 'models': [], 'default': None}
+SUPPORTED_REASONING_EFFORTS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh'})
 
 from pathlib import Path
 _OWNER_SOURCE = Path('/home/lindayi/projects/hermes-mobile')
 _OWNER_RELEASES = Path('/home/lindayi/.local/share/hermes-mobile-deploy/releases')
 _CONTROL_HASHES = {
     'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
-    'backend/native_run_controls.py': 'd8af6f7687c7d75b0c148b0572f7f4c13c1ac9bedc295e59719a7a3ee43f5058',
+    'backend/native_run_controls.py': '2c2a60da1edc049dfaa281d9c4e8faa5d6c8bc9fef422abbd205f381190bc737',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
     'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
     'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
@@ -147,38 +148,48 @@ async def options(gateway):
     if not isinstance(caps, dict) or not isinstance(caps.get('features'), dict):
         return dict(UNAVAILABLE)
     features = caps['features']
-    if features.get('run_submission') is not True or features.get('model_options') is not True:
+    controls = caps.get('mobile_model_controls')
+    if (features.get('run_submission') is not True or features.get('model_options') is not True
+            or controls != {'version': 1, 'reasoning_efforts': True, 'context_tiers': False}):
         return dict(UNAVAILABLE)
     aliases = await gateway.request('GET', '/v1/models')
     if (not isinstance(aliases, dict) or not isinstance(aliases.get('data'), list)
             or len(aliases['data']) != 1 or not isinstance(aliases['data'][0], dict)
             or aliases['data'][0].get('id') != 'hermes-agent'):
         return dict(UNAVAILABLE)
-    catalog = await gateway.request('GET', '/api/model/options')
-    if not isinstance(catalog, dict) or catalog.get('provider') != 'copilot':
+    catalog = await gateway.request('GET', '/api/mobile/model-options')
+    if (not isinstance(catalog, dict) or set(catalog) != {'available', 'models', 'default'}
+            or catalog.get('available') is not True):
         return dict(UNAVAILABLE)
-    providers = catalog.get('providers')
-    if not isinstance(providers, list) or any(
-        not isinstance(row, dict) or not isinstance(row.get('slug'), str)
-        or not isinstance(row.get('authenticated'), bool)
-        or not isinstance(row.get('models'), list)
-        or any(not isinstance(model, str) for model in row['models'])
-        for row in providers
-    ):
+    records = catalog.get('models')
+    if not isinstance(records, list) or not records:
         return dict(UNAVAILABLE)
-    rows = [row for row in providers if row['slug'] == 'copilot' and row['authenticated'] is True]
-    if len(rows) != 1:
-        return dict(UNAVAILABLE)
-    model_ids = list(dict.fromkeys(
-        m for m in rows[0]['models']
-        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}', m)
-        and m not in ('hermes-agent', 'default')
-    ))
-    if not model_ids:
-        return dict(UNAVAILABLE)
-    models = [{'id':m,'provider':'copilot','label':m,'reasoning_efforts':[]}
-              for m in model_ids]
-    default = catalog.get('model')
-    safe_default = ({'model':default,'provider':'copilot'}
-                    if isinstance(default, str) and default in model_ids else None)
+    models, identities = [], {}
+    for record in records:
+        if (not isinstance(record, dict)
+                or set(record) != {'id', 'provider', 'label', 'reasoning_efforts'}
+                or not isinstance(record.get('id'), str)
+                or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}', record['id']) is None
+                or record['id'] in ('hermes-agent', 'default')
+                or record.get('provider') != 'copilot'
+                or not isinstance(record.get('label'), str)
+                or not record['label'].strip() or len(record['label']) > 200
+                or not isinstance(record.get('reasoning_efforts'), list)
+                or any(not isinstance(effort, str) or effort not in SUPPORTED_REASONING_EFFORTS
+                       for effort in record['reasoning_efforts'])
+                or len(set(record['reasoning_efforts'])) != len(record['reasoning_efforts'])):
+            return dict(UNAVAILABLE)
+        identity = (record['id'], record['provider'])
+        if identity in identities:
+            if identities[identity] != record:
+                return dict(UNAVAILABLE)
+            continue
+        identities[identity] = record
+        models.append({key: record[key] for key in ('id', 'provider', 'label', 'reasoning_efforts')})
+    default = catalog.get('default')
+    safe_default = (dict(default) if isinstance(default, dict)
+                    and set(default) == {'model', 'provider'}
+                    and isinstance(default.get('model'), str)
+                    and isinstance(default.get('provider'), str)
+                    and (default['model'], default['provider']) in identities else None)
     return {'available':True,'models':models,'default':safe_default}
