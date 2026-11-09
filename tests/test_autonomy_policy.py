@@ -333,20 +333,13 @@ _PR119_NOTIFICATION_FOLLOWUP_FIXTURE = {
 
 # Issue #122 source family; independent literals, never derived from policy or
 # candidate bytes at runtime. Earlier app/build overlays remain historical.
-_ISSUE122_FINANCE_FIXTURE = {
+_ISSUE122_SHELL_BUILD_FIXTURE = {
     'backend/app.py': '0140f22b01003b04bd64372991452888e5985a17b44d34b005855bbedad1a568',
-    'backend/finance.py': '21d442ad8bc6002711ab82dcb4f4975da93d6365face11941430ad44b3ebeae5',
-    'backend/finance_market.py': '4fb17c3fc66e3d094291b3192eee02366ee879da3298c027eb27e51b39e8e731',
     'deploy/frontend_release.py': '4cb4efb15f53c2039b0ed01bc92dd9d2550597ea97c2471b93f5dca82f26dc67',
 }
 
 
-_ISSUE124_MONEY_MAP_FIXTURE = {
-    'backend/finance.py': 'a2c28fcdbee806d8858725e2df5ebfb1be4e2c1a98e7e744b3b3979a2f58855e',
-}
-
-_ISSUE127_FINANCE_INTEGRATION_FIXTURE = {
-    'backend/finance.py': '0a2f9c020602893badc98246860f838fff384c1ac018cdefcd2dfa2df1953b49',
+_ISSUE127_BUILD_FIXTURE = {
     '.github/workflows/ci.yml': '5025e464918a2e8ea1f483596cc256210cf7709913041ee07b79d89743d7a857',
     'deploy/frontend_release.py': 'b2132ef75f0f187b119304207882777a2cf88d837dd284d66cc041ec28421881',
     'package.json': '476c6215e7f46554703a81a4b68d86c56dc5edec98e9302ada5bb542487206db',
@@ -361,6 +354,18 @@ _ISSUE133_MODEL_CONTROLS_FIXTURE = {
     'deploy/native_controls_release.py': '0a46b857660843216ae1194947642b37fbae9d384d27389acfee291f6feb15c2',
     'backend/hermes_client.py': '164272b7a7b802636ed4180a7d97f3b4366c49f0bb095c36cdf676f3c98bbd96',
     'backend/orchestration.py': 'c727b9b3c73cb4d33ba341848b79e0fcabfdd9f81a190423528927a36b808c50',
+}
+
+
+# Issue #131 independent literals; never compute expected pins from candidate bytes.
+_ISSUE131_MOBILE_SCOPE_FIXTURE = {
+    '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
+    'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
+    'deploy/assets.py': '4a18e1091132d3df5a510783fef2d48cb028873c5d813facc828243727a79923',
+    'deploy/frontend_release.py': 'c4dfb36c57abdb22e3f1ad7b6f2b5455bccfaa854cf6aafa9419d0c780511d95',
+    'deploy/self_deploy.py': '53815dcd41d9848c94fbc6d38caa1860fcb633f8033ecb222f33eb010077f158',
+    'package.json': '89b9b012176674bada40c7a010516703f85ed8cbe778e007db10084f35c15931',
+    'package-lock.json': '63199915d106fefd775451eb7d4aed9a3c2d04ca6f670ef9f27ba0cd6098218a',
 }
 
 
@@ -386,8 +391,8 @@ def _source_files():
             | _ISSUE115_SENSITIVE_GATE_REMOVAL_FIXTURE
             | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
             | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
-            | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
-            | _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+            | _ISSUE122_SHELL_BUILD_FIXTURE
+            | _ISSUE127_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE
             | _ISSUE133_MODEL_CONTROLS_FIXTURE)
 
 
@@ -876,8 +881,9 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_PENDING_ISSUE87_BOUNDED_REPAIR_FIXTURE)
     pending |= set(_PR119_NOTIFICATION_FOLLOWUP_FIXTURE)
     pending |= set(_ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE)
-    pending |= set(_ISSUE122_FINANCE_FIXTURE)
-    pending |= set(_ISSUE127_FINANCE_INTEGRATION_FIXTURE)
+    pending |= set(_ISSUE122_SHELL_BUILD_FIXTURE)
+    pending |= set(_ISSUE127_BUILD_FIXTURE)
+    pending |= set(_ISSUE131_MOBILE_SCOPE_FIXTURE)
     pending |= set(_ISSUE133_MODEL_CONTROLS_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -960,25 +966,25 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: SOURCE_FINGERPRINTS[path] for path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     } == {
         path: digest for path, digest in (
-            _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
-            | _ISSUE133_MODEL_CONTROLS_FIXTURE
+            _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_SHELL_BUILD_FIXTURE
+            | _ISSUE131_MOBILE_SCOPE_FIXTURE | _ISSUE133_MODEL_CONTROLS_FIXTURE
         ).items() if path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     }
     for path, digest in (
-            _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
-            | _ISSUE124_MONEY_MAP_FIXTURE).items():
-        if (path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+            _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_SHELL_BUILD_FIXTURE
+            | _ISSUE131_MOBILE_SCOPE_FIXTURE).items():
+        if (path in _ISSUE127_BUILD_FIXTURE
                 or path in _ISSUE133_MODEL_CONTROLS_FIXTURE):
             continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
-        if (path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+        if (path not in _ISSUE127_BUILD_FIXTURE
                 and path not in _ISSUE133_MODEL_CONTROLS_FIXTURE)
     } == {
         path: digest for path, digest in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE.items()
-        if (path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+        if (path not in _ISSUE127_BUILD_FIXTURE
                 and path not in _ISSUE133_MODEL_CONTROLS_FIXTURE)
     }
     assert {
@@ -1000,14 +1006,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in (
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
             | _ISSUE98_PHOTO_POLICY_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
-            | _ISSUE122_FINANCE_FIXTURE | _ISSUE133_MODEL_CONTROLS_FIXTURE
+            | _ISSUE122_SHELL_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE
+            | _ISSUE133_MODEL_CONTROLS_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
                          | _ISSUE98_PHOTO_POLICY_FIXTURE
                          | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
-                         | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE).items():
-        if (path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+                         | _ISSUE122_SHELL_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE).items():
+        if (path in _ISSUE127_BUILD_FIXTURE
                 or path in _ISSUE133_MODEL_CONTROLS_FIXTURE):
             continue
         source = Path(__file__).resolve().parents[1] / path
@@ -1204,51 +1211,55 @@ def test_issue43_launch_actual_byte_mutation_or_missing_source_blocks(phase, pat
     assert evidence == before
 
 
-@pytest.mark.parametrize('phase', PHASES)
-def test_issue124_money_map_source_pin_supersedes_only_finance(phase):
-    from deploy.autonomy_policy import ISSUE124_MONEY_MAP_OVERLAY
-    assert set(_ISSUE124_MONEY_MAP_FIXTURE) == {'backend/finance.py'}
-    assert ISSUE124_MONEY_MAP_OVERLAY == _ISSUE124_MONEY_MAP_FIXTURE
-    root = Path(__file__).resolve().parents[1]
-    for path, digest in _ISSUE124_MONEY_MAP_FIXTURE.items():
-        current_digest = _ISSUE127_FINANCE_INTEGRATION_FIXTURE.get(path, digest)
-        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == current_digest
-    evidence = _phase_evidence(phase)
-    assert _blockers(evidence, phase) == set()
-    evidence['main']['files']['backend/finance.py'] = _ISSUE124_MONEY_MAP_FIXTURE['backend/finance.py']
-    assert _blockers(evidence, phase) == {'execution-source-contract'}
-    evidence['main']['files']['backend/finance.py'] = _ISSUE122_FINANCE_FIXTURE['backend/finance.py']
-    assert _blockers(evidence, phase) == {'execution-source-contract'}
-
-
-def test_issue122_finance_source_family_is_complete_and_independent():
-    from deploy.autonomy_policy import ISSUE122_FINANCE_OVERLAY
-    assert set(_ISSUE122_FINANCE_FIXTURE) == {
-        'backend/app.py', 'backend/finance.py', 'backend/finance_market.py',
+def test_issue122_historical_shell_build_pins_are_complete_and_independent():
+    from deploy.autonomy_policy import ISSUE122_SHELL_BUILD_OVERLAY
+    assert set(_ISSUE122_SHELL_BUILD_FIXTURE) == {
+        'backend/app.py',
         'deploy/frontend_release.py',
     }
-    assert ISSUE122_FINANCE_OVERLAY == _ISSUE122_FINANCE_FIXTURE
-    expected = (_ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
-                | _ISSUE127_FINANCE_INTEGRATION_FIXTURE)
-    assert {path: SOURCE_FINGERPRINTS[path] for path in _ISSUE122_FINANCE_FIXTURE} == {
+    assert ISSUE122_SHELL_BUILD_OVERLAY == _ISSUE122_SHELL_BUILD_FIXTURE
+    expected = (_ISSUE122_SHELL_BUILD_FIXTURE
+                | _ISSUE127_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE)
+    assert {path: SOURCE_FINGERPRINTS[path] for path in _ISSUE122_SHELL_BUILD_FIXTURE} == {
         path: digest for path, digest in expected.items()
-        if path in _ISSUE122_FINANCE_FIXTURE
+        if path in _ISSUE122_SHELL_BUILD_FIXTURE
     }
-    assert set(_ISSUE122_FINANCE_FIXTURE) <= SOURCE_CONTROL_PYTHON_FILES
+    assert set(_ISSUE122_SHELL_BUILD_FIXTURE) <= SOURCE_CONTROL_PYTHON_FILES
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract'
-               for path in _ISSUE122_FINANCE_FIXTURE)
+               for path in _ISSUE122_SHELL_BUILD_FIXTURE)
 
 
-def test_issue127_finance_build_pins_are_complete_and_independent():
-    from deploy.autonomy_policy import ISSUE127_FINANCE_INTEGRATION_OVERLAY
-    assert set(_ISSUE127_FINANCE_INTEGRATION_FIXTURE) == {
-        'backend/finance.py', '.github/workflows/ci.yml', 'deploy/frontend_release.py',
+def test_issue131_current_scope_pins_are_complete_and_independent():
+    from deploy.autonomy_policy import ISSUE131_MOBILE_SCOPE_OVERLAY
+    assert set(_ISSUE131_MOBILE_SCOPE_FIXTURE) == {
+        'backend/app.py', 'deploy/frontend_release.py', '.github/workflows/ci.yml',
+        'deploy/assets.py', 'deploy/self_deploy.py',
         'package.json', 'package-lock.json',
     }
-    assert ISSUE127_FINANCE_INTEGRATION_OVERLAY == _ISSUE127_FINANCE_INTEGRATION_FIXTURE
-    root = Path(__file__).resolve().parents[1]
-    assert all(hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
-               for path, digest in _ISSUE127_FINANCE_INTEGRATION_FIXTURE.items())
+    assert ISSUE131_MOBILE_SCOPE_OVERLAY == _ISSUE131_MOBILE_SCOPE_FIXTURE
+    assert {
+        path: SOURCE_FINGERPRINTS[path] for path in _ISSUE131_MOBILE_SCOPE_FIXTURE
+    } == _ISSUE131_MOBILE_SCOPE_FIXTURE
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize(('path', 'digest'), sorted({
+    (path, digest)
+    for fixture in (
+        _MERGED_MAIN_SOURCE_FIXTURE, _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE,
+        _PENDING_ISSUE77_CLARIFICATION_FIXTURE,
+    )
+    for path, digest in fixture.items()
+    if path in {'deploy/assets.py', 'deploy/self_deploy.py'}
+}))
+def test_superseded_asset_ownership_source_pins_fail_closed(phase, path, digest):
+    assert _ISSUE131_MOBILE_SCOPE_FIXTURE[path] != digest
+    evidence = _phase_evidence(phase)
+    assert _blockers(evidence, phase) == set()
+    evidence['main']['files'][path] = digest
+    before = copy.deepcopy(evidence)
+    assert _blockers(evidence, phase) == {SOURCE_BLOCKERS[path]}
+    assert evidence == before
 
 
 def test_issue133_model_controls_overlay_matches_current_source():
@@ -1260,9 +1271,37 @@ def test_issue133_model_controls_overlay_matches_current_source():
 
 
 @pytest.mark.parametrize('phase', PHASES)
-@pytest.mark.parametrize('path', sorted(_ISSUE122_FINANCE_FIXTURE))
+@pytest.mark.parametrize(('path', 'digest'), sorted(
+    set(_ISSUE122_SHELL_BUILD_FIXTURE.items()) | set(_ISSUE127_BUILD_FIXTURE.items())))
+def test_superseded_shell_and_build_source_pins_still_fail_closed(phase, path, digest):
+    assert _ISSUE131_MOBILE_SCOPE_FIXTURE[path] != digest
+    evidence = _phase_evidence(phase)
+    assert _blockers(evidence, phase) == set()
+    evidence['main']['files'][path] = digest
+    before = copy.deepcopy(evidence)
+    expected = ('execution-source-contract' if path.endswith('.py')
+                else 'hosted-workflow-contract')
+    assert _blockers(evidence, phase) == {expected}
+    assert evidence == before
+
+
+def test_issue127_historical_build_pins_are_complete_and_independent():
+    from deploy.autonomy_policy import ISSUE127_BUILD_OVERLAY
+    assert set(_ISSUE127_BUILD_FIXTURE) == {
+        '.github/workflows/ci.yml', 'deploy/frontend_release.py',
+        'package.json', 'package-lock.json',
+    }
+    assert ISSUE127_BUILD_OVERLAY == _ISSUE127_BUILD_FIXTURE
+    root = Path(__file__).resolve().parents[1]
+    expected = _ISSUE127_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE
+    assert all(hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+               for path, digest in expected.items())
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize('path', sorted(_ISSUE122_SHELL_BUILD_FIXTURE))
 @pytest.mark.parametrize('change', ['missing', 'malformed', 'mutated'])
-def test_issue122_finance_source_changes_fail_closed(phase, path, change):
+def test_issue122_shell_build_source_changes_fail_closed(phase, path, change):
     evidence = _phase_evidence(phase)
     assert _blockers(evidence, phase) == set()
     if change == 'missing':
@@ -1274,7 +1313,7 @@ def test_issue122_finance_source_changes_fail_closed(phase, path, change):
     else:
         source = (Path(__file__).resolve().parents[1] / path).read_bytes()
         evidence['main']['files'][path] = hashlib.sha256(
-            source + b'\n# unreviewed finance source mutation\n',
+            source + b'\n# unreviewed shell/build source mutation\n',
         ).hexdigest()
         blocker = 'execution-source-contract'
     before = copy.deepcopy(evidence)
@@ -1289,11 +1328,17 @@ def test_issue122_finance_source_changes_fail_closed(phase, path, change):
     ('backend/app.py', '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7'),
     ('deploy/frontend_release.py', '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3'),
 ])
-def test_issue122_historical_source_pins_are_preserved_but_not_current(phase, path, digest):
+def test_historical_source_pins_preserve_history_and_only_restore_exact_app(phase, path, digest):
     historical = _MERGED_MAIN_SOURCE_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     assert historical[path] == digest
-    assert _ISSUE122_FINANCE_FIXTURE[path] != digest
+    assert _ISSUE122_SHELL_BUILD_FIXTURE[path] != digest
     evidence = _phase_evidence(phase)
+    if path == 'backend/app.py':
+        # Removal restores these exact historical app bytes, not a bypass.
+        assert SOURCE_FINGERPRINTS[path] == digest
+        assert _ISSUE131_MOBILE_SCOPE_FIXTURE[path] == digest
+        assert _blockers(evidence, phase) == set()
+        digest = _ISSUE122_SHELL_BUILD_FIXTURE[path]
     evidence['main']['files'][path] = digest
     before = copy.deepcopy(evidence)
     assert validate_transition(evidence, phase=phase) == {
@@ -1320,7 +1365,6 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
         'backend/background_delivery.py', 'backend/catalog_search.py',
         'backend/chat_snapshot.py', 'backend/clarifications.py', 'backend/configuration.py',
         'backend/context_compression_presentation.py', 'backend/delivery.py',
-        'backend/finance.py', 'backend/finance_market.py',
         'backend/hermes_client.py', 'backend/jobs.py', 'backend/model_controls.py',
         'backend/native_catalog.py', 'backend/native_run_controls.py', 'backend/notification_policy.py',
         'backend/notifications.py', 'backend/operational_notifications.py',
@@ -1340,7 +1384,7 @@ def test_pinned_coordinator_local_import_closure_is_in_the_fixed_inventory():
     }
     starter_bridge = {'deploy/issue_starter.py'}
     assert closure == shared | coordinator | starter_bridge
-    assert len(closure) == 44
+    assert len(closure) == 42
     assert closure <= set(REQUIRED_FILES)
     assert all(SOURCE_BLOCKERS[path] == 'coordinator-review-contract' for path in coordinator)
     assert all(SOURCE_BLOCKERS[path] == 'execution-source-contract' for path in shared)

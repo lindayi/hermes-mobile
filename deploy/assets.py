@@ -18,6 +18,9 @@ def _digest(data):
 
 ALLOWED = {'.html', '.css', '.js', '.mjs', '.webmanifest', '.svg', '.png', '.ico'}
 
+# URL namespaces owned by separate publishers, never by a mobile release.
+EXTERNAL_ROOTS = frozenset({'finance', 'tmp'})
+
 
 def checked_path(path):
     path = Path(path)
@@ -39,12 +42,24 @@ def _asset_name(name):
     return path
 
 
-def public_tree(root, *, require_index=True):
+def public_tree(root, *, require_index=True, mobile_only=False):
     root = checked_path(root)
     if not root.is_dir():
         raise ValueError('Public asset directory missing')
     files = []
-    for path in sorted(root.rglob('*')):
+
+    def walk(directory):
+        for path in sorted(directory.iterdir()):
+            info = path.lstat()
+            if mobile_only and directory == root and path.name in EXTERNAL_ROOTS:
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ValueError('Externally owned boundary must be a real directory')
+                continue
+            yield path
+            if stat.S_ISDIR(info.st_mode):
+                yield from walk(path)
+
+    for path in walk(root):
         mode = path.lstat()
         if path.is_symlink() or not (stat.S_ISREG(mode.st_mode) or stat.S_ISDIR(mode.st_mode)):
             raise ValueError('Special files are not public assets')
@@ -60,9 +75,17 @@ def public_tree(root, *, require_index=True):
     return files
 
 
+def _mobile_asset_name(name):
+    path = _asset_name(name)
+    if path.parts[0] in EXTERNAL_ROOTS:
+        raise ValueError('Externally owned namespace is not a mobile asset')
+    return path
+
+
 def _assets(root):
     root = checked_path(root)
-    return {str(p.relative_to(root)): p.read_bytes() for p in public_tree(root)}
+    return {str(p.relative_to(root)): p.read_bytes()
+            for p in public_tree(root, mobile_only=True)}
 
 
 def _mkdirs(path, mode):
@@ -101,6 +124,11 @@ def publish_assets(source, webroot, backup_dir):
         raise ValueError('Deployment and private backup paths must be separate')
     if backup_dir.exists():
         raise FileExistsError(backup_dir)
+    # Reject candidate collisions, including empty external directories.
+    for name in EXTERNAL_ROOTS:
+        path = source / name
+        if path.exists() or path.is_symlink():
+            raise ValueError('Externally owned namespace in mobile candidate')
     new, old = _assets(source), _assets(webroot)
     for name in new:
         target = webroot/name
@@ -127,7 +155,7 @@ def restore_assets(webroot, backup_dir):
     webroot, backup_dir = map(checked_path, (webroot, backup_dir))
     if backup_dir.is_relative_to(webroot) or backup_dir.is_relative_to('/var/www'):
         raise ValueError('Static backup must be private')
-    public_tree(webroot, require_index=False)
+    public_tree(webroot, require_index=False, mobile_only=True)
     manifest_path = checked_path(backup_dir/'manifest.json')
     manifest = json.loads(manifest_path.read_text())
     if (not isinstance(manifest, dict) or set(manifest) != {'version','webroot','old','new'}
@@ -138,7 +166,7 @@ def restore_assets(webroot, backup_dir):
         if not isinstance(records, dict) or 'index.html' not in records:
             raise ValueError('Invalid static backup records')
         for name, digest in records.items():
-            _asset_name(name)
+            _mobile_asset_name(name)
             if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
                 raise ValueError('Invalid static checksum')
     files = {}

@@ -3,8 +3,6 @@ import hashlib
 from pathlib import Path
 import posixpath
 import re
-import subprocess
-import tempfile
 
 from deploy.assets import checked_path, public_tree
 
@@ -20,13 +18,7 @@ def build_frontend(source: Path, destination: Path) -> Path:
     if destination.exists():
         raise FileExistsError(destination)
     files = {p.relative_to(source).as_posix(): p.read_bytes() for p in public_tree(source)}
-    if (source/'finance'/'index.html').is_file() and (source/'finance'/'approved'/'sankey-view.mjs').is_file():
-        builder = Path(__file__).resolve().parents[1] / 'scripts' / 'build_finance_plotly.mjs'
-        with tempfile.TemporaryDirectory(prefix='hermes-finance-plotly-') as temporary:
-            subprocess.run(['node', str(builder), temporary], check=True, capture_output=True, text=True)
-            bundle = Path(temporary) / 'plotly.bundle.js'
-            files['finance/plotly.bundle.js'] = bundle.read_bytes()
-            files['finance/plotly.bundle.css'] = (Path(temporary) / 'plotly.bundle.css').read_bytes()
+
     seen = {}
     for name in files:
         if not re.fullmatch(r'[A-Za-z0-9_./-]+', name):

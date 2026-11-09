@@ -106,3 +106,22 @@ def test_preserves_external_and_runtime_urls(source, tmp_path):
         stream.write(extra)
     output = build_frontend(source, tmp_path / 'release')
     assert extra in next(output.glob('app.*.js')).read_text()
+
+
+def test_nested_index_stays_addressable_and_dependencies_versioned(tmp_path):
+    """Keep generic nested DirectoryIndex behavior independent of any feature."""
+    from deploy.frontend_release import build_frontend
+    source = tmp_path / 'source'
+    (source / 'guide').mkdir(parents=True)
+    (source / 'index.html').write_text('<a href="/hermes/guide/">Guide</a>')
+    (source / 'guide/index.html').write_text(
+        '<link href="./styles.css"><script src="./app.mjs"></script>')
+    (source / 'guide/styles.css').write_text('body{color:teal}')
+    (source / 'guide/app.mjs').write_text('export const privateData=false;')
+    output = build_frontend(source, tmp_path / 'public')
+    assert (output / 'guide/index.html').exists()
+    page = (output / 'guide/index.html').read_text()
+    assert './styles.css' not in page and './app.mjs' not in page
+    assert len(list((output / 'guide').glob('styles.*.css'))) == 1
+    assert len(list((output / 'guide').glob('app.*.mjs'))) == 1
+    assert '/hermes/guide/' in (output / 'index.html').read_text()

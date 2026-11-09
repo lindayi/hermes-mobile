@@ -144,9 +144,7 @@ test('generated root routes share the calm design and retain their controls', {t
      await page.locator('[data-section=devices]').waitFor();
      assert.equal(await page.locator('.notification-settings').count(),1);
      assert.equal(await page.locator('.push-preferences').isVisible(),false);
-     const finance=page.locator('.account-finance-link');
-     assert.equal(await finance.getAttribute('href'),'/hermes/finance/');
-     assert.ok((await finance.boundingBox()).height>=44);
+     assert.equal(await page.getByRole('link',{name:'Finance',exact:true}).count(),0);
     }
     await screenshot(page,`${label.toLowerCase()}-${width}-${theme}`);
    }
@@ -195,12 +193,12 @@ test('generated root routes share the calm design and retain their controls', {t
   await page.reload();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
   await page.locator('[data-section=devices]').waitFor();
-  assert.equal(await page.locator('.account-finance-link').count(),0,'pending owners do not get the ready-only link');
+  assert.equal(await page.getByRole('link',{name:'Finance',exact:true}).count(),0);
   state.role='member';state.status='ready';state.calls.length=0;
   await page.reload();
   await page.getByRole('button',{name:'Settings',exact:true}).click();
   await page.locator('[data-section=devices]').waitFor();
-  assert.equal(await page.locator('.account-finance-link').count(),0,'Finance is only offered to a ready owner');
+  assert.equal(await page.getByRole('link',{name:'Finance',exact:true}).count(),0);
   assert.equal(state.calls.some(call=>['/members','/invites'].includes(call.endpoint)),false,'member routes do not load owner-only settings');
   assert.deepEqual(state.errors,[]);
  }finally{await h.close();}
