@@ -39,6 +39,7 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
   let model=page.getByRole('combobox',{name:'Model',exact:true});await model.waitFor();
   let reasoning=page.getByRole('combobox',{name:'Reasoning effort',exact:true});await reasoning.waitFor();
   assert.equal(await model.evaluate(el=>el.tagName),'SELECT');assert.equal(await model.inputValue(),'');
+  for(const select of [model,reasoning])assert.ok(await select.evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),'native composer selects retain the iOS no-focus-zoom font floor');
   assert.match(await model.locator('option:checked').textContent(),/Default/);
   assert.deepEqual(await model.locator('option').allTextContents(),['Default — fixture-model-a','Model A (fixture)','Model B (fixture)']);
   assert.deepEqual(await reasoning.locator('option').allTextContents(),['Default','low','high']);

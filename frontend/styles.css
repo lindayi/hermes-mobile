@@ -53,7 +53,7 @@
 .editor-dialog{display:flex;flex-direction:column;gap:12px;width:min(100%,900px);height:100%;max-height:100%;min-height:0;background:var(--surface);padding:16px;border:1px solid var(--border);border-radius:16px}
 .model-control-button .model-label{min-width:0;overflow:hidden;text-overflow:ellipsis}.model-control-button svg{flex:none}
 .model-control-button{display:inline-flex;align-items:center;gap:6px;flex:0 1 auto;min-width:44px;max-width:min(48vw,220px);height:44px;padding:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;text-align:left}
-select.model-control-button{display:block;appearance:auto;min-width:44px;min-height:44px;padding:8px 18px 8px 6px;font-size:12px;text-overflow:ellipsis;border:1px solid var(--border);background-color:var(--surface);color:var(--text)}
+select.model-control-button{display:block;appearance:auto;min-width:44px;min-height:44px;padding:8px 18px 8px 6px;font-size:16px;text-overflow:ellipsis;border:1px solid var(--border);background-color:var(--surface);color:var(--text)}
 select.model-control-button:not(.reasoning-control){flex:0 1 30vw;width:min(30vw,160px);max-width:min(30vw,160px)}
 select.model-control-button.reasoning-control{flex:0 1 24vw;width:min(24vw,120px);max-width:min(24vw,120px)}
 .editor-dialog h2{font-size:20px;margin:0;flex:none}.editor-dialog textarea{flex:1;min-height:0;resize:none}.editor-dialog button{align-self:flex-end;flex:none;min-height:44px}
