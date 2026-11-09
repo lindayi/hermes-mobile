@@ -50,15 +50,17 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
   function restore() {
     try {
       const raw = win.sessionStorage.getItem(storageKey);
-      if (raw === null) return;
+      if (raw === null) { pendingSaved = false; return; }
+      pendingSaved = true;
       try {
         const saved = JSON.parse(raw);
         if (validSaved(saved)) {
           appliedModel = Object.hasOwn(saved, 'model') ? modelFor(saved) : null;
           appliedEffort = saved.reasoning_effort || null;
+          pendingSaved = false;
         }
       } catch { /* Malformed saved data is stale, not a selection. */ }
-      if (!appliedModel && !appliedEffort) win.sessionStorage.removeItem(storageKey);
+      // Keep stale data until an explicit choice, including across reentry.
     } catch { /* Missing browser storage is nonfatal. */ }
   }
   function validCatalog(value) {
@@ -103,6 +105,14 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       ? item?.id === appliedModel.id && item?.provider === appliedModel.provider
       : item === null);
     if (choice) choice.option.selected = true;
+    if (pendingSaved) {
+      const placeholder = doc.createElement('option');
+      placeholder.textContent = 'Saved choice unavailable — choose model';
+      placeholder.value = 'stale';
+      placeholder.disabled = true;
+      element.prepend(placeholder);
+      placeholder.selected = true;
+    }
   }
   function renderReasoning() {
     reasoningChoices.clear();
@@ -111,7 +121,7 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
     const efforts = model?.reasoning_efforts || [];
     addOption(reasoningElement, reasoningChoices, '', 'Default');
     efforts.forEach(effort => addOption(reasoningElement, reasoningChoices, effort, effort, effort));
-    reasoningElement.hidden = !efforts.length;
+    reasoningElement.hidden = pendingSaved || !efforts.length;
     reasoningElement.disabled = locked || reasoningElement.hidden;
     reasoningElement.value = appliedEffort && efforts.includes(appliedEffort) ? appliedEffort : '';
   }
@@ -128,7 +138,6 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       restore();
       renderModel();
       renderReasoning();
-      pendingSaved = false;
       element.hidden = false;
       element.disabled = locked;
     } catch { /* Unknown capabilities stay hidden, including authorization failures. */ }
@@ -142,7 +151,8 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
     if (!choice || element.selectedOptions.length !== 1
         || element.selectedOptions[0] !== choice.option) { renderModel(); return; }
     const next = choice.item;
-    if (next?.id !== appliedModel?.id || next?.provider !== appliedModel?.provider) {
+    if (pendingSaved || next?.id !== appliedModel?.id || next?.provider !== appliedModel?.provider) {
+      pendingSaved = false;
       appliedModel = next;
       appliedEffort = null;
       persist();

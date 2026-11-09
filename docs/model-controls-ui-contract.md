@@ -22,7 +22,7 @@ The pinned app transport does not enforce Copilot CLI context tiers. Do not rend
 
 ## Persistence and caller obligations
 
-Applied selections persist in `sessionStorage` under `hermes:${userId}:model-controls:${JSON.stringify([userId,sessionId])}`. Restore only after validating the saved pair and effort against the fetched catalog. Remove stale or invalid saved selections; do not silently submit Default for an unvalidated saved choice. Storage failure is nonfatal. Default removes the saved override.
+Applied selections persist in `sessionStorage` under `hermes:${userId}:model-controls:${JSON.stringify([userId,sessionId])}`. Restore only after validating the saved pair and effort against the fetched catalog. Keep stale or invalid saved selections blocked across reentry. Show a disabled “Saved choice unavailable — choose model” placeholder and hide Reasoning until the user explicitly selects a model or Default; only that choice replaces the stale override. Storage failure is nonfatal. Default removes the saved override.
 
 The caller snapshots `selection()` once into each immutable submission attempt, including retry identity, and includes the helper in service-worker precache. Model changes apply to the next message and cannot retarget active work. The helper does not post global configuration, start runs, or alter observed transcript model data. The UI reports a requested next-turn model; only trusted runtime evidence may identify observed execution.
 

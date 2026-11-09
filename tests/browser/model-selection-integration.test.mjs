@@ -93,6 +93,20 @@ test('saved selection awaiting reentry catalogue validation cannot silently send
  }finally{h.close();}
 });
 
+test('retired saved effort blocks Send until explicit model correction without losing draft',async()=>{
+ const h=await fixture(body=>({id:'r',session_id:'s',status:'completed',input:body.input,output:'Corrected'}),
+  (options,count)=>count===1?options:{...options,models:options.models.map(m=>({...m,reasoning_efforts:[]}))});try{
+  await h.choose();h.control('Back to chats').click();await tick();h.control('Settings fixture').click();await tick();
+  h.draft('Keep this draft');h.control('Send message').click();await tick();
+  assert.equal(h.requests.filter(r=>r.path==='/runs').length,0);
+  assert.equal(h.doc.querySelector('textarea').value,'Keep this draft');
+  const model=h.control('Model');model.value='0';model.dispatchEvent(new h.win.Event('change',{bubbles:true}));
+  h.control('Send message').click();await tick();
+  const sent=h.requests.filter(r=>r.path==='/runs');assert.equal(sent.length,1);
+  assert.deepEqual(sent[0].params.body.selection,{model:'fixture-a',provider:'fixture'});
+ }finally{h.close();}
+});
+
 test('default model choice leaves the legacy run body unchanged',async()=>{
  const h=await fixture(body=>({id:'r',session_id:'s',status:'completed',input:body.input,output:'Synthetic saved answer'}));try{
   h.draft('Default request');h.control('Send message').click();await tick();

@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 const {chromium}=createRequire('/usr/local/lib/hermes-agent/package.json')('playwright');
 const dir=process.env.HERMES_FRONTEND_DIR?process.env.HERMES_FRONTEND_DIR.replace(/\/$/,'')+'/':fileURLToPath(new URL('../../frontend/',import.meta.url));
 test('native next-turn model dropdown fits mobile with no overlay and preserves separate tools and Stop',{timeout:45000},async()=>{
- const modelA='fixture-model-a',modelB='fixture-model-b';const posts=[],clients=new Set();
+ const modelA='fixture-model-a',modelB='fixture-model-b';const posts=[],clients=new Set();let retireEffort=false;
  const artifacts=process.env.HERMES_TEST_ARTIFACT_DIR || process.env.HERMES_MODEL_ARTIFACT_DIR || await mkdtemp(join(tmpdir(),'hmodel-proof-'));
  await mkdir(artifacts,{recursive:true});
  const server=createServer(async(req,res)=>{const u=new URL(req.url,'http://fixture'),p=u.pathname.replace('/hermes/app-api','');const json=obj=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(obj));};
@@ -19,7 +19,7 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
    if(p==='/sessions/s/messages')return json({items:[{role:'user',content:'Earlier question'},{role:'tool',name:'terminal',status:'success',summary:'Run: isolated fixture',content:'fixture result'},{role:'assistant',content:'Earlier answer'}],run:null});
    if(p==='/sessions/s/model-options')return json({available:true,default:{provider:'fixture',model:modelA},models:[
     {id:modelA,provider:'fixture',label:'Model A',reasoning_efforts:['low','high']},
-    {id:modelB,provider:'fixture',label:'Model B',reasoning_efforts:['minimal']}]});
+    {id:modelB,provider:'fixture',label:'Model B',reasoning_efforts:retireEffort?[]:['minimal']}]});
    if(p==='/runs'&&req.method==='POST'){let body='';for await(const chunk of req)body+=chunk;const data=JSON.parse(body);posts.push(data);return json({id:'r',session_id:'s',input:data.input,status:'running',output:''});}
    if(p==='/runs/r/controls')return json({steering:false,attempts:[]});
    if(p==='/runs/r/events'){
@@ -96,6 +96,16 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
   assert.deepEqual(posts[1].selection,{provider:'fixture',model:modelB,reasoning_effort:'minimal'});
   for(const client of clients)client.write(`id: 2\nevent: done\ndata: ${JSON.stringify({status:'completed',output:'Second synthetic response'})}\n\n`);
   await page.getByText('Second synthetic response',{exact:true}).waitFor();assert.deepEqual(errors,[]);
+  retireEffort=true;await page.reload();await page.getByRole('button',{name:'Model fixture',exact:true}).click();
+  model=page.getByRole('combobox',{name:'Model',exact:true});await model.waitFor();
+  assert.match(await model.locator('option:checked').textContent(),/choose model/i);
+  await page.getByRole('textbox',{name:'Message Hermes',exact:true}).fill('Correct the stale choice');
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByText('Saved model choice could not be checked. Reload before sending.',{exact:true}).waitFor();
+  assert.equal(posts.length,2,'stale effort must not silently dispatch Default');
+  await model.selectOption('');await page.getByRole('button',{name:'Send message',exact:true}).click();
+  await page.getByRole('button',{name:'Stop run',exact:true}).waitFor();
+  assert.equal(posts.length,3);assert.equal(Object.hasOwn(posts[2],'selection'),false);
   console.log(JSON.stringify({artifacts,frontend:dir,geometry}));
   assert.deepEqual(geometry.filter(({model,reasoning})=>model.height>44||reasoning.height>44),[],'native dropdowns stay compact 44px rows');
  }finally{await browser?.close();for(const res of clients)res.end();server.closeAllConnections();if(server.listening)await new Promise(r=>server.close(r));}

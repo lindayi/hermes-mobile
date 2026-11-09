@@ -158,7 +158,25 @@ test('native keyboard events are not trapped and focus is not stolen by load or 
  }finally{h.close();}
 });
 
-test('valid selections persist per account/session and invalid saved overrides are removed before forwarding',async()=>{
+test('stale saved effort blocks Default dispatch across reentry until an explicit model choice',async()=>{
+ const win=new JSDOM('',{url:'https://fixture.test/hermes/'}).window;
+ const saved=JSON.stringify({model:'alpha',provider:'one',reasoning_effort:'retired'});
+ win.sessionStorage.setItem(storageKey(),saved);
+ try{
+  for(let visit=0;visit<2;visit++){
+   const h=setup({win});try{
+    await tick();assert.equal(h.controls.canSubmit(),false);
+    assert.equal(h.controls.selection(),null);
+    assert.equal(win.sessionStorage.getItem(storageKey()),saved);
+    assert.match(h.controls.element.selectedOptions[0].textContent,/choose model/i);
+    chooseEffort(h,'brief');assert.equal(h.controls.canSubmit(),false,'hidden reasoning cannot bypass correction');
+    if(visit===1){choose(h,'');assert.equal(h.controls.canSubmit(),true);assert.equal(h.controls.selection(),null);assert.equal(win.sessionStorage.getItem(storageKey()),null);}
+   }finally{h.close();}
+  }
+ }finally{win.close();}
+});
+
+test('valid selections persist per account/session and invalid saved overrides remain blocked before forwarding',async()=>{
  const h=setup();try{
   await tick();choose(h,'0');chooseEffort(h,'deep');
   const expected={model:'alpha',provider:'one',reasoning_effort:'deep'};
@@ -169,7 +187,7 @@ test('valid selections persist per account/session and invalid saved overrides a
   const invalid=[{...expected,model:'retired'}, {...expected,provider:'unknown'}, {...expected,reasoning_effort:'invented'}, {...expected,extra:true}, {model:'alpha',provider:'two',reasoning_effort:'deep'}, [], null, 'broken-json'];
   for(const value of invalid){
    h.win.sessionStorage.setItem(storageKey(),value==='broken-json'?value:JSON.stringify(value));
-   const next=setup({win:h.win});try{await tick();assert.equal(next.controls.selection(),null);assert.equal(h.win.sessionStorage.getItem(storageKey()),null);}finally{next.close();}
+   const next=setup({win:h.win});try{await tick();assert.equal(next.controls.selection(),null);assert.equal(next.controls.canSubmit(),false);assert.equal(h.win.sessionStorage.getItem(storageKey()),value==='broken-json'?value:JSON.stringify(value));}finally{next.close();}
   }
   const next=setup({win:h.win});try{await tick();choose(next,'1');assert.ok(h.win.sessionStorage.getItem(storageKey()));choose(next,'');assert.equal(h.win.sessionStorage.getItem(storageKey()),null);}finally{next.close();}
  }finally{h.close();}
