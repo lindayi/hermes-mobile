@@ -354,6 +354,8 @@ _ISSUE127_FINANCE_INTEGRATION_FIXTURE = {
 }
 
 _ISSUE133_MODEL_CONTROLS_FIXTURE = {
+    '.github/native-tests.json': '00bdeed4a744fc62c26837837cfc5d9d3f06ace176f79b227f9067cb8ee246e4',
+    '.github/host-tests.json': '7824de4379648c1810cc6d917d16e437ba9877372471e18aacf636ff0ab54539',
     'backend/model_controls.py': '302ed58b991cff9fae39d343476444e5d5cd6ec76fe18a76b88e51d282cd194a',
     'backend/native_run_controls.py': 'dea26481acb1eea4b740ce311fa225bdc1ede8fc7936e253ae1999d9558cf013',
     'deploy/native_controls_release.py': '0a46b857660843216ae1194947642b37fbae9d384d27389acfee291f6feb15c2',
