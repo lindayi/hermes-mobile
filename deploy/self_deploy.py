@@ -190,7 +190,7 @@ def recover_bootstrap(paths, previous_status, *, verify):
     """Recover only an initial rollback, under deploy()'s file lock; never restore data."""
     import re
     import sqlite3
-    from deploy.assets import checked_path, public_tree, _asset_name
+    from deploy.assets import checked_path, public_tree, _mobile_asset_name
     release = previous_status.get('release')
     if not isinstance(release, str) or not re.fullmatch(r'[0-9a-f]{32}', release):
         raise RuntimeError('Invalid recovery release ID')
@@ -218,12 +218,12 @@ def recover_bootstrap(paths, previous_status, *, verify):
             if not isinstance(records, dict) or 'index.html' not in records:
                 raise ValueError('Invalid recovery backup records')
             for name, digest in records.items():
-                _asset_name(name)
+                _mobile_asset_name(name)
                 if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
                     raise ValueError('Invalid recovery backup checksum')
         for root in (backup / 'files', paths.webroot):
             actual = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
-                      for p in public_tree(root)}
+                      for p in public_tree(root, mobile_only=True)}
             if actual != manifest['old']:
                 raise RuntimeError('Recovery assets differ from backup manifest checksums')
 
@@ -278,7 +278,7 @@ def _abort_baseline(paths, previous):
         if path.exists():
             visit(path)
     public = {str(p.relative_to(paths.webroot)): hashlib.sha256(p.read_bytes()).hexdigest()
-              for p in public_tree(paths.webroot)}
+              for p in public_tree(paths.webroot, mobile_only=True)}
     dropin = checked_path(paths.dropin)
     return (pointer, source, public, dropin.read_bytes() if dropin.exists() else None)
 
@@ -500,8 +500,8 @@ def verify_release(paths, stage, backend, *, assets=None, run=subprocess.run, sl
     from urllib.parse import quote
     from deploy.assets import public_tree
     expected_root = assets if assets is not None else stage / ('public' if (stage / 'public').is_dir() else 'frontend')
-    expected = {str(p.relative_to(expected_root)): p.read_bytes() for p in public_tree(expected_root)}
-    actual = {str(p.relative_to(paths.webroot)): p.read_bytes() for p in public_tree(paths.webroot)}
+    expected = {str(p.relative_to(expected_root)): p.read_bytes() for p in public_tree(expected_root, mobile_only=True)}
+    actual = {str(p.relative_to(paths.webroot)): p.read_bytes() for p in public_tree(paths.webroot, mobile_only=True)}
     if actual != expected:
         raise RuntimeError('Published assets differ from expected release')
     if backend:

@@ -4,6 +4,7 @@
   "tests/test_delivery_native.py": "Exercises native delivery behavior with synthetic payloads against the reconstructed public runtime.",
   "tests/test_member_jobs.py": "Exercises member-job scheduling with synthetic fixtures against the pinned public runtime.",
   "tests/test_member_scheduler.py": "Exercises scheduler behavior with synthetic fixtures against the pinned public runtime.",
+  "tests/test_model_effective_execution.py": "Exercises selected model and reasoning through synthetic admission and the real pinned run handler/factory, with no external model calls.",
   "tests/test_model_selection_transport_contract.py": "Checks the patched public transport contract with synthetic model-selection fixtures; no model calls are made.",
   "tests/test_native_compression_admission.py": "Checks native compression admission using synthetic requests and the reconstructed public runtime.",
   "tests/test_native_controls_release.py": "Checks fingerprints from the pinned, reconstructed public runtime and its installed tree; no production files are read.",

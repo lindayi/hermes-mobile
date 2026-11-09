@@ -39,6 +39,7 @@ def versions(tmp_path, monkeypatch):
     for root in roots:
         (root / 'backend/model_controls.py').write_text(
             '_CONTROL_HASHES = ' + repr(maps[1])
+            + '\n_PRE_MODEL_CONTROL_HASHES = ' + repr(release.PRE_MODEL_CONTROL_HASHES)
             + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
             + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
             + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
@@ -79,7 +80,8 @@ def test_unknown_or_mixed_sources_are_not_a_trusted_version(versions, change):
         release.attested_controls(root)
 
 
-@pytest.mark.parametrize('constant', ['_CONTROL_HASHES', '_PRE_CLARIFICATION_CONTROL_HASHES',
+@pytest.mark.parametrize('constant', ['_CONTROL_HASHES', '_PRE_MODEL_CONTROL_HASHES',
+                                      '_PRE_CLARIFICATION_CONTROL_HASHES',
                                       '_PRE_ROUTING_CONTROL_HASHES',
                                       '_PREVIOUS_CONTROL_HASHES',
                                       '_TIMEOUT_BASELINE_CONTROL_HASHES'])
@@ -218,6 +220,8 @@ def activate_candidate(bound_native):
     caps['mobile_run_controls']['clarifications'] = True
     caps['mobile_photos'] = dict(version=1, max_images=4, max_image_bytes=2097152,
                                 max_request_bytes=20000000, private_persistence=True)
+    caps['mobile_model_controls'] = {
+        'version': 1, 'reasoning_efforts': True, 'context_tiers': False}
     return probe, candidate_root, health, caps
 
 

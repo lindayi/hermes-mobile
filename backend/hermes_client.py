@@ -6,6 +6,7 @@ import httpx
 
 
 MAX_NATIVE_RUN_REQUEST_BYTES = 20_000_000
+NATIVE_REASONING_EFFORTS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh'})
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -53,6 +54,12 @@ class GatewayClient:
             if (method.upper() == 'POST' and urlparse(path).path == '/v1/runs'
                     and response.status_code == 413):
                 raise NativeRunRejected('Run request was rejected before admission; reduce its size and resend.')
+            if (method.upper() == 'POST' and urlparse(path).path == '/v1/runs'
+                    and response.status_code == 400):
+                rejection = response.json()
+                if (isinstance(rejection, dict) and isinstance(rejection.get('error'), dict)
+                        and rejection['error'].get('code') == 'model_selection_rejected'):
+                    raise NativeRunRejected('Selected reasoning is unavailable; refresh model choices and resend.')
             segments = urlparse(path).path.split('/')
             if (method.upper() == 'GET' and len(segments) == 4
                     and segments[:3] == ['', 'v1', 'runs'] and segments[3]
@@ -153,10 +160,11 @@ class GatewayClient:
             raise IntegrationUnavailable('Steering acknowledgement is unresolved')
         return reply
 
-    async def start(self,session_id,text,history=None,*,model=None,provider=None,
+    async def start(self,session_id,text,history=None,*,model=None,provider=None,reasoning_effort=None,
                     attachments=None,attachment_ids=None,photo_preflight=None,photo_owner=None):
         self.require_execution()
         payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  reasoning_effort=reasoning_effort,
                                   attachments=attachments,attachment_ids=attachment_ids)
         request=self.client.build_request('POST','/v1/runs',json=payload)
         if len(request.content)>MAX_NATIVE_RUN_REQUEST_BYTES:
@@ -168,11 +176,13 @@ class GatewayClient:
                 sizes.append((header[5:].split(';', 1)[0],
                               len(encoded) // 4 * 3 - len(encoded) + len(encoded.rstrip('='))))
             binding = self._photo_capability_binding(
-                session_id,text,history,attachment_ids,sizes,photo_owner,model=model,provider=provider)
+                session_id,text,history,attachment_ids,sizes,photo_owner,model=model,provider=provider,
+                reasoning_effort=reasoning_effort)
             if photo_preflight is None:
                 try:
                     await self.require_photo_capability(
-                        session_id,text,history,attachment_ids,sizes,photo_owner,model=model,provider=provider)
+                        session_id,text,history,attachment_ids,sizes,photo_owner,model=model,provider=provider,
+                        reasoning_effort=reasoning_effort)
                 except PhotoUnavailableBeforeAdmission as exc:
                     raise NativeRunRejected(str(exc)) from None
             elif photo_preflight != binding:
@@ -182,7 +192,7 @@ class GatewayClient:
 
     @staticmethod
     def _run_payload(session_id,text,history=None,*,model=None,provider=None,
-                     attachments=None,attachment_ids=None):
+                     reasoning_effort=None,attachments=None,attachment_ids=None):
         payload={'session_id':session_id,'input':text,'conversation_history':history or []}
         if attachments is not None or attachment_ids is not None:
             if (not isinstance(attachments,list) or not 1 <= len(attachments) <= 4
@@ -203,13 +213,19 @@ class GatewayClient:
             if not model or not provider:
                 raise ValueError('Both model and provider are required')
             payload.update(model=model,provider=provider)
+        if reasoning_effort is not None:
+            if not isinstance(reasoning_effort,str) or reasoning_effort not in NATIVE_REASONING_EFFORTS:
+                raise ValueError('Unsupported native reasoning effort')
+            payload['model_options']={'reasoning_effort':reasoning_effort}
         return payload
 
-    def validate_run_size(self,session_id,text,history,attachment_ids,image_sizes,*,model=None,provider=None):
+    def validate_run_size(self,session_id,text,history,attachment_ids,image_sizes,*,model=None,provider=None,
+                          reasoning_effort=None):
         from .native_run_controls import validate_photo_text_budget
         attachments=[{'type':'image_url','image_url':{
             'url':f'data:{content_type};base64,'}} for content_type,_ in image_sizes]
         payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  reasoning_effort=reasoning_effort,
                                   attachments=attachments,attachment_ids=attachment_ids)
         try:
             validate_photo_text_budget(payload)
@@ -221,10 +237,12 @@ class GatewayClient:
             raise PhotoRequestTooLarge('Photo request exceeds the native handler limit; remove photos or shorten earlier context.')
         return size
 
-    def _photo_capability_binding(self,session_id,text,history,attachment_ids,image_sizes,owner,*,model=None,provider=None):
+    def _photo_capability_binding(self,session_id,text,history,attachment_ids,image_sizes,owner,*,
+                                  model=None,provider=None,reasoning_effort=None):
         attachments=[{'type':'image_url','image_url':{'url':f'data:{mime};base64,'}}
                      for mime,_ in image_sizes]
         payload=self._run_payload(session_id,text,history,model=model,provider=provider,
+                                  reasoning_effort=reasoning_effort,
                                   attachments=attachments,attachment_ids=attachment_ids)
         request=self.client.build_request('POST','/v1/runs',json=payload)
         digest=hashlib.sha256(request.content).digest()
@@ -233,10 +251,12 @@ class GatewayClient:
         return (self, self.client, str(request.url), authority,
                 tuple(owner or ()), digest, tuple(image_sizes))
 
-    async def require_photo_capability(self,session_id,text,history,attachment_ids,image_sizes,owner,*,model=None,provider=None):
+    async def require_photo_capability(self,session_id,text,history,attachment_ids,image_sizes,owner,*,
+                                       model=None,provider=None,reasoning_effort=None):
         self.require_execution()
         binding=self._photo_capability_binding(
-            session_id,text,history,attachment_ids,image_sizes,owner,model=model,provider=provider)
+            session_id,text,history,attachment_ids,image_sizes,owner,model=model,provider=provider,
+            reasoning_effort=reasoning_effort)
         try:
             async with asyncio.timeout(30):
                 capabilities=await self.request('GET','/v1/capabilities')
@@ -249,7 +269,8 @@ class GatewayClient:
             raise PhotoUnavailableBeforeAdmission(
                 'Native photos are unavailable; activate the reviewed photo listener before resending.')
         if binding != self._photo_capability_binding(
-                session_id,text,history,attachment_ids,image_sizes,owner,model=model,provider=provider):
+                session_id,text,history,attachment_ids,image_sizes,owner,model=model,provider=provider,
+                reasoning_effort=reasoning_effort):
             raise PhotoUnavailableBeforeAdmission(
                 'Native photo listener changed during verification; no photo run was admitted.')
         return binding

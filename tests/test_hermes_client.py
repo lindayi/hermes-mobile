@@ -147,7 +147,7 @@ async def test_native_photo_rejection_is_distinct_from_ambiguous_dispatch(outcom
         await client.close()
 
 
-@pytest.mark.parametrize('changed', ['none', 'owner', 'profile', 'text', 'history', 'model', 'ids', 'endpoint', 'authorization', 'client'])
+@pytest.mark.parametrize('changed', ['none', 'owner', 'profile', 'text', 'history', 'model', 'reasoning', 'ids', 'endpoint', 'authorization', 'client'])
 @pytest.mark.asyncio
 async def test_photo_capability_proof_is_request_local_without_second_probe(changed):
     from backend.hermes_client import GatewayClient, NativeRunRejected
@@ -166,10 +166,13 @@ async def test_photo_capability_proof_is_request_local_without_second_probe(chan
     history = []
     ids = ['a' * 32]
     try:
-        proof = await client.require_photo_capability('s', 'Inspect', history, ids, [('image/png', 3)], owner)
+        proof = await client.require_photo_capability(
+            's', 'Inspect', history, ids, [('image/png', 3)], owner,
+            model='selected-model', provider='copilot', reasoning_effort='high')
         options = {'history': history, 'attachments': [
             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,eHl6'}}],
-            'attachment_ids': ids, 'photo_owner': owner, 'photo_preflight': proof}
+            'attachment_ids': ids, 'photo_owner': owner, 'photo_preflight': proof,
+            'model': 'selected-model', 'provider': 'copilot', 'reasoning_effort': 'high'}
         text = 'Inspect'
         if changed == 'owner':
             options['photo_owner'] = ('other-owner', 'default')
@@ -181,6 +184,8 @@ async def test_photo_capability_proof_is_request_local_without_second_probe(chan
             options['history'] = [{'role': 'user', 'content': 'Changed'}]
         elif changed == 'model':
             options.update(model='changed', provider='custom')
+        elif changed == 'reasoning':
+            options['reasoning_effort'] = 'medium'
         elif changed == 'ids':
             options['attachment_ids'] = ['b' * 32]
         elif changed == 'endpoint':

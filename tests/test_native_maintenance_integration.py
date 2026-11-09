@@ -38,6 +38,7 @@ def test_idle_and_post_restart_verifier_use_scoped_readiness(tmp_path,monkeypatc
           'mobile_notifications': dict(version=1, delivery='durable-inbox', automatic_model_wake=False)}
     caps['mobile_photos'] = dict(version=1, max_images=4, max_image_bytes=2097152,
                                 max_request_bytes=20000000, private_persistence=True)
+    caps['mobile_model_controls'] = dict(version=1, reasoning_efforts=True, context_tiers=False)
     baseline['caps'] = caps
     health = dict(legacy(), **evidence(), status='ok')
     health['native_maintenance']['work']['session_deletion_workers'] = 0

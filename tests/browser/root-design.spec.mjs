@@ -33,7 +33,7 @@ async function fixture(){
     if(endpoint==='/auth/me')data={user:{id:`synthetic-${state.role}`,role:state.role,status:state.status},csrf_token:'fixture-csrf'};
     else if(endpoint==='/sessions')data={deletion_available:true,items:[{id:'s1',title:'Synthetic root chat',run_status:'idle',source:'web'}],total:1};
     else if(endpoint==='/sessions/s1/messages')data={items:[{role:'user',content:'Synthetic question. [Example](https://example.com)'},{role:'assistant',content:'Synthetic answer.'}],run:null};
-    else if(endpoint==='/sessions/s1/model-options')data={available:true,models:[{id:'fixture-model',provider:'fixture',label:'Synthetic model',reasoning_efforts:[]}]};
+    else if(endpoint==='/sessions/s1/model-options')data={available:true,default:{model:'fixture-model',provider:'fixture'},models:[{id:'fixture-model',provider:'fixture',label:'Synthetic model',reasoning_efforts:[]}]};
     else if(endpoint==='/push/preferences')data={revision:0,enabled:false,categories:{completion:true,approval:true,attention:true,scheduled:true,operational:true},hide_details:false};
     else if(endpoint==='/jobs')data={items:[]};
     else if(endpoint==='/inbox')data={items:[],read_count:0};

@@ -346,12 +346,24 @@ _ISSUE127_BUILD_FIXTURE = {
     'package-lock.json': '7c33641b35ce9d606f6c4db17deb5c2e95c7ad69c52dd57ac24781a0d1da2261',
 }
 
+_ISSUE133_MODEL_CONTROLS_FIXTURE = {
+    '.github/native-tests.json': '00bdeed4a744fc62c26837837cfc5d9d3f06ace176f79b227f9067cb8ee246e4',
+    '.github/host-tests.json': '7824de4379648c1810cc6d917d16e437ba9877372471e18aacf636ff0ab54539',
+    'backend/model_controls.py': '302ed58b991cff9fae39d343476444e5d5cd6ec76fe18a76b88e51d282cd194a',
+    'backend/native_run_controls.py': 'dea26481acb1eea4b740ce311fa225bdc1ede8fc7936e253ae1999d9558cf013',
+    'deploy/native_controls_release.py': '0a46b857660843216ae1194947642b37fbae9d384d27389acfee291f6feb15c2',
+    'backend/hermes_client.py': '164272b7a7b802636ed4180a7d97f3b4366c49f0bb095c36cdf676f3c98bbd96',
+    'backend/orchestration.py': 'c727b9b3c73cb4d33ba341848b79e0fcabfdd9f81a190423528927a36b808c50',
+}
+
 
 # Issue #131 independent literals; never compute expected pins from candidate bytes.
 _ISSUE131_MOBILE_SCOPE_FIXTURE = {
     '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
     'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
+    'deploy/assets.py': '4a18e1091132d3df5a510783fef2d48cb028873c5d813facc828243727a79923',
     'deploy/frontend_release.py': 'c4dfb36c57abdb22e3f1ad7b6f2b5455bccfaa854cf6aafa9419d0c780511d95',
+    'deploy/self_deploy.py': '53815dcd41d9848c94fbc6d38caa1860fcb633f8033ecb222f33eb010077f158',
     'package.json': '89b9b012176674bada40c7a010516703f85ed8cbe778e007db10084f35c15931',
     'package-lock.json': '63199915d106fefd775451eb7d4aed9a3c2d04ca6f670ef9f27ba0cd6098218a',
 }
@@ -380,7 +392,8 @@ def _source_files():
             | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
             | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
             | _ISSUE122_SHELL_BUILD_FIXTURE
-            | _ISSUE127_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE)
+            | _ISSUE127_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE
+            | _ISSUE133_MODEL_CONTROLS_FIXTURE)
 
 
 def _source_ci():
@@ -871,6 +884,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE122_SHELL_BUILD_FIXTURE)
     pending |= set(_ISSUE127_BUILD_FIXTURE)
     pending |= set(_ISSUE131_MOBILE_SCOPE_FIXTURE)
+    pending |= set(_ISSUE133_MODEL_CONTROLS_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -953,22 +967,25 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     } == {
         path: digest for path, digest in (
             _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_SHELL_BUILD_FIXTURE
-            | _ISSUE131_MOBILE_SCOPE_FIXTURE
+            | _ISSUE131_MOBILE_SCOPE_FIXTURE | _ISSUE133_MODEL_CONTROLS_FIXTURE
         ).items() if path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     }
     for path, digest in (
             _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_SHELL_BUILD_FIXTURE
             | _ISSUE131_MOBILE_SCOPE_FIXTURE).items():
-        if path in _ISSUE127_BUILD_FIXTURE:
+        if (path in _ISSUE127_BUILD_FIXTURE
+                or path in _ISSUE133_MODEL_CONTROLS_FIXTURE):
             continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
-        if path not in _ISSUE127_BUILD_FIXTURE
+        if (path not in _ISSUE127_BUILD_FIXTURE
+                and path not in _ISSUE133_MODEL_CONTROLS_FIXTURE)
     } == {
         path: digest for path, digest in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE.items()
-        if path not in _ISSUE127_BUILD_FIXTURE
+        if (path not in _ISSUE127_BUILD_FIXTURE
+                and path not in _ISSUE133_MODEL_CONTROLS_FIXTURE)
     }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -990,13 +1007,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
             | _ISSUE98_PHOTO_POLICY_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
             | _ISSUE122_SHELL_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE
+            | _ISSUE133_MODEL_CONTROLS_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
                          | _ISSUE98_PHOTO_POLICY_FIXTURE
                          | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
                          | _ISSUE122_SHELL_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE).items():
-        if path in _ISSUE127_BUILD_FIXTURE:
+        if (path in _ISSUE127_BUILD_FIXTURE
+                or path in _ISSUE133_MODEL_CONTROLS_FIXTURE):
             continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
@@ -1214,12 +1233,41 @@ def test_issue131_current_scope_pins_are_complete_and_independent():
     from deploy.autonomy_policy import ISSUE131_MOBILE_SCOPE_OVERLAY
     assert set(_ISSUE131_MOBILE_SCOPE_FIXTURE) == {
         'backend/app.py', 'deploy/frontend_release.py', '.github/workflows/ci.yml',
+        'deploy/assets.py', 'deploy/self_deploy.py',
         'package.json', 'package-lock.json',
     }
     assert ISSUE131_MOBILE_SCOPE_OVERLAY == _ISSUE131_MOBILE_SCOPE_FIXTURE
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _ISSUE131_MOBILE_SCOPE_FIXTURE
     } == _ISSUE131_MOBILE_SCOPE_FIXTURE
+
+
+@pytest.mark.parametrize('phase', PHASES)
+@pytest.mark.parametrize(('path', 'digest'), sorted({
+    (path, digest)
+    for fixture in (
+        _MERGED_MAIN_SOURCE_FIXTURE, _PENDING_ISSUE52_NATIVE_RELEASE_FIXTURE,
+        _PENDING_ISSUE77_CLARIFICATION_FIXTURE,
+    )
+    for path, digest in fixture.items()
+    if path in {'deploy/assets.py', 'deploy/self_deploy.py'}
+}))
+def test_superseded_asset_ownership_source_pins_fail_closed(phase, path, digest):
+    assert _ISSUE131_MOBILE_SCOPE_FIXTURE[path] != digest
+    evidence = _phase_evidence(phase)
+    assert _blockers(evidence, phase) == set()
+    evidence['main']['files'][path] = digest
+    before = copy.deepcopy(evidence)
+    assert _blockers(evidence, phase) == {SOURCE_BLOCKERS[path]}
+    assert evidence == before
+
+
+def test_issue133_model_controls_overlay_matches_current_source():
+    from deploy.autonomy_policy import ISSUE133_MODEL_CONTROLS_OVERLAY
+    assert ISSUE133_MODEL_CONTROLS_OVERLAY == _ISSUE133_MODEL_CONTROLS_FIXTURE
+    root = Path(__file__).resolve().parents[1]
+    assert all(hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+               for path, digest in _ISSUE133_MODEL_CONTROLS_FIXTURE.items())
 
 
 @pytest.mark.parametrize('phase', PHASES)

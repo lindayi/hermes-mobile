@@ -84,6 +84,108 @@ def test_enabled_native_background_review_gets_only_sanitized_snapshot(tmp_path)
     ''')
 
 
+def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_path):
+    run_native_probe(tmp_path, r'''
+        from run_agent import AIAgent
+        import agent.chat_completion_helpers as chat_helpers
+        import agent.native_compaction as native_compaction
+        from agent.transports.chat_completions import ChatCompletionsTransport
+        from agent.transports.codex import ResponsesApiTransport
+        from backend.native_run_controls import run_controls_adapter
+        import backend.native_run_controls as mobile_controls
+
+        model = 'synthetic-catalog-model'
+        base_url = 'https://api.githubcopilot.com'
+        mobile_controls._mobile_model_options = lambda: {
+            'available': True, 'default': {'model': model, 'provider': 'copilot'},
+            'models': [{'id': model, 'provider': 'copilot',
+                        'reasoning_efforts': ['none', 'low', 'high']}]}
+        chat_helpers._prompt_cache_scope_for_agent = lambda agent: 'synthetic-scope'
+        chat_helpers._provider_preferences_for_agent = lambda agent: None
+        native_compaction.native_compaction_context_management = lambda *args, **kwargs: None
+        import providers
+        assert providers.get_provider_profile('copilot').__class__.__name__ == 'CopilotProfile'
+
+        class Base:
+            def __init__(self):
+                self._run_statuses = {}
+                self._active_run_agents = {}
+                self._run_streams = {}
+                self._run_approval_sessions = {}
+                self._stopping_run_ids = set()
+            def _create_agent(self, **kwargs):
+                return self.agent
+            def _set_run_status(self, run_id, status, **fields):
+                self._run_statuses[run_id] = {'status': status, **fields}
+            def _make_run_event_callback(self, run_id, loop):
+                return lambda *args, **kwargs: None
+            def _sweep_orphaned_runs_once(self, now=None):
+                pass
+
+        def make_agent(mode):
+            agent = AIAgent.__new__(AIAgent)
+            agent.model = model
+            agent.provider = 'copilot'
+            agent.base_url = base_url
+            agent._base_url_lower = base_url.lower()
+            agent._base_url_hostname = 'api.githubcopilot.com'
+            agent.api_mode = mode
+            agent.reasoning_config = None
+            agent.request_overrides = {}
+            agent.tools = []
+            agent.max_tokens = 128
+            agent.session_id = 'synthetic-session'
+            agent.openrouter_min_coding_score = None
+            agent._ollama_num_ctx = None
+            agent._codex_reasoning_replay_enabled = True
+            agent.steer = lambda text: True
+            agent.run_conversation = lambda *args: {}
+            agent.clear_interrupt = lambda: True
+            agent._get_transport = lambda: (
+                ChatCompletionsTransport() if mode == 'chat_completions'
+                else ResponsesApiTransport())
+            agent._prepare_messages_for_non_vision_model = lambda messages: messages
+            agent._resolved_api_call_timeout = lambda: 1
+            agent._max_tokens_param = lambda value: {'max_tokens': value}
+            agent._qwen_prepare_chat_messages = lambda messages: messages
+            agent._qwen_prepare_chat_messages_inplace = lambda messages: messages
+            agent._lmstudio_reasoning_options_cached = lambda: []
+            return agent
+
+        def wire_kwargs(mode, effort):
+            agent = make_agent(mode)
+            base = run_controls_adapter(Base)()
+            base.agent = agent
+            base._set_run_status('synthetic-run', 'running')
+            callback = lambda *args, **kwargs: None
+            callback._mobile_run_id = 'synthetic-run'
+            options = {} if effort is None else {'reasoning_effort': effort}
+            validated = mobile_controls._selected_mobile_reasoning_effort(model, 'copilot', options)
+            token = mobile_controls._MOBILE_VALIDATED_REASONING.set((base, model, 'copilot', validated))
+            try:
+                base._create_agent(
+                    requested_model=model, requested_provider='copilot',
+                    model_options=options, tool_progress_callback=callback)
+            finally:
+                mobile_controls._MOBILE_VALIDATED_REASONING.reset(token)
+            return chat_helpers.build_api_kwargs(agent, [{'role': 'user', 'content': 'synthetic'}])
+
+        for mode in ('chat_completions', 'codex_responses'):
+            for effort in ('low', 'high', 'none'):
+                kwargs = wire_kwargs(mode, effort)
+                if mode == 'chat_completions':
+                    assert kwargs['extra_body']['reasoning'] == {'effort': effort}
+                else:
+                    assert kwargs['reasoning'] == {'effort': effort}
+
+            default_kwargs = wire_kwargs(mode, None)
+            if mode == 'chat_completions':
+                assert 'reasoning' not in default_kwargs.get('extra_body', {})
+            else:
+                assert 'reasoning' not in default_kwargs
+    ''')
+
+
 @contextmanager
 def native_photo_api(tmp_path, *, provider_failure=False, provider_echo=False, aliases=False):
     home = tmp_path / 'native-api-home'

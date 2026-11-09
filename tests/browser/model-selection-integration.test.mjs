@@ -11,7 +11,7 @@ async function fixture(post,catalogue=null,snapshot=null){
  const api={clear(){},async request(path,params={}){requests.push({path,params});if(path==='/auth/me')return {user:{id:'owner',role:'owner',status:'ready'}};if(path.startsWith('/sessions?'))return {items:[{id:'s',title:'Settings fixture'}],total:1};if(path.endsWith('/model-options'))return catalogue ? catalogue(options,requests.filter(r=>r.path.endsWith('/model-options')).length) : options;if(path.includes('/messages'))return snapshot || {items:[],run:null};if(path==='/runs')return post(params.body,requests.filter(r=>r.path==='/runs').length);return {items:[]};}};
  const app=await mountApp(doc,api,win);doc.querySelector('[aria-label="Settings fixture"]').click();await tick();
  function control(name){return [...doc.querySelectorAll('button,select')].find(b=>b.getAttribute('aria-label')===name || b.textContent.trim()===name);}
- async function choose(){const model=control('Model');assert.ok(model && !model.hidden,'model picker is integrated');assert.equal(model.tagName,'SELECT');assert.equal(model.disabled,false);const option=[...model.options].find(o=>o.textContent==='Fixture A (fixture) — high');assert.ok(option);model.value=option.value;model.dispatchEvent(new win.Event('change',{bubbles:true}));await tick();assert.equal(doc.querySelector('[role=dialog],.dialog-overlay'),null);}
+ async function choose(){const model=control('Model'),reasoning=control('Reasoning effort');assert.ok(model && !model.hidden,'model picker is integrated');assert.ok(reasoning && !reasoning.hidden,'reasoning picker is separate');assert.equal(model.tagName,'SELECT');assert.equal(reasoning.tagName,'SELECT');assert.equal(model.disabled,false);model.value='0';model.dispatchEvent(new win.Event('change',{bubbles:true}));reasoning.value='high';reasoning.dispatchEvent(new win.Event('change',{bubbles:true}));await tick();assert.equal(doc.querySelector('[role=dialog],.dialog-overlay'),null);}
  function draft(text){const area=doc.querySelector('textarea');area.value=text;area.dispatchEvent(new win.Event('input',{bubbles:true}));}
  return {app,doc,win,requests,streams,control,choose,draft,close(){app.destroy();win.close();}};
 }
@@ -90,6 +90,20 @@ test('saved selection awaiting reentry catalogue validation cannot silently send
   h.draft('Wait for validation');h.control('Send message').click();await tick();
   assert.equal(h.requests.filter(r=>r.path==='/runs').length,0,'saved choice must be checked before a new admission');
   assert.equal(h.doc.querySelector('textarea').value,'Wait for validation');
+ }finally{h.close();}
+});
+
+test('retired saved effort blocks Send until explicit model correction without losing draft',async()=>{
+ const h=await fixture(body=>({id:'r',session_id:'s',status:'completed',input:body.input,output:'Corrected'}),
+  (options,count)=>count===1?options:{...options,models:options.models.map(m=>({...m,reasoning_efforts:[]}))});try{
+  await h.choose();h.control('Back to chats').click();await tick();h.control('Settings fixture').click();await tick();
+  h.draft('Keep this draft');h.control('Send message').click();await tick();
+  assert.equal(h.requests.filter(r=>r.path==='/runs').length,0);
+  assert.equal(h.doc.querySelector('textarea').value,'Keep this draft');
+  const model=h.control('Model');model.value='0';model.dispatchEvent(new h.win.Event('change',{bubbles:true}));
+  h.control('Send message').click();await tick();
+  const sent=h.requests.filter(r=>r.path==='/runs');assert.equal(sent.length,1);
+  assert.deepEqual(sent[0].params.body.selection,{model:'fixture-a',provider:'fixture'});
  }finally{h.close();}
 });
 

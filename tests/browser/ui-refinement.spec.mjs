@@ -25,7 +25,7 @@ async function fixture({longList=false}={}){
    if(path==='/auth/me')data={user:{id:'owner',status:'ready'},csrf_token:'fixture'};
    if(path==='/sessions')data={deletion_available:true,items:[{id:'s1',title:'First fixture chat',run_status:'idle',source:'cli'},{id:'s2',title:'Second fixture chat',run_status:'idle',source:'web'}],total:2};
    if(path==='/sessions' && longList)data.items.push(...Array.from({length:28},(_,i)=>({id:'extra-'+i,title:'Extra chat '+i,run_status:'idle',source:'cli'})));
-   if(path.endsWith('/model-options'))data={available:true,models:[{id:'fixture-long-model',provider:'fixture',label:'A deliberately long model label for compact controls',reasoning_efforts:[]}]};
+   if(path.endsWith('/model-options'))data={available:true,default:{model:'fixture-long-model',provider:'fixture'},models:[{id:'fixture-long-model',provider:'fixture',label:'A deliberately long model label for compact controls',reasoning_efforts:[]}]};
    if(path.endsWith('/messages'))data={items:[...Array.from({length:18},(_,i)=>({role:i%2?'assistant':'user',content:`Earlier fixture turn ${i}.`})),{role:'tool',kind:'context_compression',name:'Context compression',status:'completed',content:'Retained native envelope.\n\n**Full summary**\n\n<img src=x onerror=alert(1)>\n\n'+ 'Safe summary paragraph.\n\n'.repeat(15)}],run:null};
    if(path.endsWith('/background'))data={items:state.items};
    res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(data));return;
