@@ -121,6 +121,22 @@ def _mobile_model_options():
         return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
 
 
+def _selected_mobile_reasoning_effort(model, provider, model_options):
+    if not isinstance(model_options, dict) or 'reasoning_effort' not in model_options:
+        return None
+    effort = model_options.get('reasoning_effort')
+    if (provider != 'copilot' or not isinstance(model, str) or not model.strip()
+            or not isinstance(effort, str) or effort not in _MOBILE_REASONING_EFFORTS):
+        raise ValueError('Selected reasoning effort is invalid')
+    catalog = _mobile_model_options()
+    if (not catalog.get('available')
+            or not any(item.get('id') == model and item.get('provider') == provider
+                       and effort in item.get('reasoning_efforts', [])
+                       for item in catalog.get('models', []))):
+        raise ValueError('Selected reasoning effort is no longer supported')
+    return effort
+
+
 def _canonical_photo_content(content):
     if not isinstance(content, list):
         return photo_persistence_copy(content)
@@ -559,14 +575,47 @@ def run_controls_adapter(base):
 
         def _create_agent(self, *args, **kwargs):
             callback = kwargs.get('tool_progress_callback')
+            run_id = getattr(callback, '_mobile_run_id', None)
+            reasoning_effort = None
             if (getattr(callback, '_mobile_run_id', None)
                     and isinstance(kwargs.get('requested_model'), str)
                     and kwargs['requested_model'].strip()):
                 kwargs['confirmed_runtime_lock'] = True
+            if run_id is not None:
+                reasoning_effort = _selected_mobile_reasoning_effort(
+                    kwargs.get('requested_model'), kwargs.get('requested_provider'),
+                    kwargs.get('model_options'))
             agent = super()._create_agent(*args, **kwargs)
+            if reasoning_effort is not None:
+                from types import MethodType
+                from urllib.parse import urlsplit
+
+                selected_model = kwargs['requested_model']
+
+                def require_selected_github_model(bound_agent):
+                    host = (urlsplit(getattr(bound_agent, 'base_url', '')).hostname or '').lower()
+                    github_host = any(
+                        host == domain or host.endswith('.' + domain)
+                        for domain in ('models.github.ai', 'githubcopilot.com'))
+                    if (getattr(bound_agent, 'model', None) != selected_model
+                            or not github_host):
+                        raise RuntimeError('Selected reasoning transport is unavailable')
+
+                def selected_reasoning_extra(bound_agent):
+                    require_selected_github_model(bound_agent)
+                    return {'effort': reasoning_effort}
+
+                def selected_reasoning_supported(bound_agent):
+                    require_selected_github_model(bound_agent)
+                    return True
+
+                agent.reasoning_config = {'effort': reasoning_effort}
+                agent._github_models_reasoning_extra_body = MethodType(
+                    selected_reasoning_extra, agent)
+                agent._supports_reasoning_extra_body = MethodType(
+                    selected_reasoning_supported, agent)
             if hasattr(agent, '_save_session_log'):
                 agent = private_photo_agent(agent)
-            run_id = getattr(kwargs.get('tool_progress_callback'), '_mobile_run_id', None)
             if run_id is None:
                 return agent  # Other native entry points retain their ordinary lifecycle.
             state = self._state(run_id)

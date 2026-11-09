@@ -106,6 +106,65 @@ def test_explicit_model_request_disables_native_fallback_for_run_agents():
     asyncio.run(check())
 
 
+def test_selected_reasoning_effort_binds_to_run_agent_and_revalidates_catalog(monkeypatch):
+    import backend.native_run_controls as controls
+
+    calls = []
+    catalog = {'available': True, 'default': {'model': 'model-a', 'provider': 'copilot'},
+               'models': [{'id': 'model-a', 'provider': 'copilot',
+                           'reasoning_efforts': ['none', 'low', 'high']}]}
+    monkeypatch.setattr(controls, '_mobile_model_options',
+                        lambda: calls.append(True) or catalog)
+    agent = SimpleNamespace(model='model-a', provider='copilot',
+                            base_url='https://api.githubcopilot.com/inference',
+                            reasoning_config={'effort': 'medium'},
+                            steer=lambda text: True,
+                            run_conversation=lambda *args: {},
+                            clear_interrupt=lambda: True)
+    captured = {}
+
+    class CapturingBase(Base):
+        def _create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return agent
+
+    from backend.native_run_controls import run_controls_adapter
+
+    async def check():
+        adapter = run_controls_adapter(CapturingBase)()
+        callback = bind_run(adapter)
+        result = adapter._create_agent(
+            requested_model='model-a', requested_provider='copilot',
+            model_options={'reasoning_effort': 'high'},
+            tool_progress_callback=callback)
+        assert result is agent
+        assert agent._github_models_reasoning_extra_body() == {'effort': 'high'}
+        assert agent._supports_reasoning_extra_body() is True
+        assert agent.reasoning_config == {'effort': 'high'}
+        assert captured['confirmed_runtime_lock'] is True
+        assert calls == [True]
+
+        agent.model = 'fallback-model'
+        with pytest.raises(RuntimeError, match='transport is unavailable'):
+            agent._github_models_reasoning_extra_body()
+        agent.model = 'model-a'
+        calls.clear()
+        catalog['models'][0]['reasoning_efforts'] = ['low']
+        with pytest.raises(ValueError, match='reasoning effort'):
+            adapter._create_agent(
+                requested_model='model-a', requested_provider='copilot',
+                model_options={'reasoning_effort': 'high'},
+                tool_progress_callback=callback)
+        assert calls == [True]
+        with pytest.raises(ValueError, match='invalid'):
+            adapter._create_agent(
+                requested_model='model-a', requested_provider='copilot',
+                model_options={'reasoning_effort': 'max'},
+                tool_progress_callback=callback)
+
+    asyncio.run(check())
+
+
 def test_model_options_route_is_authenticated_and_returns_native_catalog(monkeypatch):
     import backend.native_run_controls as controls
 

@@ -192,6 +192,7 @@ def fixture(tmp_path):
                                         _PRE_ROUTING_CONTROL_HASHES, _PREVIOUS_CONTROL_HASHES)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(_CONTROL_HASHES)
+        + '\n_PRE_MODEL_CONTROL_HASHES = ' + repr(release.PRE_MODEL_CONTROL_HASHES)
         + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
         + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(_PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(_PRE_ROUTING_CONTROL_HASHES)
@@ -963,6 +964,7 @@ def test_authorized_controls_delta_allowed_but_legacy_still_protected(tmp_path, 
     monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', approved)
     (paths.source / 'backend/model_controls.py').write_text(
         '_CONTROL_HASHES = ' + repr(approved)
+        + '\n_PRE_MODEL_CONTROL_HASHES = ' + repr(release.PRE_MODEL_CONTROL_HASHES)
         + '\n_PRE_PHOTO_CONTROL_HASHES = ' + repr(release.PRE_PHOTO_CONTROL_HASHES)
         + '\n_PRE_CLARIFICATION_CONTROL_HASHES = ' + repr(release.PRE_CLARIFICATION_CONTROL_HASHES)
         + '\n_PRE_ROUTING_CONTROL_HASHES = ' + repr(release.PRE_ROUTING_CONTROL_HASHES)
@@ -1321,6 +1323,8 @@ def photo_probe(tmp_path, monkeypatch):
         'mobile_native_maintenance': dict(version=1, scope='dedicated-listener', atomic_drain=False),
         'features': {'mobile_session_delete_version': 1},
         'mobile_photos': photo_capabilities(),
+        'mobile_model_controls': {
+            'version': 1, 'reasoning_efforts': True, 'context_tiers': False},
     }
     baseline = dict(root=str(root), legacy=False, pid=123, start_ticks=456,
                     caps=caps, source_hashes=dict(release.APPROVED_CONTROL_HASHES))
@@ -1410,6 +1414,39 @@ def test_photo_version_cannot_be_coerced(photo_probe, version):
                                              photo_version=version)
 
 
+def test_model_controls_capability_matches_attested_source_family(photo_probe):
+    caps = photo_probe[2]['caps']
+    old_caps = {
+        **{key: value for key, value in caps.items() if key != 'mobile_model_controls'},
+        'mobile_photos': photo_capabilities(),
+        'mobile_run_controls': {**caps['mobile_run_controls'], 'clarifications': True},
+    }
+    release.require_controls_capabilities(
+        old_caps, session_delete_version=1, notification_version=1,
+        clarification_version=1, photo_version=1, model_controls_version=0)
+    with pytest.raises(RuntimeError, match='capabilities'):
+        release.require_controls_capabilities(
+            {**old_caps, 'mobile_model_controls': {
+                'version': 1, 'reasoning_efforts': True, 'context_tiers': False}},
+            session_delete_version=1, notification_version=1,
+            clarification_version=1, photo_version=1, model_controls_version=0)
+
+    current_caps = {
+        **old_caps,
+        'mobile_model_controls': {
+            'version': 1, 'reasoning_efforts': True, 'context_tiers': False},
+    }
+    release.require_controls_capabilities(
+        current_caps, session_delete_version=1, notification_version=1,
+        clarification_version=1, photo_version=1, model_controls_version=1)
+    for bad in (None, {}, {'version': 1, 'reasoning_efforts': True, 'context_tiers': True}):
+        with pytest.raises(RuntimeError, match='capabilities'):
+            release.require_controls_capabilities(
+                {**current_caps, 'mobile_model_controls': bad},
+                session_delete_version=1, notification_version=1,
+                clarification_version=1, photo_version=1, model_controls_version=1)
+
+
 @pytest.mark.parametrize('family', [
     'PRE_PHOTO_CONTROL_HASHES', 'PRE_CLARIFICATION_CONTROL_HASHES', 'PRE_ROUTING_CONTROL_HASHES',
     'TIMEOUT_BASELINE_CONTROL_HASHES', 'PREVIOUS_CONTROL_HASHES'])
@@ -1418,6 +1455,7 @@ def test_historical_source_families_accept_only_absent_photos(photo_probe, famil
     probe, root, baseline = photo_probe
     baseline['source_hashes'] = dict(getattr(release, family))
     caps = baseline['caps']
+    caps.pop('mobile_model_controls', None)
     del caps['mobile_photos']
     if family != 'PRE_PHOTO_CONTROL_HASHES':
         del caps['mobile_run_controls']['clarifications']
@@ -1475,7 +1513,7 @@ def test_legacy_probe_rejects_photo_advertisement(photo_probe, monkeypatch, path
         assert 'capabilities' in str(error.value.__cause__)
 
 
-@pytest.mark.parametrize('family', ['pre-photo', 'current'])
+@pytest.mark.parametrize('family', ['pre-model', 'current'])
 def test_native_probe_capture_and_rollback_verify_preserve_clarification_capabilities(
         tmp_path, monkeypatch, family):
     from types import SimpleNamespace
@@ -1489,7 +1527,7 @@ def test_native_probe_capture_and_rollback_verify_preserve_clarification_capabil
     (proc / 'cwd').symlink_to(root)
     (proc / 'cmdline').write_bytes(b'/usr/bin/python\x00native-listener\x00')
     monkeypatch.setattr(release, 'PROC_ROOT', tmp_path / 'proc')
-    source_hashes = (release.PRE_PHOTO_CONTROL_HASHES if family == 'pre-photo'
+    source_hashes = (release.PRE_MODEL_CONTROL_HASHES if family == 'pre-model'
                      else release.APPROVED_CONTROL_HASHES)
     monkeypatch.setattr(model_controls, '_control_source_hashes',
                         lambda _root: dict(source_hashes))
@@ -1503,8 +1541,12 @@ def test_native_probe_capture_and_rollback_verify_preserve_clarification_capabil
             'version': 1, 'scope': 'dedicated-listener', 'atomic_drain': False},
         'features': {'mobile_session_delete_version': 1},
     }
-    if family == 'current':
+    if family == 'pre-model':
         caps['mobile_photos'] = photo_capabilities()
+    else:
+        caps['mobile_photos'] = photo_capabilities()
+        caps['mobile_model_controls'] = {
+            'version': 1, 'reasoning_efforts': True, 'context_tiers': False}
     health_evidence = health()
     health_evidence.update(status='ok', pid=123)
     probe = object.__new__(release.NativeProbe)
@@ -1542,3 +1584,54 @@ def test_native_probe_capture_and_rollback_verify_preserve_clarification_capabil
         **source_hashes, 'backend/native_run_controls.py': '0' * 64})
     with pytest.raises(RuntimeError, match='source-version'):
         probe.verify_unchanged(root, baseline=mixed)
+
+    if family == 'pre-model':
+        with pytest.raises(RuntimeError, match='approved'):
+            release.approved_controls(root)
+        assert release._photo_version(source_hashes) == 1
+        assert release._model_controls_version(source_hashes) == 0
+    else:
+        assert release._model_controls_version(source_hashes) == 1
+
+
+def test_pre_model_family_activation_and_rollback_preserve_photo_contract(photo_probe, monkeypatch):
+    import copy
+    from backend import model_controls
+
+    probe, root, baseline = photo_probe
+    old_hashes = dict(release.PRE_MODEL_CONTROL_HASHES)
+    current_hashes = dict(release.APPROVED_CONTROL_HASHES)
+    source = {'hashes': old_hashes}
+    old_caps = {
+        key: value for key, value in baseline['caps'].items()
+        if key != 'mobile_model_controls'}
+    baseline['caps'] = old_caps
+    baseline['source_hashes'] = old_hashes
+    original_request = probe.request
+    probe.request = lambda path, *, authenticated=True: (
+        baseline['caps'] if path == '/v1/capabilities'
+        else original_request(path, authenticated=authenticated))
+    monkeypatch.setattr(model_controls, '_control_source_hashes',
+                        lambda _root: dict(source['hashes']))
+    monkeypatch.setattr(release, 'approved_controls',
+                        lambda _root: dict(source['hashes']))
+
+    rollback_baseline = copy.deepcopy(probe.capture(root, False))
+    assert rollback_baseline['source_hashes'] == old_hashes
+    assert 'mobile_photos' in rollback_baseline['caps']
+    assert 'clarifications' in rollback_baseline['caps']['mobile_run_controls']
+    assert 'mobile_model_controls' not in rollback_baseline['caps']
+
+    source['hashes'] = current_hashes
+    baseline['source_hashes'] = current_hashes
+    baseline['caps'] = {
+        **old_caps,
+        'mobile_model_controls': {
+            'version': 1, 'reasoning_efforts': True, 'context_tiers': False},
+    }
+    probe.verify(root)
+
+    source['hashes'] = old_hashes
+    baseline['source_hashes'] = old_hashes
+    baseline['caps'] = old_caps
+    probe.verify(root, baseline=rollback_baseline)

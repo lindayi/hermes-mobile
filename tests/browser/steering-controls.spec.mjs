@@ -32,7 +32,7 @@ test('real HTTP/SSE narrow light and dark composer has compact separate Stop; ap
   const steer=page.getByRole('button',{name:'Steer current run',exact:true}),stop=page.getByRole('button',{name:'Stop run',exact:true});await steer.waitFor();
   for(const size of [{width:320,height:740},{width:390,height:844},{width:390,height:450},{width:320,height:450}])for(const theme of ['light','dark']){
    await page.setViewportSize(size);await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
-   const a=await stop.boundingBox(),b=await steer.boundingBox(),heading=await page.locator('.live-activity-heading').boundingBox(),model=await page.locator('.model-control-button').boundingBox();
+   const a=await stop.boundingBox(),b=await steer.boundingBox(),heading=await page.locator('.live-activity-heading').boundingBox(),model=await page.locator('select.model-control-button:not(.reasoning-control)').boundingBox();
    assert.ok(a.width>=44 && a.height>=44);assert.ok(Math.abs(a.x+a.width-heading.x-heading.width)<1,'Stop right aligned');assert.ok(a.y>=heading.y && a.y+a.height<=heading.y+heading.height,'Stop inside header');assert.ok(a.y>=0 && a.y+a.height<=size.height,'Stop in viewport');assert.ok(a.y+a.height<=model.y,'Stop separated from model selection');assert.ok(b.x+b.width<=size.width);assert.equal(await stop.textContent(),'Stop');
    const color=await stop.evaluate(el=>{const s=getComputedStyle(el);return {color:s.color,border:s.borderTopColor,width:s.borderTopWidth,danger:getComputedStyle(document.documentElement).getPropertyValue('--danger').trim()};});
    assert.equal(color.border,color.color);assert.equal(color.width,'1px');assert.equal(color.color,theme==='dark'?'rgb(255, 170, 170)':'rgb(168, 47, 52)');

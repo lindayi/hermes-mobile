@@ -175,7 +175,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/frontend_release.py': '7749afb862a515fc673712b11278145adfb3d39ba2d012a34ecea257399eade3',
     'deploy/git_source.py': 'c69c7c5a45bc3a16ab26996872c258cc352cf2ec56c19d6256595e18ac713d63',
     'deploy/install_core.py': '2f60fbde34c02486450608fd844c3f9a0bf123a014849d4d992e5f61fd873dfc',
-    'deploy/native_controls_release.py': 'faf72f2cfc230f2b48800ff64631163056ed5b1b455bcb728934544501c51359',
+    'deploy/native_controls_release.py': '91b3ff66fc49471637d4ef8577503dac4a46f2a6ba7a8c2411f45d6c4c28852b',
     'deploy/native_readiness.py': 'f0556deb16fe9154048fdd0bc4a24fd3be947d52e287fee418a0e4d328f8183b',
     'deploy/observe_release.py': 'bf01500fb253f7d41ce49d375bba63a9e4d80569eb376a6aeae50f56cf71923f',
     'deploy/public_http.py': 'a8d073c00574718c0662973f8f4002e77165166034935c71e25d8177b8e5a295',
@@ -219,9 +219,9 @@ SOURCE_FINGERPRINTS = {
     'deploy/hermes-mobile-issue-starter.timer': '848e07d3f30f5d4c7ad881ca9bdeddd6fbf9eeb8ae1fb68ba0feb5b4425e5e92',
     'backend/configuration.py': '03d4fb191ba53f04df25b935ae03d3f5cce9ba513c89938dbb809601dae9e636',
     'backend/attachments.py': '1b19e101a6db20dc0e2b8fe4a1604c772c7ed8b0a27a94282bf60c2428d8165b',
-    'backend/native_run_controls.py': '2c2a60da1edc049dfaa281d9c4e8faa5d6c8bc9fef422abbd205f381190bc737',
+    'backend/native_run_controls.py': '680f597ff2f59d061a87b53a8f492b79a11737e8e9e37c8b4e369d00d373f8d6',
     'backend/clarifications.py': '6a6f042beb98881a482efdd85c20555d88a375156a024481ab18a0d5c80e94fd',
-    'backend/model_controls.py': 'bb56e37920da1a9eadfbb473078cf6bca29c4f927e26f2e7bed8a19de6807698',
+    'backend/model_controls.py': 'f567bd3c2b6b651731f669b0045475cef0e39e4811d5b7dd96bacada7829190e',
     'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',  # gitleaks:allow
     'backend/notifications.py': 'a56b13b0c78a9dc067a7cc252753a7c3b822df5cc9fc2aa8f2321859be08726e',
     'backend/runs.py': 'be188d9897ff925fc55677881b380bba5f97f3c5d6b3ae3d6e7faca72c3d8464',
@@ -290,6 +290,15 @@ ISSUE127_FINANCE_INTEGRATION_OVERLAY = {
     'package-lock.json': '7c33641b35ce9d606f6c4db17deb5c2e95c7ad69c52dd57ac24781a0d1da2261',
 }
 SOURCE_FINGERPRINTS.update(ISSUE127_FINANCE_INTEGRATION_OVERLAY)
+# Issue #133 adds model-control execution and rollback source-family support.
+ISSUE133_MODEL_CONTROLS_OVERLAY = {
+    'backend/model_controls.py': 'f567bd3c2b6b651731f669b0045475cef0e39e4811d5b7dd96bacada7829190e',
+    'backend/native_run_controls.py': '680f597ff2f59d061a87b53a8f492b79a11737e8e9e37c8b4e369d00d373f8d6',
+    'deploy/native_controls_release.py': '91b3ff66fc49471637d4ef8577503dac4a46f2a6ba7a8c2411f45d6c4c28852b',
+    'backend/hermes_client.py': 'a2f6ce1ead41d3d822ea020d6760e0d61e618799cbe1e7f9e89f476278d42afa',
+    'backend/orchestration.py': 'c727b9b3c73cb4d33ba341848b79e0fcabfdd9f81a190423528927a36b808c50',
+}
+SOURCE_FINGERPRINTS.update(ISSUE133_MODEL_CONTROLS_OVERLAY)
 SOURCE_BLOCKERS = {
     WORKFLOW_PATH: 'hosted-workflow-contract',
     '.github/workflows/issue-link.yml': 'hosted-workflow-contract',
