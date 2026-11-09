@@ -54,6 +54,12 @@ class GatewayClient:
             if (method.upper() == 'POST' and urlparse(path).path == '/v1/runs'
                     and response.status_code == 413):
                 raise NativeRunRejected('Run request was rejected before admission; reduce its size and resend.')
+            if (method.upper() == 'POST' and urlparse(path).path == '/v1/runs'
+                    and response.status_code == 400):
+                rejection = response.json()
+                if (isinstance(rejection, dict) and isinstance(rejection.get('error'), dict)
+                        and rejection['error'].get('code') == 'model_selection_rejected'):
+                    raise NativeRunRejected('Selected reasoning is unavailable; refresh model choices and resend.')
             segments = urlparse(path).path.split('/')
             if (method.upper() == 'GET' and len(segments) == 4
                     and segments[:3] == ['', 'v1', 'runs'] and segments[3]

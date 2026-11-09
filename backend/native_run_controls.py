@@ -19,7 +19,7 @@ TEXT_REQUEST_BYTES = 10_000_000
 PHOTO_OMITTED = '[screenshot] [photo attachment omitted after processing]'
 _MOBILE_REASONING_EFFORTS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh'})
 _MOBILE_MODEL_OPTIONS_UNAVAILABLE = {'available': False, 'models': [], 'default': None}
-_MOBILE_MODEL_CATALOG_LOCK = threading.Lock()
+_MOBILE_VALIDATED_REASONING = ContextVar('mobile_validated_reasoning', default=None)
 _INLINE_PHOTO = re.compile(r'data:image/[^;,\s"\\]+;base64,[A-Za-z0-9+/=_-]*', re.I)
 _MOBILE_PHOTO_HOOK_ACTIVE = ContextVar('mobile_photo_hook_active', default=False)
 _PHOTO_HOOK_INSTALL_LOCK = threading.Lock()
@@ -91,13 +91,19 @@ def _mobile_model_options():
 
         runtime = api_server._resolve_request_runtime_agent_kwargs('copilot')
         token = runtime.get('api_key') if isinstance(runtime, dict) else None
-        catalog = None
-        if isinstance(token, str) and token:
-            with _MOBILE_MODEL_CATALOG_LOCK:
-                model_catalog._github_model_catalog_cache = None
-                model_catalog._github_model_catalog_cache_key = None
-                model_catalog._github_model_catalog_cache_time = 0.0
-                catalog = model_catalog.fetch_github_model_catalog(api_key=token)
+        if not isinstance(token, str) or not token:
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
+        # The generic helper may retry anonymously. That is not capability authority.
+        from urllib.request import Request
+        request = Request(model_catalog.COPILOT_MODELS_URL, headers={
+            **model_catalog.copilot_default_headers(), 'Authorization': 'Bearer ' + token})
+        with model_catalog._urlopen_model_catalog_request(request, timeout=5.0) as response:
+            raw = response.read(1_048_577)
+        if len(raw) > 1_048_576:
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
+        catalog = model_catalog._payload_items(json.loads(raw))
+        if not isinstance(catalog, list) or not catalog:
+            return dict(_MOBILE_MODEL_OPTIONS_UNAVAILABLE)
         entries = {item.get('id'): item for item in catalog
                    if isinstance(item, dict) and isinstance(item.get('id'), str)} if isinstance(catalog, list) else {}
         models = []
@@ -433,10 +439,26 @@ def run_controls_adapter(base):
             except (ValueError, TypeError):
                 return web.json_response({'error': {'code': 'photo_input_rejected',
                     'message': 'Photo payload is invalid or exceeds the photo/text limits.'}}, status=413)
-            native = super()._handle_runs
-            if getattr(type(self), '_photo_admission_wrapped', False) and hasattr(native, '__wrapped__'):
-                return await native.__wrapped__(self, request)
-            return await native(request)
+            options = body.get('model_options') if isinstance(body, dict) else None
+            validated = None
+            if isinstance(options, dict) and 'reasoning_effort' in options:
+                try:
+                    effort = await asyncio.to_thread(_selected_mobile_reasoning_effort,
+                        body.get('model'), body.get('provider'), dict(options))
+                    validated = (self, body.get('model'), body.get('provider'), effort)
+                except ValueError:
+                    return web.json_response({'error': {'code': 'model_selection_rejected',
+                        'message': 'Selected reasoning is unavailable; refresh model choices.'}}, status=400)
+            # Native create_task inherits this immutable request-local validation. The
+            # request resets its own context after admission, never another run's copy.
+            token = _MOBILE_VALIDATED_REASONING.set(validated)
+            try:
+                native = super()._handle_runs
+                if getattr(type(self), '_photo_admission_wrapped', False) and hasattr(native, '__wrapped__'):
+                    return await native.__wrapped__(self, request)
+                return await native(request)
+            finally:
+                _MOBILE_VALIDATED_REASONING.reset(token)
 
         def __init__(self, *args, **kwargs):
             self._controls_lock = threading.RLock()
@@ -581,10 +603,13 @@ def run_controls_adapter(base):
                     and isinstance(kwargs.get('requested_model'), str)
                     and kwargs['requested_model'].strip()):
                 kwargs['confirmed_runtime_lock'] = True
-            if run_id is not None:
-                reasoning_effort = _selected_mobile_reasoning_effort(
-                    kwargs.get('requested_model'), kwargs.get('requested_provider'),
-                    kwargs.get('model_options'))
+            options = kwargs.get('model_options')
+            if run_id is not None and isinstance(options, dict) and 'reasoning_effort' in options:
+                expected = (self, kwargs.get('requested_model'), kwargs.get('requested_provider'),
+                            options['reasoning_effort'])
+                if _MOBILE_VALIDATED_REASONING.get() != expected:
+                    raise ValueError('Selected reasoning effort was not validated for this request')
+                reasoning_effort = options['reasoning_effort']
             agent = super()._create_agent(*args, **kwargs)
             if reasoning_effort is not None:
                 from types import MethodType
@@ -609,6 +634,36 @@ def run_controls_adapter(base):
                     require_selected_github_model(bound_agent)
                     return True
 
+                native_transport = agent._get_transport
+
+                class SelectedReasoningTransport:
+                    def __init__(self, transport):
+                        self.transport = transport
+
+                    def __getattr__(self, name):
+                        return getattr(self.transport, name)
+
+                    def build_kwargs(self, **params):
+                        require_selected_github_model(agent)
+                        if params.get('model') != selected_model:
+                            raise RuntimeError('Selected reasoning transport is unavailable')
+                        result = self.transport.build_kwargs(**params)
+                        if result.get('model') != selected_model:
+                            raise RuntimeError('Selected reasoning transport is unavailable')
+                        if agent.api_mode == 'chat_completions':
+                            result['extra_body'] = {**result.get('extra_body', {}),
+                                                    'reasoning': {'effort': reasoning_effort}}
+                        elif agent.api_mode == 'codex_responses':
+                            result['reasoning'] = {'effort': reasoning_effort}
+                        else:
+                            raise RuntimeError('Selected reasoning transport is unavailable')
+                        return result
+
+                def selected_transport(bound_agent):
+                    require_selected_github_model(bound_agent)
+                    return SelectedReasoningTransport(native_transport())
+
+                agent._get_transport = MethodType(selected_transport, agent)
                 agent.reasoning_config = {'effort': reasoning_effort}
                 agent._github_models_reasoning_extra_body = MethodType(
                     selected_reasoning_extra, agent)

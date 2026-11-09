@@ -118,6 +118,7 @@ def test_selected_reasoning_effort_binds_to_run_agent_and_revalidates_catalog(mo
     agent = SimpleNamespace(model='model-a', provider='copilot',
                             base_url='https://api.githubcopilot.com/inference',
                             reasoning_config={'effort': 'medium'},
+                            _get_transport=lambda: SimpleNamespace(build_kwargs=lambda **kw: {'model': kw['model']}),
                             steer=lambda text: True,
                             run_conversation=lambda *args: {},
                             clear_interrupt=lambda: True)
@@ -133,10 +134,17 @@ def test_selected_reasoning_effort_binds_to_run_agent_and_revalidates_catalog(mo
     async def check():
         adapter = run_controls_adapter(CapturingBase)()
         callback = bind_run(adapter)
-        result = adapter._create_agent(
-            requested_model='model-a', requested_provider='copilot',
-            model_options={'reasoning_effort': 'high'},
-            tool_progress_callback=callback)
+        def create_checked(effort):
+            options = {'reasoning_effort': effort}
+            validated = controls._selected_mobile_reasoning_effort('model-a', 'copilot', options)
+            token = controls._MOBILE_VALIDATED_REASONING.set((adapter, 'model-a', 'copilot', validated))
+            try:
+                return adapter._create_agent(
+                    requested_model='model-a', requested_provider='copilot',
+                    model_options=options, tool_progress_callback=callback)
+            finally:
+                controls._MOBILE_VALIDATED_REASONING.reset(token)
+        result = create_checked('high')
         assert result is agent
         assert agent._github_models_reasoning_extra_body() == {'effort': 'high'}
         assert agent._supports_reasoning_extra_body() is True
@@ -151,16 +159,10 @@ def test_selected_reasoning_effort_binds_to_run_agent_and_revalidates_catalog(mo
         calls.clear()
         catalog['models'][0]['reasoning_efforts'] = ['low']
         with pytest.raises(ValueError, match='reasoning effort'):
-            adapter._create_agent(
-                requested_model='model-a', requested_provider='copilot',
-                model_options={'reasoning_effort': 'high'},
-                tool_progress_callback=callback)
+            create_checked('high')
         assert calls == [True]
         with pytest.raises(ValueError, match='invalid'):
-            adapter._create_agent(
-                requested_model='model-a', requested_provider='copilot',
-                model_options={'reasoning_effort': 'max'},
-                tool_progress_callback=callback)
+            create_checked('max')
 
     asyncio.run(check())
 
@@ -193,7 +195,8 @@ def test_model_options_route_is_authenticated_and_returns_native_catalog(monkeyp
     asyncio.run(check())
 
 
-def test_native_catalog_uses_only_exact_authenticated_model_efforts(monkeypatch):
+@pytest.mark.parametrize('auth_failure', [False, True])
+def test_native_catalog_uses_only_exact_authenticated_model_efforts(monkeypatch, auth_failure):
     import backend.native_run_controls as controls
 
     calls = []
@@ -211,16 +214,32 @@ def test_native_catalog_uses_only_exact_authenticated_model_efforts(monkeypatch)
     models._github_model_catalog_cache = ['stale']
     models._github_model_catalog_cache_key = 'stale'
     models._github_model_catalog_cache_time = 1.0
+    from io import BytesIO
+    from urllib.request import Request
+    from urllib.error import HTTPError
+    records = [
+        {'id': 'model-a', 'capabilities': {'supports': {
+            'reasoning_effort': ['low', 'xhigh', 'max', 'unsupported', 3]}}},
+        {'id': 'model-b', 'capabilities': {'supports': {'reasoning_effort': True}}},
+    ]
+    def urlopen(request, timeout):
+        authenticated = request.get_header('Authorization') == 'Bearer synthetic-owner-token'
+        calls.append(authenticated)
+        if authenticated and auth_failure:
+            raise HTTPError(request.full_url, 401, 'Unauthorized', {}, None)
+        return BytesIO(json.dumps({'data': records}).encode())
+    # Match the pinned helper's authenticated-then-anonymous fallback behavior.
     def fetch(api_key):
-        calls.append((api_key, models._github_model_catalog_cache,
-                      models._github_model_catalog_cache_key,
-                      models._github_model_catalog_cache_time))
-        return [
-            {'id': 'model-a', 'capabilities': {'supports': {
-                'reasoning_effort': ['low', 'xhigh', 'max', 'unsupported', 3]}}},
-            {'id': 'model-b', 'capabilities': {'supports': {'reasoning_effort': True}}},
-        ]
+        try:
+            return json.load(urlopen(Request(models.COPILOT_MODELS_URL,
+                headers={'Authorization': 'Bearer ' + api_key}), 5))['data']
+        except HTTPError:
+            return json.load(urlopen(Request(models.COPILOT_MODELS_URL), 5))['data']
     models.fetch_github_model_catalog = fetch
+    models.COPILOT_MODELS_URL = 'https://api.githubcopilot.com/models'
+    models.copilot_default_headers = lambda: {}
+    models._urlopen_model_catalog_request = urlopen
+    models._payload_items = lambda payload: payload['data']
 
     gateway = ModuleType('gateway')
     gateway.__path__ = []
@@ -238,7 +257,12 @@ def test_native_catalog_uses_only_exact_authenticated_model_efforts(monkeypatch)
     monkeypatch.setitem(sys.modules, 'hermes_cli.inventory', inventory)
     monkeypatch.setitem(sys.modules, 'hermes_cli.models', models)
 
-    assert controls._mobile_model_options() == {
+    result = controls._mobile_model_options()
+    if auth_failure:
+        assert result == {'available': False, 'models': [], 'default': None}
+        assert calls == [True]  # No anonymous retry may authorize capability.
+        return
+    assert result == {
         'available': True,
         'default': {'model': 'model-a', 'provider': 'copilot'},
         'models': [
@@ -247,7 +271,8 @@ def test_native_catalog_uses_only_exact_authenticated_model_efforts(monkeypatch)
             {'id': 'model-b', 'provider': 'copilot', 'label': 'model-b',
              'reasoning_efforts': []},
         ]}
-    assert calls == [('synthetic-owner-token', None, None, 0.0)]
+    assert calls == [True]
+    assert models._github_model_catalog_cache == ['stale']
 
 
 def request(text='note', key='k', during_body=None):

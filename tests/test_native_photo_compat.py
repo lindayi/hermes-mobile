@@ -95,7 +95,7 @@ def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_pat
         import backend.native_run_controls as mobile_controls
 
         model = 'synthetic-catalog-model'
-        base_url = 'https://models.github.ai/inference'
+        base_url = 'https://api.githubcopilot.com'
         mobile_controls._mobile_model_options = lambda: {
             'available': True, 'default': {'model': model, 'provider': 'copilot'},
             'models': [{'id': model, 'provider': 'copilot',
@@ -104,7 +104,7 @@ def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_pat
         chat_helpers._provider_preferences_for_agent = lambda agent: None
         native_compaction.native_compaction_context_management = lambda *args, **kwargs: None
         import providers
-        providers.get_provider_profile = lambda provider: None
+        assert providers.get_provider_profile('copilot').__class__.__name__ == 'CopilotProfile'
 
         class Base:
             def __init__(self):
@@ -128,7 +128,7 @@ def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_pat
             agent.provider = 'copilot'
             agent.base_url = base_url
             agent._base_url_lower = base_url.lower()
-            agent._base_url_hostname = 'models.github.ai'
+            agent._base_url_hostname = 'api.githubcopilot.com'
             agent.api_mode = mode
             agent.reasoning_config = None
             agent.request_overrides = {}
@@ -160,9 +160,14 @@ def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_pat
             callback = lambda *args, **kwargs: None
             callback._mobile_run_id = 'synthetic-run'
             options = {} if effort is None else {'reasoning_effort': effort}
-            base._create_agent(
-                requested_model=model, requested_provider='copilot',
-                model_options=options, tool_progress_callback=callback)
+            validated = mobile_controls._selected_mobile_reasoning_effort(model, 'copilot', options)
+            token = mobile_controls._MOBILE_VALIDATED_REASONING.set((base, model, 'copilot', validated))
+            try:
+                base._create_agent(
+                    requested_model=model, requested_provider='copilot',
+                    model_options=options, tool_progress_callback=callback)
+            finally:
+                mobile_controls._MOBILE_VALIDATED_REASONING.reset(token)
             return chat_helpers.build_api_kwargs(agent, [{'role': 'user', 'content': 'synthetic'}])
 
         for mode in ('chat_completions', 'codex_responses'):

@@ -354,10 +354,10 @@ _ISSUE127_FINANCE_INTEGRATION_FIXTURE = {
 }
 
 _ISSUE133_MODEL_CONTROLS_FIXTURE = {
-    'backend/model_controls.py': 'f567bd3c2b6b651731f669b0045475cef0e39e4811d5b7dd96bacada7829190e',
-    'backend/native_run_controls.py': '680f597ff2f59d061a87b53a8f492b79a11737e8e9e37c8b4e369d00d373f8d6',
-    'deploy/native_controls_release.py': '91b3ff66fc49471637d4ef8577503dac4a46f2a6ba7a8c2411f45d6c4c28852b',
-    'backend/hermes_client.py': 'a2f6ce1ead41d3d822ea020d6760e0d61e618799cbe1e7f9e89f476278d42afa',
+    'backend/model_controls.py': '302ed58b991cff9fae39d343476444e5d5cd6ec76fe18a76b88e51d282cd194a',
+    'backend/native_run_controls.py': 'dea26481acb1eea4b740ce311fa225bdc1ede8fc7936e253ae1999d9558cf013',
+    'deploy/native_controls_release.py': '0a46b857660843216ae1194947642b37fbae9d384d27389acfee291f6feb15c2',
+    'backend/hermes_client.py': '164272b7a7b802636ed4180a7d97f3b4366c49f0bb095c36cdf676f3c98bbd96',
     'backend/orchestration.py': 'c727b9b3c73cb4d33ba341848b79e0fcabfdd9f81a190423528927a36b808c50',
 }
 
