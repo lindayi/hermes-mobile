@@ -80,6 +80,18 @@ def test_capabilities_are_explicit_and_base_unchanged():
     asyncio.run(check())
 
 
+def test_explicit_model_request_disables_native_fallback():
+    captured={}
+    class Base:
+        def _create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace()
+    from backend.native_run_controls import run_controls_adapter
+    run_controls_adapter(Base)()._create_agent(
+        requested_model='selected-model', requested_provider='copilot')
+    assert captured['confirmed_runtime_lock'] is True
+
+
 def request(text='note', key='k', during_body=None):
     return SimpleNamespace(match_info={'run_id': 'r'}, body={'input': text, 'idempotency_key': key}, during_body=during_body)
 
