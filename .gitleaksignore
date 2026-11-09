@@ -1,6 +1,12 @@
 # Reviewed false positives only: source SHA-256 fingerprints, historical agent-test IDs,
 # and deliberately fake credential/private-key redaction fixtures. No blanket path allowlist.
 # Review this file whenever corresponding fixture lines change.
+# Model-controls catalog additions moved these verified native API SHA-256 constants.
+backend/model_controls.py:generic-api-key:14
+backend/model_controls.py:generic-api-key:24
+backend/model_controls.py:generic-api-key:34
+backend/model_controls.py:generic-api-key:44
+tests/test_native_controls_attestation.py:generic-api-key:83
 tests/browser/tool-detail.test.mjs:curl-auth-user:85
 tests/browser/tool-detail.test.mjs:curl-auth-user:149
 tests/test_session_visibility.py:generic-api-key:32

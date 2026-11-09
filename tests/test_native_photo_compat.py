@@ -90,7 +90,7 @@ def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_pat
         import agent.chat_completion_helpers as chat_helpers
         import agent.native_compaction as native_compaction
         from agent.transports.chat_completions import ChatCompletionsTransport
-        from agent.transports.codex import CodexResponsesTransport
+        from agent.transports.codex import ResponsesApiTransport
         from backend.native_run_controls import run_controls_adapter
         import backend.native_run_controls as mobile_controls
 
@@ -143,7 +143,7 @@ def test_pinned_github_reasoning_effort_reaches_both_provider_wire_modes(tmp_pat
             agent.clear_interrupt = lambda: True
             agent._get_transport = lambda: (
                 ChatCompletionsTransport() if mode == 'chat_completions'
-                else CodexResponsesTransport())
+                else ResponsesApiTransport())
             agent._prepare_messages_for_non_vision_model = lambda messages: messages
             agent._resolved_api_call_timeout = lambda: 1
             agent._max_tokens_param = lambda value: {'max_tokens': value}
