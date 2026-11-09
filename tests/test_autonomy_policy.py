@@ -353,6 +353,16 @@ _ISSUE127_FINANCE_INTEGRATION_FIXTURE = {
     'package-lock.json': '7c33641b35ce9d606f6c4db17deb5c2e95c7ad69c52dd57ac24781a0d1da2261',
 }
 
+_ISSUE133_MODEL_CONTROLS_FIXTURE = {
+    '.github/native-tests.json': '00bdeed4a744fc62c26837837cfc5d9d3f06ace176f79b227f9067cb8ee246e4',
+    '.github/host-tests.json': '7824de4379648c1810cc6d917d16e437ba9877372471e18aacf636ff0ab54539',
+    'backend/model_controls.py': '302ed58b991cff9fae39d343476444e5d5cd6ec76fe18a76b88e51d282cd194a',
+    'backend/native_run_controls.py': 'dea26481acb1eea4b740ce311fa225bdc1ede8fc7936e253ae1999d9558cf013',
+    'deploy/native_controls_release.py': '0a46b857660843216ae1194947642b37fbae9d384d27389acfee291f6feb15c2',
+    'backend/hermes_client.py': '164272b7a7b802636ed4180a7d97f3b4366c49f0bb095c36cdf676f3c98bbd96',
+    'backend/orchestration.py': 'c727b9b3c73cb4d33ba341848b79e0fcabfdd9f81a190423528927a36b808c50',
+}
+
 
 def _source_files():
     return (_MERGED_MAIN_SOURCE_FIXTURE | _ISSUE52_MERGED_MAIN_BASE_FIXTURE
@@ -377,7 +387,8 @@ def _source_files():
             | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
             | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
             | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE
-            | _ISSUE127_FINANCE_INTEGRATION_FIXTURE)
+            | _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+            | _ISSUE133_MODEL_CONTROLS_FIXTURE)
 
 
 def _source_ci():
@@ -867,6 +878,7 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     pending |= set(_ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE)
     pending |= set(_ISSUE122_FINANCE_FIXTURE)
     pending |= set(_ISSUE127_FINANCE_INTEGRATION_FIXTURE)
+    pending |= set(_ISSUE133_MODEL_CONTROLS_FIXTURE)
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path not in pending
@@ -949,21 +961,25 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     } == {
         path: digest for path, digest in (
             _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
+            | _ISSUE133_MODEL_CONTROLS_FIXTURE
         ).items() if path in _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
     }
     for path, digest in (
             _PR119_NOTIFICATION_FOLLOWUP_FIXTURE | _ISSUE122_FINANCE_FIXTURE
             | _ISSUE124_MONEY_MAP_FIXTURE).items():
-        if path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE:
+        if (path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+                or path in _ISSUE133_MODEL_CONTROLS_FIXTURE):
             continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
         path: SOURCE_FINGERPRINTS[path] for path in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE
-        if path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+        if (path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+                and path not in _ISSUE133_MODEL_CONTROLS_FIXTURE)
     } == {
         path: digest for path, digest in _PENDING_ISSUE75_HOSTED_GATE_FIXTURE.items()
-        if path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+        if (path not in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+                and path not in _ISSUE133_MODEL_CONTROLS_FIXTURE)
     }
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
@@ -984,14 +1000,15 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
         path: digest for path, digest in (
             _PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
             | _ISSUE98_PHOTO_POLICY_FIXTURE | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
-            | _ISSUE122_FINANCE_FIXTURE
+            | _ISSUE122_FINANCE_FIXTURE | _ISSUE133_MODEL_CONTROLS_FIXTURE
         ).items() if path in _PENDING_ISSUE77_CLARIFICATION_FIXTURE
     }
     for path, digest in (_PENDING_ISSUE77_CLARIFICATION_FIXTURE | _ISSUE85_PHOTO_FIXTURE
                          | _ISSUE98_PHOTO_POLICY_FIXTURE
                          | _PR119_NOTIFICATION_FOLLOWUP_FIXTURE
                          | _ISSUE122_FINANCE_FIXTURE | _ISSUE124_MONEY_MAP_FIXTURE).items():
-        if path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE:
+        if (path in _ISSUE127_FINANCE_INTEGRATION_FIXTURE
+                or path in _ISSUE133_MODEL_CONTROLS_FIXTURE):
             continue
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
@@ -1232,6 +1249,14 @@ def test_issue127_finance_build_pins_are_complete_and_independent():
     root = Path(__file__).resolve().parents[1]
     assert all(hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
                for path, digest in _ISSUE127_FINANCE_INTEGRATION_FIXTURE.items())
+
+
+def test_issue133_model_controls_overlay_matches_current_source():
+    from deploy.autonomy_policy import ISSUE133_MODEL_CONTROLS_OVERLAY
+    assert ISSUE133_MODEL_CONTROLS_OVERLAY == _ISSUE133_MODEL_CONTROLS_FIXTURE
+    root = Path(__file__).resolve().parents[1]
+    assert all(hashlib.sha256((root / path).read_bytes()).hexdigest() == digest
+               for path, digest in _ISSUE133_MODEL_CONTROLS_FIXTURE.items())
 
 
 @pytest.mark.parametrize('phase', PHASES)

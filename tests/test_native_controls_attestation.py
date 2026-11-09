@@ -34,6 +34,7 @@ def test_timeout_recovery_sources_have_exact_matching_release_pins():
     from deploy import native_controls_release as release
     root = Path(__file__).resolve().parents[1]
     assert controls._CONTROL_HASHES == release.APPROVED_CONTROL_HASHES
+    assert controls._PRE_MODEL_CONTROL_HASHES == release.PRE_MODEL_CONTROL_HASHES
     assert controls._PRE_CLARIFICATION_CONTROL_HASHES == release.PRE_CLARIFICATION_CONTROL_HASHES
     for name, digest in controls._CONTROL_HASHES.items():
         assert hashlib.sha256((root/name).read_bytes()).hexdigest() == digest, name
@@ -46,6 +47,7 @@ def test_timeout_baseline_remains_exactly_attested_for_drain_and_rollback(tmp_pa
     baseline = getattr(controls, '_TIMEOUT_BASELINE_CONTROL_HASHES', None)
     assert controls._PRE_CLARIFICATION_CONTROL_HASHES == release.PRE_CLARIFICATION_CONTROL_HASHES
     assert controls._PRE_ROUTING_CONTROL_HASHES == release.PRE_ROUTING_CONTROL_HASHES
+    assert controls._PRE_MODEL_CONTROL_HASHES == release.PRE_MODEL_CONTROL_HASHES
     assert baseline is not None, 'The immediate pre-fix listener must remain attestable'
     assert baseline == release.TIMEOUT_BASELINE_CONTROL_HASHES
     assert baseline == {**controls._PRE_ROUTING_CONTROL_HASHES, 'backend/native_run_controls.py':
@@ -71,3 +73,71 @@ def test_timeout_baseline_remains_exactly_attested_for_drain_and_rollback(tmp_pa
     (tmp_path/'baseline'/name).write_bytes((tmp_path/'current'/name).read_bytes())
     with pytest.raises(RuntimeError, match='approved'):
         release.attested_controls(tmp_path/'baseline')
+
+
+def test_immediate_pre_model_controls_family_remains_photo_capable_and_rollback_attestable():
+    from deploy import native_controls_release as release
+    expected = {
+        'backend/native_controls_service.py': 'f0b27766bb923976cc97dccacd54005989f74e026a6ecc2f167817a248ee24ab',
+        'backend/native_run_controls.py': 'd8af6f7687c7d75b0c148b0572f7f4c13c1ac9bedc295e59719a7a3ee43f5058',
+        'backend/native_api_service.py': 'a3a28cf5d83688e69e335c816febfe11acfdd72631fff14f4203d97b81e77c22',
+        'backend/native_maintenance.py': 'e79cfee2bf8d32c3f51dd3ee9247e23029376e10c5e55ea21aa373d6d72535c5',
+        'backend/native_session_deletion.py': '182246c696c5f409f9d6feafedbcd10278c938ad9b3bc858804ef3d49d15e0f6',
+        'backend/native_notifications.py': '230ab537cda34e2f8f497ce92a435b393a2cfc270638f1417213c6bc0a466610',
+    }
+    family = getattr(controls, '_PRE_MODEL_CONTROL_HASHES', None)
+    assert family == expected
+    assert release.PRE_MODEL_CONTROL_HASHES == expected
+    assert release._clarification_version(family) == 1
+    assert release._photo_version(family) == 1
+    assert release._model_controls_version(family) == 0
+
+
+def test_pre_model_source_activates_new_family_and_rolls_back_without_mixing(tmp_path, monkeypatch):
+    import pytest
+    from deploy import native_controls_release as release
+
+    names = tuple(release.PRE_MODEL_CONTROL_HASHES)
+    roots = {}
+    maps = {}
+    for version in ('pre-model', 'current'):
+        root = tmp_path / version
+        hashes = {}
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = (version + ':' + name).encode()
+            path.write_bytes(content)
+            hashes[name] = hashlib.sha256(content).hexdigest()
+        roots[version] = root
+        maps[version] = hashes
+
+    monkeypatch.setattr(controls, '_CONTROL_HASHES', maps['current'])
+    monkeypatch.setattr(controls, '_PRE_MODEL_CONTROL_HASHES', maps['pre-model'])
+    monkeypatch.setattr(release, 'APPROVED_CONTROL_HASHES', maps['current'])
+    monkeypatch.setattr(release, 'PRE_MODEL_CONTROL_HASHES', maps['pre-model'])
+    literal_maps = {
+        '_CONTROL_HASHES': maps['current'],
+        '_PRE_MODEL_CONTROL_HASHES': maps['pre-model'],
+        '_PRE_PHOTO_CONTROL_HASHES': controls._PRE_PHOTO_CONTROL_HASHES,
+        '_PRE_CLARIFICATION_CONTROL_HASHES': controls._PRE_CLARIFICATION_CONTROL_HASHES,
+        '_PRE_ROUTING_CONTROL_HASHES': controls._PRE_ROUTING_CONTROL_HASHES,
+        '_TIMEOUT_BASELINE_CONTROL_HASHES': controls._TIMEOUT_BASELINE_CONTROL_HASHES,
+        '_PREVIOUS_CONTROL_HASHES': controls._PREVIOUS_CONTROL_HASHES,
+    }
+    source = ''.join(f'{name} = {value!r}\n' for name, value in literal_maps.items())
+    for root in roots.values():
+        (root / 'backend/model_controls.py').write_text(source)
+
+    assert release.attested_controls(roots['pre-model']) == maps['pre-model']
+    assert release.approved_controls(roots['current']) == maps['current']
+    with pytest.raises(RuntimeError, match='approved'):
+        release.approved_controls(roots['pre-model'])
+    (roots['pre-model'] / 'backend/native_run_controls.py').write_bytes(
+        (roots['current'] / 'backend/native_run_controls.py').read_bytes())
+    with pytest.raises(RuntimeError, match='approved'):
+        release.attested_controls(roots['pre-model'])
+    old_run_controls = b'pre-model:backend/native_run_controls.py'
+    (roots['pre-model'] / 'backend/native_run_controls.py').write_bytes(old_run_controls)
+    assert release.attested_controls(roots['pre-model']) == maps['pre-model']
+    assert release.attested_controls(roots['current']) == maps['current']

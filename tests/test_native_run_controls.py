@@ -76,8 +76,203 @@ def test_capabilities_are_explicit_and_base_unchanged():
         caps = json.loads((await a._handle_capabilities(None)).text)
         assert caps['mobile_run_controls'] == {
             'version': 1, 'steering': True, 'live_commentary': True, 'clarifications': True}
+        assert caps['mobile_model_controls'] == {
+            'version': 1, 'reasoning_efforts': True, 'context_tiers': False}
         assert 'mobile_run_controls' not in json.loads((await Base()._handle_capabilities(None)).text)
     asyncio.run(check())
+
+
+def test_explicit_model_request_disables_native_fallback_for_run_agents():
+    captured={}
+    class CapturingBase(Base):
+        def _create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                steer=lambda text: True,
+                run_conversation=lambda *args: {},
+                clear_interrupt=lambda: True)
+    from backend.native_run_controls import run_controls_adapter
+    async def check():
+        adapter=run_controls_adapter(CapturingBase)()
+        callback=bind_run(adapter)
+        adapter._create_agent(requested_model='selected-model',
+                              requested_provider='copilot',
+                              tool_progress_callback=callback)
+        assert captured['confirmed_runtime_lock'] is True
+        captured.clear()
+        adapter._create_agent(requested_model='selected-model',
+                              requested_provider='copilot')
+        assert 'confirmed_runtime_lock' not in captured
+    asyncio.run(check())
+
+
+def test_selected_reasoning_effort_binds_to_run_agent_and_revalidates_catalog(monkeypatch):
+    import backend.native_run_controls as controls
+
+    calls = []
+    catalog = {'available': True, 'default': {'model': 'model-a', 'provider': 'copilot'},
+               'models': [{'id': 'model-a', 'provider': 'copilot',
+                           'reasoning_efforts': ['none', 'low', 'high']}]}
+    monkeypatch.setattr(controls, '_mobile_model_options',
+                        lambda: calls.append(True) or catalog)
+    agent = SimpleNamespace(model='model-a', provider='copilot',
+                            base_url='https://api.githubcopilot.com/inference',
+                            reasoning_config={'effort': 'medium'},
+                            _get_transport=lambda: SimpleNamespace(build_kwargs=lambda **kw: {'model': kw['model']}),
+                            steer=lambda text: True,
+                            run_conversation=lambda *args: {},
+                            clear_interrupt=lambda: True)
+    captured = {}
+
+    class CapturingBase(Base):
+        def _create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return agent
+
+    from backend.native_run_controls import run_controls_adapter
+
+    async def check():
+        adapter = run_controls_adapter(CapturingBase)()
+        callback = bind_run(adapter)
+        def create_checked(effort):
+            options = {'reasoning_effort': effort}
+            validated = controls._selected_mobile_reasoning_effort('model-a', 'copilot', options)
+            token = controls._MOBILE_VALIDATED_REASONING.set((adapter, 'model-a', 'copilot', validated))
+            try:
+                return adapter._create_agent(
+                    requested_model='model-a', requested_provider='copilot',
+                    model_options=options, tool_progress_callback=callback)
+            finally:
+                controls._MOBILE_VALIDATED_REASONING.reset(token)
+        result = create_checked('high')
+        assert result is agent
+        assert agent._github_models_reasoning_extra_body() == {'effort': 'high'}
+        assert agent._supports_reasoning_extra_body() is True
+        assert agent.reasoning_config == {'effort': 'high'}
+        assert captured['confirmed_runtime_lock'] is True
+        assert calls == [True]
+
+        agent.model = 'fallback-model'
+        with pytest.raises(RuntimeError, match='transport is unavailable'):
+            agent._github_models_reasoning_extra_body()
+        agent.model = 'model-a'
+        calls.clear()
+        catalog['models'][0]['reasoning_efforts'] = ['low']
+        with pytest.raises(ValueError, match='reasoning effort'):
+            create_checked('high')
+        assert calls == [True]
+        with pytest.raises(ValueError, match='invalid'):
+            create_checked('max')
+
+    asyncio.run(check())
+
+
+def test_model_options_route_is_authenticated_and_returns_native_catalog(monkeypatch):
+    import backend.native_run_controls as controls
+
+    calls = []
+    catalog = {'available': True, 'models': [], 'default': None}
+    monkeypatch.setattr(controls, '_mobile_model_options', lambda: calls.append(True) or catalog)
+
+    class DeniedBase(Base):
+        def _check_auth(self, request):
+            return web.Response(status=401)
+
+    async def check():
+        denied = controls.run_controls_adapter(DeniedBase)()
+        routes = denied._http_route_table()
+        assert any(method == 'GET' and path == '/api/mobile/model-options'
+                   for method, path, _ in routes)
+        response = await denied._handle_mobile_model_options(None)
+        assert response.status == 401
+        assert calls == []
+
+        authorized = adapter()
+        response = await authorized._handle_mobile_model_options(None)
+        assert json.loads(response.text) == catalog
+        assert calls == [True]
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('auth_failure', [False, True])
+def test_native_catalog_uses_only_exact_authenticated_model_efforts(monkeypatch, auth_failure):
+    import backend.native_run_controls as controls
+
+    calls = []
+    api_server = ModuleType('gateway.platforms.api_server')
+    api_server._resolve_request_runtime_agent_kwargs = lambda provider: {
+        'api_key': 'synthetic-owner-token'} if provider == 'copilot' else {}
+    inventory = ModuleType('hermes_cli.inventory')
+    inventory.load_picker_context = lambda: object()
+    inventory.build_model_options_payload = lambda context, include_unconfigured: {
+        'provider': 'copilot', 'model': 'model-a',
+        'providers': [{'slug': 'copilot', 'authenticated': True,
+                       'models': ['model-a', 'model-b', 'model-a', 'invalid/model',
+                                  'default', 'hermes-agent']}]}
+    models = ModuleType('hermes_cli.models')
+    models._github_model_catalog_cache = ['stale']
+    models._github_model_catalog_cache_key = 'stale'
+    models._github_model_catalog_cache_time = 1.0
+    from io import BytesIO
+    from urllib.request import Request
+    from urllib.error import HTTPError
+    records = [
+        {'id': 'model-a', 'capabilities': {'supports': {
+            'reasoning_effort': ['low', 'xhigh', 'max', 'unsupported', 3]}}},
+        {'id': 'model-b', 'capabilities': {'supports': {'reasoning_effort': True}}},
+    ]
+    def urlopen(request, timeout):
+        authenticated = request.get_header('Authorization') == 'Bearer synthetic-owner-token'
+        calls.append(authenticated)
+        if authenticated and auth_failure:
+            raise HTTPError(request.full_url, 401, 'Unauthorized', {}, None)
+        return BytesIO(json.dumps({'data': records}).encode())
+    # Match the pinned helper's authenticated-then-anonymous fallback behavior.
+    def fetch(api_key):
+        try:
+            return json.load(urlopen(Request(models.COPILOT_MODELS_URL,
+                headers={'Authorization': 'Bearer ' + api_key}), 5))['data']
+        except HTTPError:
+            return json.load(urlopen(Request(models.COPILOT_MODELS_URL), 5))['data']
+    models.fetch_github_model_catalog = fetch
+    models.COPILOT_MODELS_URL = 'https://api.githubcopilot.com/models'
+    models.copilot_default_headers = lambda: {}
+    models._urlopen_model_catalog_request = urlopen
+    models._payload_items = lambda payload: payload['data']
+
+    gateway = ModuleType('gateway')
+    gateway.__path__ = []
+    platforms = ModuleType('gateway.platforms')
+    platforms.__path__ = []
+    platforms.api_server = api_server
+    hermes_cli = ModuleType('hermes_cli')
+    hermes_cli.__path__ = []
+    hermes_cli.inventory = inventory
+    hermes_cli.models = models
+    monkeypatch.setitem(sys.modules, 'gateway', gateway)
+    monkeypatch.setitem(sys.modules, 'gateway.platforms', platforms)
+    monkeypatch.setitem(sys.modules, 'gateway.platforms.api_server', api_server)
+    monkeypatch.setitem(sys.modules, 'hermes_cli', hermes_cli)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.inventory', inventory)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', models)
+
+    result = controls._mobile_model_options()
+    if auth_failure:
+        assert result == {'available': False, 'models': [], 'default': None}
+        assert calls == [True]  # No anonymous retry may authorize capability.
+        return
+    assert result == {
+        'available': True,
+        'default': {'model': 'model-a', 'provider': 'copilot'},
+        'models': [
+            {'id': 'model-a', 'provider': 'copilot', 'label': 'model-a',
+             'reasoning_efforts': ['low', 'xhigh']},
+            {'id': 'model-b', 'provider': 'copilot', 'label': 'model-b',
+             'reasoning_efforts': []},
+        ]}
+    assert calls == [True]
+    assert models._github_model_catalog_cache == ['stale']
 
 
 def request(text='note', key='k', during_body=None):

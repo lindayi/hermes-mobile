@@ -90,9 +90,15 @@ class Orchestrator:
             raise ValueError('Invalid photo attachment references')
         selection=body.get('selection')
         if selection is not None:
-            if (not isinstance(selection,dict) or set(selection) != {'model','provider'}
-                    or any(not isinstance(v,str) or not v or len(v)>200 for v in selection.values())):
-                raise ValueError('Invalid model selection; reasoning supports Default only')
+            if (not isinstance(selection,dict)
+                    or not {'model','provider'} <= set(selection)
+                    or set(selection) - {'model','provider','reasoning_effort'}
+                    or any(not isinstance(selection.get(k),str) or not selection[k]
+                           or len(selection[k])>200 for k in ('model','provider'))
+                    or ('reasoning_effort' in selection
+                        and (not isinstance(selection['reasoning_effort'],str)
+                             or len(selection['reasoning_effort'])>32))):
+                raise ValueError('Invalid model selection')
             selection=dict(selection)
         if self._closed:
             raise IntegrationUnavailable('Orchestrator is closed')
@@ -109,8 +115,13 @@ class Orchestrator:
             if not hasattr(self,'model_options'):
                 raise IntegrationUnavailable('Model controls are unavailable')
             choices=await self.model_options(body['session_id'],user)
-            if not choices.get('available') or not any(m['id']==selection['model'] and m['provider']==selection['provider'] for m in choices['models']):
+            model=next((m for m in choices.get('models',[])
+                        if m['id']==selection['model'] and m['provider']==selection['provider']),None)
+            if not choices.get('available') or model is None:
                 raise ValueError('Model selection is unavailable')
+            effort=selection.get('reasoning_effort')
+            if effort is not None and effort not in model['reasoning_efforts']:
+                raise ValueError('Reasoning effort is unavailable for this model')
         if self.history_loader is None:
             raise IntegrationUnavailable('Complete native history loader is required')
         context = self.history_loader(user['profile'], body['session_id'])
