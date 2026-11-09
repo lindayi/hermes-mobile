@@ -113,6 +113,29 @@ def test_selection_is_durable_and_uncertain_retry_does_not_dispatch(tmp_path,mon
     assert posts[0][2]=={'session_id':'wa-1','input':'hello','conversation_history':[],'model':'other','provider':'copilot'}
 
 
+def test_reasoning_selection_reaches_native_run_request(tmp_path,monkeypatch):
+    app,calls=fixture(tmp_path,monkeypatch)
+    import backend.app as module
+    monkeypatch.setattr(module,'MODEL_OWNER_HOME',app.state.catalog.profiles['default'])
+    with TestClient(app,base_url=ORIGIN) as c:
+        c.headers['Origin']=ORIGIN
+        enroll(c)
+        body={'session_id':'wa-1','input':'synthetic reasoning transport',
+              'idempotency_key':'reasoning-transport',
+              'selection':{'model':'other','provider':'copilot','reasoning_effort':'high'}}
+        response=c.post(BASE+'/runs',json=body)
+        assert response.status_code==200,response.text
+        saved=app.state.journal.get(response.json()['user_id'],response.json()['id'])
+        assert saved['selection']==body['selection']
+    posts=[call for call in calls if call[0]=='POST']
+    assert len(posts)==1
+    assert posts[0][1]=='/v1/runs'
+    assert posts[0][2]=={
+        'session_id':'wa-1','input':'synthetic reasoning transport',
+        'conversation_history':[],'model':'other','provider':'copilot',
+        'model_options':{'reasoning_effort':'high'}}
+
+
 def test_available_owner_catalog(tmp_path,monkeypatch):
     app,calls=fixture(tmp_path,monkeypatch)
     import backend.app as module
