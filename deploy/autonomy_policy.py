@@ -255,6 +255,10 @@ SOURCE_FINGERPRINTS = {
     # Issue #96 bounded rollback observation; historical PR25 pins remain retained.
     'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
 }
+# Issue #135 retained quarantine proof; preserve the earlier rollback pin above.
+SOURCE_FINGERPRINTS.update({
+    'deploy/native_notification_release.py': 'c3e8c94c3f6d4857e88be86b7eac64203c195fb531ea5f2f9e1c2fedabf7dd93',
+})
 # Issue #106 verification-status parser overlay; preserve the earlier review pin above.
 ISSUE106_REVIEW_EVIDENCE_OVERLAY = {
     'deploy/review_evidence.py': '697cf833a005146a354d399f62252c64e64103c73febd8762fbdc271244821be',
