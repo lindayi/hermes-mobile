@@ -40,7 +40,7 @@ _RECORD_FIELDS = ('event_hash', 'result_hash', 'payload_sha256', 'route', 'state
 _FINGERPRINT_FIELDS = ('event_hash', 'result_hash', 'payload_sha256', 'route',
                        'historical', 'provenance_hash')
 _RAW_FIELDS = ('event_id', 'event_json', 'result_json', 'payload_sha256', 'route', 'state',
-               'historical', 'provenance', 'source_state', 'receipt_id', 'lease_token')
+               'historical', 'provenance', 'source_state', 'receipt_id', 'lease_token', 'lease_until')
 _RECEIPT_FIELDS = ('event_id', 'scope', 'digest', 'user_id', 'origin', 'inbox_id',
                    'event_json', 'joined_inbox_id', 'delivery_id',
                    'inbox_user_id', 'title', 'body', 'session_id')
@@ -64,7 +64,7 @@ class _ScratchProof:
             db.execute('PRAGMA temp_store=FILE')
             db.executescript('''
                 CREATE TABLE raw(snap, event_id, event_json, result_json, payload_sha256, route,
-                    state, historical, provenance, source_state, receipt_id, lease_token,
+                    state, historical, provenance, source_state, receipt_id, lease_token, lease_until,
                     PRIMARY KEY(snap, event_id));
                 CREATE TABLE records(snap, event_id, event_hash, result_hash, payload_sha256,
                     route, state, historical, provenance_hash, source_state, receipt_id,
@@ -501,7 +501,7 @@ class NativeNotificationCallbacks:
                     raise ValueError()
             else:
                 result = None
-            if (row['route'] != route or route not in ('owned', 'foreign')
+            if (row['route'] != route or route not in ('owned', 'foreign', 'quarantined')
                     or type(row['historical']) is not int or row['historical'] not in (0, 1)
                     or not isinstance(row['provenance'], str) or not row['provenance']
                     or not isinstance(row['source_state'], str)
@@ -522,6 +522,13 @@ class NativeNotificationCallbacks:
                                 lease_token=row['lease_token'] or 'synthetic-read-only-proof',
                                 event=event, historical=bool(row['historical']))
                 BackgroundDeliveryService._envelope(envelope)
+            elif route == 'quarantined':
+                # The producer retains unresolved routes without transferring or
+                # leasing them. Preservation is not owner or delivery authority.
+                if (row['state'] != 'quarantined' or row['source_state'] != 'unexamined'
+                        or row['receipt_id'] is not None or row['lease_token'] is not None
+                        or row['lease_until'] is not None):
+                    raise ValueError()
             elif (row['state'] != 'foreign' or row['source_state'] != 'foreign-retained'):
                 raise ValueError()
             if row['state'] == 'delivered' and (
@@ -573,7 +580,7 @@ class NativeNotificationCallbacks:
                     while True:
                         page = db.execute('''SELECT rowid,event_id,event_json,result_json,
                             payload_sha256,route,state,historical,provenance,source_state,
-                            receipt_id,lease_token FROM notification_outbox WHERE rowid>?
+                            receipt_id,lease_token,lease_until FROM notification_outbox WHERE rowid>?
                             ORDER BY rowid LIMIT ?''', (after, PAGE_SIZE)).fetchall()
                         if not page:
                             break
@@ -735,7 +742,7 @@ class NativeNotificationCallbacks:
         if any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS):
             raise ValueError()
         if (status['conflicts'] != conflicts or status['conflicts'] != 0
-                or status['quarantined'] != 0):
+                or status['quarantined'] != counts['quarantined']):
             raise ValueError()
         if any(status[key] != counts[key] for key in counts):
             raise _EvidenceChanged()
@@ -765,7 +772,8 @@ class NativeNotificationCallbacks:
             if (not isinstance(status, dict) or set(status) != set(STATUS_KEYS)
                      or any(type(status[key]) is not int or status[key] < 0 for key in STATUS_KEYS)):
                 raise ValueError()
-            if status['conflicts'] != 0 or status['quarantined'] != 0:
+            if (status['conflicts'] != 0 or snapshot is None
+                    or status['quarantined'] != snapshot['status']['quarantined']):
                 raise ValueError()
             if snapshot is not None and status != snapshot['status']:
                 raise _EvidenceChanged()
@@ -805,7 +813,8 @@ class NativeNotificationCallbacks:
                 OR a.event_hash IS NOT b.event_hash OR a.payload_sha256 IS NOT b.payload_sha256
                 OR a.route IS NOT b.route OR a.historical IS NOT b.historical
                 OR a.provenance_hash IS NOT b.provenance_hash
-                OR (a.result_hash IS NOT NULL AND a.result_hash IS NOT b.result_hash))''',
+                OR ((a.result_hash IS NOT NULL OR a.route='quarantined')
+                    AND a.result_hash IS NOT b.result_hash))''',
                   (after, before)):
             raise RuntimeError('Durable native notification record was not preserved')
         if exact and exists('''SELECT 1 FROM records a JOIN records b
@@ -938,7 +947,7 @@ class NativeNotificationCallbacks:
     def _receipts_complete(self, snapshot):
         if self._receipt_problem(snapshot) == 'inconsistent':
             raise RuntimeError('Owned notification receipt is inconsistent')
-        return not self._proof.exists('''SELECT 1 FROM records WHERE snap=? AND route!='foreign'
+        return not self._proof.exists('''SELECT 1 FROM records WHERE snap=? AND route='owned'
             AND (state IS NOT 'delivered' OR receipt_check IS NOT 'acknowledged')''',
                                       (snapshot['id'],))
 

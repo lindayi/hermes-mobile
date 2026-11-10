@@ -5,8 +5,9 @@ existing release transaction. The preflight snapshot runs under the deployment
 lock and owned admission gate; it does not drain, copy, import, claim, ACK, or
 replay notifications. After positive native drain, handoff verifies that every
 previously durable outbox record remains bound to the attested native source,
-private outbox, ready owner, and current owner route. Newly retained records are
-accepted only when their payload identity and owner route are positively proven.
+private outbox, ready owner, and current route classification. Newly retained
+records require positively proven payload identity and route classification;
+quarantine classification does not establish an owner/session delivery binding.
 
 Controller and application state are separate: `Paths.state` owns `deploy.lock`
 and `current` (normally `hermes-mobile-deploy`), while the exact `runs.sqlite`
@@ -42,9 +43,13 @@ discarded; scratch errors raise and leave the owned gate closed.
 Delivery is monotonic: a record proven `delivered` must remain `delivered` with
 the same `receipt_id` in every later handoff, probe, and rollback proof, while a
 `pending` record may advance to `delivered`.
-It also requires zero quarantined/unknown records, conflicts, active notification
-workers, shutdown publications, or unpreserved native notifications. The empty
-backlog case is accepted only when the bound outbox is positively empty and the
+It also requires zero unknown records, conflicts, active notification workers,
+shutdown publications, or unpreserved native notifications. Validated retained
+quarantine is not unknown evidence and need not be empty (issue #135). Its exact
+count must agree across the complete outbox snapshot, authenticated native status,
+and detailed readiness; a quarantine-count mismatch against the snapshot fails
+closed immediately. The empty backlog case is accepted only when the bound outbox
+is positively empty and the
 authenticated native status/readiness evidence agrees. Capture, handoff, probe,
 and rollback proof callbacks must return the singleton `True` only after all
 checks pass. `None`, `False`, numeric or truthy status values are not proof.
@@ -67,7 +72,25 @@ and `NotificationCapture.transfer`/`claim` in `backend/native_notifications.py`:
   `busy`, `conflict`, `incomplete`, and `uncertain` markers. A known source state
   alone is never delivery proof: the independent receipt/ACK chain is mandatory.
 - Foreign records must have state `foreign` and source state `foreign-retained`.
-  Unknown/malformed states and mismatched owner/foreign combinations fail closed.
+- Quarantined records must still classify as `quarantined`, have state
+  `quarantined` and source state `unexamined`, no session binding, and null
+  `receipt_id`, `lease_token`, and `lease_until`. Both historical flags are valid.
+  Canonical event/result JSON, producer identity, digest and provenance checks
+  remain mandatory; unknown/malformed states and route mismatches fail closed.
+
+This narrow preservation exception follows `NotificationOutbox.capture` and
+`NotificationCapture.transfer`: unresolved routes are retained without source
+transfer or leasing. Native maintenance already counts quarantine as durably
+retained backlog, and `require_native_readiness` requires idle work and zero
+unpreserved notifications rather than draining that backlog. Capture, handoff,
+activation and rollback therefore preserve quarantine, including exact payload,
+result (also an absent result), provenance, historical flag and source state.
+No callback reclassifies, imports, claims, replays or ACKs it. Activation receipt
+requirements apply only to owned records; successful quarantine preservation is
+neither an owned delivery nor permission to send. Existing owned receipt and
+foreign-retention checks, source/identity/gate checks, and quiescence requirements
+are unchanged. Synthetic cold and mixed-record lifecycle tests cover preservation
+and rollback, while malformed, tampered and changed-route records remain blocked.
 
 `unexamined` is the durable outbox default, not a claim of SDK acceptance.
 Recognized pending records can be captured and retained without manufacturing

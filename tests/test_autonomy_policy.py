@@ -124,6 +124,10 @@ _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE = {
     'deploy/native_notification_release.py': '165622c962554f19263567e7c1bd60ee17cf8e73a9967cc39be995c3d8071ff1',
 }
 
+_ISSUE135_QUARANTINE_PRESERVATION_FIXTURE = {
+    'deploy/native_notification_release.py': 'c3e8c94c3f6d4857e88be86b7eac64203c195fb531ea5f2f9e1c2fedabf7dd93',
+}
+
 # Accepted PR29/PR40/PR42 dependency bytes retained from main5316, independently
 # spelled out (not copied from policy constants at runtime). Issue43 source
 # acceptance does not authorize operational activation.
@@ -393,7 +397,7 @@ def _source_files():
             | _ISSUE120_ORDINARY_REPAIR_ANCHORS_FIXTURE
             | _ISSUE122_SHELL_BUILD_FIXTURE
             | _ISSUE127_BUILD_FIXTURE | _ISSUE131_MOBILE_SCOPE_FIXTURE
-            | _ISSUE133_MODEL_CONTROLS_FIXTURE)
+            | _ISSUE133_MODEL_CONTROLS_FIXTURE | _ISSUE135_QUARANTINE_PRESERVATION_FIXTURE)
 
 
 def _source_ci():
@@ -920,8 +924,8 @@ def test_reviewed_source_fixture_matches_complete_required_contract():
     assert {
         path: digest for path, digest in SOURCE_FINGERPRINTS.items()
         if path == 'deploy/native_notification_release.py'
-    } == _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE
-    for path, digest in _ISSUE96_ROLLBACK_OBSERVATION_FIXTURE.items():
+    } == _ISSUE135_QUARANTINE_PRESERVATION_FIXTURE
+    for path, digest in _ISSUE135_QUARANTINE_PRESERVATION_FIXTURE.items():
         source = Path(__file__).resolve().parents[1] / path
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
     assert {
