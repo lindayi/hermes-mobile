@@ -386,6 +386,9 @@ def read_lifecycle_acknowledgements(state_path, owner):
                 }
         except sqlite3.Error as error:
             raise Blocked('Existing lifecycle adapter state is unavailable') from error
+    inbox_ids = [ack['inbox_id'] for ack in acknowledgements.values() if ack['status'] == 'acked']
+    if len(inbox_ids) != len(set(inbox_ids)):
+        raise Blocked('Existing lifecycle adapter state has a duplicate Inbox binding')
     return acknowledgements
 
 

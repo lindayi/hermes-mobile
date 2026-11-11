@@ -1556,3 +1556,20 @@ def test_merged_is_not_deployed_and_deployed_requires_fresh_exact_controller_led
     before = stale_inbox.read_bytes()
     _assert_deployment_deferred(stale_paths, stale_state, stale_inbox, deployed)
     assert stale_inbox.read_bytes() == before
+
+
+def test_lifecycle_ack_reader_is_owner_scoped_and_rejects_duplicate_inbox_ids(tmp_path):
+    from deploy import workflow_notifications as adapter
+
+    paths, state_dir, _, _, _, _ = adapter_fixture(tmp_path)
+    adapter.process(paths, apply=True, now=NOW)
+    state = state_dir / adapter.ADAPTER_STATE_NAME
+    acks = adapter.read_lifecycle_acknowledgements(state, 'owner-user')
+    assert [ack['status'] for ack in acks.values()] == ['acked']
+    assert adapter.read_lifecycle_acknowledgements(state, 'owner-user') == acks
+    with sqlite3.connect(state) as db:
+        row = db.execute('SELECT * FROM events').fetchone()
+        db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?)',
+                   ('other-event', *row[1:]))
+    with pytest.raises(adapter.Blocked):
+        adapter.read_lifecycle_acknowledgements(state, 'owner-user')
