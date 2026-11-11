@@ -137,7 +137,7 @@ class GitHub:
                                               'browser (0)', 'browser (1)', 'browser (2)',
                                               'browser (3)', 'native', 'source-ci',
                                               'integration-tests', 'attest'], 100)]
-        self.record = {'id': 61, 'name': 'release-51-2', 'expired': False,
+        self.record = {'id': 61, 'name': 'release-51', 'expired': False,
             'size_in_bytes': len(self.zip), 'digest': 'sha256:' + hashlib.sha256(self.zip).hexdigest(),
             'workflow_run': {'id': 51, 'head_sha': 'a' * 40, 'head_branch': 'main',
                              'repository_id': 1399942965, 'head_repository_id': 1399942965}}
@@ -243,7 +243,7 @@ def test_acquire_requires_every_job_in_same_attempt(tmp_path, monkeypatch, chang
         next(job for job in fake.jobs if job['name'] == 'integration-tests')['conclusion'] = 'failure'
     elif change == 'cancelled-integration':
         next(job for job in fake.jobs if job['name'] == 'integration-tests')['conclusion'] = 'cancelled'
-    elif change == 'wrong-attempt': fake.jobs[0]['run_attempt'] = 1
+    elif change == 'wrong-attempt': fake.jobs[0]['run_attempt'] = 3
     elif change == 'wrong-sha': fake.jobs[0]['head_sha'] = 'b' * 40
     elif change == 'wrong-run': fake.jobs[0]['run_id'] = 52
     with pytest.raises(ValueError):
@@ -251,7 +251,7 @@ def test_acquire_requires_every_job_in_same_attempt(tmp_path, monkeypatch, chang
     assert not (tmp_path / 'out').exists()
 
 
-@pytest.mark.parametrize('field,value', [('name', 'release-51-1'), ('expired', True),
+@pytest.mark.parametrize('field,value', [('name', 'release-51-2'), ('expired', True),
     ('size_in_bytes', 9999999999), ('digest', 'sha256:' + '0' * 64),
     ('workflow_run', {'id': 52}), ('id', '../secret')])
 def test_acquire_rejects_bad_artifact_metadata(tmp_path, monkeypatch, field, value):
@@ -340,7 +340,7 @@ def test_workflow_builds_once_browser_consumes_and_main_only_attests():
     for job in ('build', 'browser', 'attest'):
         steps = jobs[job]['steps']
         transfer = next(s for s in steps if 'artifact@' in s.get('uses', ''))
-        assert transfer['with']['name'] == 'release-${{ github.run_id }}-${{ github.run_attempt }}'
+        assert transfer['with']['name'] == 'release-${{ github.run_id }}'
     attest = jobs['attest']
     assert attest['needs'] == ['source-ci', 'integration-tests']
     assert "github.event_name == 'push'" in attest['if']
@@ -400,3 +400,11 @@ def test_bundle_source_mapping_rejects_aliases(tmp_path, alias):
     else: target.hardlink_to(source / 'config.json')
     with pytest.raises(ValueError):
         module.create_bundle(source, public, tmp_path / 'out.tar', 'a' * 40)
+
+
+def test_failed_only_rerun_reuses_earlier_successful_jobs_and_artifact(tmp_path, monkeypatch):
+    fake = GitHub(tmp_path, monkeypatch)
+    fake.jobs[0]['run_attempt'] = 1  # build succeeded in attempt 1; only a flaky shard reran.
+    evidence = fake.module.acquire_verified_bundle(fake.source, 51, tmp_path / 'verified', run=fake.run)
+    assert evidence.run_attempt == 2
+    assert any('/runs/51/jobs?' in c[c.index('--hostname') + 2] for c in fake.calls if '--hostname' in c)

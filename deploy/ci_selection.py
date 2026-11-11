@@ -47,7 +47,8 @@ def select_tests(source, suite, *, shard=0, shards=1):
     portable = python - host_files
     if portable & host_files or portable | host_files != python:
         raise ValueError('Python test partition is incomplete or overlapping')
-    groups = {'python': portable, 'host': host_files, 'native': native_files,
+    # The deploy-time host gate skips suites the hosted native job already ran.
+    groups = {'python': portable, 'host': host_files - native_files, 'native': native_files,
               'browser': {p.relative_to(source).as_posix() for p in browser},
               'js': {p.relative_to(source).as_posix() for p in js}}
     selected = sorted(groups[suite])[shard::shards]

@@ -14,8 +14,6 @@ def source(tmp_path, monkeypatch):
     (source / 'frontend').mkdir()
     (source / 'tests/browser/ui.spec.mjs').write_text('')
     (source / 'tests/browser/unit.test.mjs').write_text('')
-    # Injected command callbacks spawn no children; ignore unrelated /proc churn.
-    monkeypatch.setattr(test_workspace, '_workspace_processes', lambda *a, **k: ({}, False))
     return source
 
 

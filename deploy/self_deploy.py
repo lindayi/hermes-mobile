@@ -68,76 +68,10 @@ def fingerprints(root, names):
     return result
 
 
-# One previously authorized, already-installed repair; not a general approval API.
-# See docs/cron-delivery-registration-repair.md and plugin-release-reconciliation.md.
-INSTALLED_MOBILE_PLUGIN = Path('/home/lindayi/.hermes/plugins/mobile_delivery')
-CRON_REPAIR_OLD_SHA = '3c5ae90cd19fa6b62fa98d45f1ac53ceea67d984c8724d9dc299852f0e42c56f'
-CRON_REPAIR_NEW_SHA = '66b6ab320e8375459d40eb0b63510d07df3b03468b9efb03b0e6b5fa2af38778'
-CRON_REPAIR_MANIFEST_SHA = '7db60cfd51284c9b9fc37cc38ab4fbe2196c5c7399b73ed64e63e35f7ed407a7'
-CRON_REPAIR_PREIMAGE = 'mobile-delivery-before-cron-metadata-20260928.py'
-
-
-def _repair_bytes(path):
-    from deploy.assets import checked_path
-    import stat
-    path = checked_path(path)
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise ValueError('Cron repair evidence must be regular, unaliased files')
-    return path.read_bytes()
-
-
-def _repair_fingerprints(root):
-    """Full repair evidence inventory; only Python bytecode caches are excluded."""
-    from deploy.assets import checked_path
-    import stat
-    root = checked_path(root)
-    if not stat.S_ISDIR(root.lstat().st_mode):
-        raise ValueError('Cron repair evidence directory missing')
-    result = {}
-
-    def visit(directory):
-        # Unlike Path.rglob, scandir propagates incomplete-enumeration errors.
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                file = checked_path(Path(entry.path))
-                if stat.S_ISDIR(file.lstat().st_mode):
-                    if file.name != '__pycache__':
-                        visit(file)
-                else:
-                    result[str(file.relative_to(root))] = hashlib.sha256(_repair_bytes(file)).hexdigest()
-
-    visit(root)
-    return result
-
-
 def check_protected_release(paths, stage, previous):
-    """Read-only preflight: equality or the single evidenced cron metadata repair."""
-    candidate = fingerprints(stage, PROTECTED)
-    baseline = fingerprints(previous, PROTECTED)
-    if candidate == baseline:
-        return False
-    error = 'Unsupported dependency/native changes require operator maintenance'
-    plugin_file = 'hermes-plugin/mobile_delivery/__init__.py'
-    old = {'mobile_delivery/__init__.py': CRON_REPAIR_OLD_SHA,
-           'mobile_delivery/plugin.yaml': CRON_REPAIR_MANIFEST_SHA}
-    new = {**old, 'mobile_delivery/__init__.py': CRON_REPAIR_NEW_SHA}
-    # Compare the entire protected mapping, not just the allowed filename.
-    if (baseline.get(plugin_file) != CRON_REPAIR_OLD_SHA
-            or candidate != {**baseline, plugin_file: CRON_REPAIR_NEW_SHA}):
-        raise RuntimeError(error)
-    try:
-        installed = {'mobile_delivery/' + name: digest
-                     for name, digest in _repair_fingerprints(INSTALLED_MOBILE_PLUGIN).items()}
-        preimage = _repair_bytes(paths.state / CRON_REPAIR_PREIMAGE)
-        if (_repair_fingerprints(previous / 'hermes-plugin') != old
-                or _repair_fingerprints(stage / 'hermes-plugin') != new
-                or _repair_fingerprints(paths.source / 'hermes-plugin') != new
-                or installed != new or hashlib.sha256(preimage).hexdigest() != CRON_REPAIR_OLD_SHA):
-            raise RuntimeError(error + ': cron repair evidence mismatch')
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(error + ': cron repair evidence unavailable or unsafe') from exc
-    return True
+    """Read-only preflight: routine releases never change dependency/native files."""
+    if fingerprints(stage, PROTECTED) != fingerprints(previous, PROTECTED):
+        raise RuntimeError('Unsupported dependency/native changes require operator maintenance')
 
 
 def deploy(paths, **kwargs):
@@ -311,7 +245,8 @@ def _deploy(paths, *, frontend_only=False, bootstrap=False, checks, verify, run=
             raise RuntimeError('Existing run database is required; missing does not mean idle')
     stage = stage_release(paths.source, paths.state / 'releases' / release_id, git_sha=git_sha)
     previous = current.resolve() if current.exists() else None
-    reconciled = check_protected_release(paths, stage, previous) if previous else False
+    if previous:
+        check_protected_release(paths, stage, previous)
     hosted_status = {}
     if hosted_run_id is None:
         from deploy.frontend_release import build_frontend
@@ -330,8 +265,6 @@ def _deploy(paths, *, frontend_only=False, bootstrap=False, checks, verify, run=
         run_host_checks(paths, stage, run=run)
     if fingerprints(stage, (*SOURCE_TREES, *SOURCE_FILES, 'public')) != frozen:
         raise RuntimeError('Staged source changed during checks; refusing untested release')
-    if reconciled and not check_protected_release(paths, stage, previous):
-        raise RuntimeError('Cron repair baseline changed during checks')
     backup = paths.state / 'backups' / release_id
     backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     journal = None
@@ -347,8 +280,6 @@ def _deploy(paths, *, frontend_only=False, bootstrap=False, checks, verify, run=
             journal.set_deployment_gate(release_id)
             gate_acquired = True
             wait_idle(journal, bootstrap=bootstrap, timeout=idle_timeout, sleep=sleep)
-        if reconciled and not check_protected_release(paths, stage, previous):
-            raise RuntimeError('Cron repair baseline changed before publication')
         publish_assets(stage / 'public', paths.webroot, backup)
         if journal:
             activated = True
