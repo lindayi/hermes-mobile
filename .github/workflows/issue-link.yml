@@ -24,6 +24,7 @@ jobs:
       checks: write
       issues: read
       pull-requests: read
+      statuses: write
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -64,7 +65,7 @@ jobs:
                   repository(owner: $owner, name: $repo) {
                     pullRequest(number: $number) {
                       headRefOid
-                      closingIssuesReferences(first: 20) {
+                      closingIssuesReferences(first: 100) {
                         nodes { number state repository { nameWithOwner } }
                       }
                     }
@@ -87,5 +88,10 @@ jobs:
               ...context.repo, check_run_id: check.id, status: 'completed', conclusion,
               completed_at: new Date().toISOString(),
               output: {title: conclusion === 'success' ? 'Issue linked' : 'Issue link missing', summary},
+            });
+            // Keep the legacy same-name commit status in sync so older heads unblock.
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: head, context: 'issue-link', target_url: runUrl,
+              state: conclusion, description: summary.slice(0, 140),
             });
             if (conclusion !== 'success') core.setFailed(summary);

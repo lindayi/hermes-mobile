@@ -224,9 +224,29 @@ def test_reservation_survives_crash_before_response(tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         run(tmp_path, Crash(pr=pull(mergeable_state="behind")))
-    api = FakeApi(pr=pull(mergeable_state="behind"))
-    assert outcome(run(tmp_path, api)) == "waiting"
+    api = FakeApi(pr=pull(mergeable_state="behind", head={**pull()["head"], "sha": "d" * 40}))
+    # Even a new head cannot dispatch while an earlier dispatch is unreconciled.
+    assert outcome(run(tmp_path, api)) == "blocked"
     assert api.writes == []
+
+
+def test_retargeted_pull_is_never_acted_on(tmp_path):
+    api = FakeApi()
+    run(tmp_path, api, apply=False)
+    api.reviews = []
+    run(tmp_path, api)  # enroll; review requested
+    api.reviews = [review()]
+    api.pr = pull(base={"ref": "release", "sha": MAIN, "repo": {"id": REPOSITORY_ID}})
+    assert outcome(run(tmp_path, api)) == "not_main_targeted"
+    assert not any(route.endswith("/merge") for _, route, _ in api.writes)
+
+
+def test_reenrollment_does_not_repeat_review_request(tmp_path):
+    api = FakeApi(reviews=[])
+    run(tmp_path, api)
+    api.comments = [comment(), comment(id=2)]
+    assert outcome(run(tmp_path, api)) == "awaiting_review"
+    assert len(api.writes) == 1
 
 
 def test_reconcile_budget_exhausts_and_blocks(tmp_path):

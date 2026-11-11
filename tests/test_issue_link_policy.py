@@ -24,7 +24,7 @@ def issue(number, *, state="OPEN", repository="lindayi/hermes-mobile", node_id=N
 HARNESS = r"""
 const input = JSON.parse(process.argv[1]);
 const p = input.payload;
-const calls = {checkCreates: [], checkUpdates: [], graphql: 0};
+const calls = {checkCreates: [], checkUpdates: [], statuses: [], graphql: 0};
 const errors = [];
 const pull = p.pull || {number: 12, state: 'open', head: {sha: p.head}, base: {ref: 'main'}};
 const context = {
@@ -34,6 +34,7 @@ const context = {
 };
 const github = {
   rest: {
+    repos: {createCommitStatus: async args => { calls.statuses.push(args); return {data: {}}; }},
     pulls: {get: async () => ({data: pull})},
     checks: {
       create: async args => { calls.checkCreates.push(args); return {data: {id: 77}}; },
@@ -79,7 +80,8 @@ def test_workflow_is_metadata_only_with_minimal_permissions():
     policy = workflow()
     job = policy["jobs"]["issue-link"]
     assert policy["permissions"] == {}
-    assert job["permissions"] == {"checks": "write", "issues": "read", "pull-requests": "read"}
+    assert job["permissions"] == {"checks": "write", "issues": "read", "pull-requests": "read",
+                                  "statuses": "write"}
     assert all("checkout" not in step.get("uses", "") and "run" not in step for step in job["steps"])
 
 
@@ -89,6 +91,9 @@ def test_open_canonical_issue_reference_succeeds_on_exact_head():
     assert result["calls"]["checkCreates"][0]["head_sha"] == HEAD_SHA
     assert result["calls"]["checkCreates"][0]["name"] == "issue-link"
     assert conclusion(result) == "success"
+    # The legacy same-name commit status follows the check so older heads unblock.
+    assert result["calls"]["statuses"][-1]["state"] == "success"
+    assert result["calls"]["statuses"][-1]["sha"] == HEAD_SHA
 
 
 @pytest.mark.parametrize("refs", [
@@ -98,6 +103,7 @@ def test_missing_closed_or_foreign_reference_fails(refs):
     result = run_pipeline(make_payload(refs=refs))
     assert result["errors"]
     assert conclusion(result) == "failure"
+    assert result["calls"]["statuses"][-1]["state"] == "failure"
 
 
 def test_changed_head_fails_instead_of_passing_stale_metadata():

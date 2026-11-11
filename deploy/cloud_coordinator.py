@@ -455,7 +455,7 @@ class Coordinator:
     def _request_review(self, state, key, number, apply):
         if not apply:
             return "planned"
-        state["actions"][key] = {"state": "reserved"}
+        state["actions"][key] = {"state": "pending"}
         self.store.save(state)
         try:
             self.api.write(f"repos/{REPOSITORY}/pulls/{number}/requested_reviewers",
@@ -469,7 +469,7 @@ class Coordinator:
     def _merge(self, state, key, enrollment, pull, apply):
         if not apply:
             return "merge_planned"
-        state["actions"][key] = {"state": "reserved"}
+        state["actions"][key] = {"state": "pending"}
         self.store.save(state)
         head = pull["head"]["sha"]
         try:
@@ -500,6 +500,17 @@ class Coordinator:
             return "closed"
         enrollment["head"] = head
         if enrollment.get("blocked"):
+            return "blocked"
+        base = pull.get("base") or {}
+        if (base.get("ref") != MAIN_BRANCH or (base.get("repo") or {}).get("id") != REPOSITORY_ID
+                or ((pull.get("head") or {}).get("repo") or {}).get("id") != REPOSITORY_ID):
+            return "not_main_targeted"
+        if any(action.get("issue") == number and action.get("state") == "reserved"
+               for action in state["actions"].values()):
+            # A crash between reservation and response leaves dispatch unknown;
+            # fence the PR across head/main/enrollment changes for owner review.
+            enrollment["blocked"] = "execution_uncertain"
+            self._record_event(state, enrollment, "execution_uncertain", incident="reserved")
             return "blocked"
         if pull.get("draft") is not False:
             return "draft"
@@ -533,7 +544,7 @@ class Coordinator:
 
         review = latest_copilot_review(reviews)
         if review is None or review.get("commit_id") != head:
-            key = f"review-request:{generation}:{head}"
+            key = f"review-request:{number}:{head}"
             if key in state["actions"]:
                 return "awaiting_review"
             return self._request_review(state, key, number, apply)
