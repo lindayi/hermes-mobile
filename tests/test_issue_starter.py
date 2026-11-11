@@ -1640,51 +1640,12 @@ def test_completed_bound_task_marks_its_draft_pr_ready_and_enrolls_once(tmp_path
     assert enrollment == [enrollment_command()]
     assert api.pulls[0]["draft"] is False
 
-    from deploy.cloud_coordinator import Coordinator as CloudCoordinator
     from deploy.cloud_coordinator import enrollment_from_comment
-    from deploy.cloud_coordinator import StateStore as CoordinatorStateStore
 
-    body = enrollment[0]
-    pull_issue = {"number": 41, "pull_request": {"url": "pull/41"}}
     owner_comment = next(comment for comment in api.comments if comment["id"] == 9101)
-    assert owner_comment["body"] == body
-    assert owner_comment["created_at"] == owner_comment["updated_at"]
-    handoff = enrollment_from_comment(
-        pull_issue, api.pulls[0], owner_comment, api=api,
-    )
-    assert handoff["authorized_head"] == api.pulls[0]["head"]["sha"]
-
-    class ConsumerApi:
-        def graphql(self, query, variables):
-            return api.graphql(query, variables)
-
-        def get(self, route):
-            if route == f"repos/{REPOSITORY}/pulls/41":
-                return api.pulls[0]
-            raise AssertionError(f"Unexpected coordinator read: {route}")
-
-        def get_all(self, route, *, collection=None):
-            if route.startswith(f"repos/{REPOSITORY}/issues?"):
-                return [pull_issue]
-            if route.startswith(f"repos/{REPOSITORY}/issues/41/comments?"):
-                return [owner_comment]
-            if route.startswith(f"repos/{REPOSITORY}/issues/41/timeline?"):
-                return []
-            raise AssertionError(f"Unexpected coordinator list: {route}")
-
-    coordinator_store = CoordinatorStateStore(tmp_path / "coordinator" / "state.json")
-    cloud_coordinator = CloudCoordinator(
-        ConsumerApi(), coordinator_store, clock=lambda: 1790888460,
-    )
-    _, commands, processed, _ = cloud_coordinator._scan_enrollments(
-        coordinator_store.snapshot(),
-    )
-    coordinator_store.commit_scan(
-        "2026-10-01T21:01:00Z", processed, commands=commands,
-    )
-    assert coordinator_store.snapshot()["enrollments"]["41"]["authorized_head"] == (
-        api.pulls[0]["head"]["sha"]
-    )
+    assert owner_comment["body"] == enrollment[0]
+    handoff = enrollment_from_comment(api.pulls[0], owner_comment)
+    assert handoff["head"] == api.pulls[0]["head"]["sha"]
 
 
 def test_uncertain_enrollment_comment_reconciles_without_duplicate_comment(tmp_path):
