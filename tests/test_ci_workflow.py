@@ -50,7 +50,7 @@ def test_hosted_gate_requires_every_suite_without_optional_failures():
             assert job['needs'] == 'build'
             download = next(step for step in job['steps'] if step.get('uses', '').startswith('actions/download-artifact@'))
             assert download['with'] == {
-                'name': 'release-${{ github.run_id }}-${{ github.run_attempt }}',
+                'name': 'release-${{ github.run_id }}',
                 'path': '${{ runner.temp }}/bundle',
             }
             assert 'deploy.release_artifact unpack --bundle "$RUNNER_TEMP/bundle/release.tar" --destination "$RUNNER_TEMP/consumed"' in run
@@ -115,7 +115,7 @@ def test_build_once_bundle_is_attested_only_after_trusted_main_gate():
     assert sum('deploy.release_artifact build' in command for command in commands) == 1
     assert any('deploy.release_artifact build --bundle "$RUNNER_TEMP/release.tar"' in step.get('run', '') for step in jobs['build']['steps'])
     upload = next(step for step in jobs['build']['steps'] if step.get('uses', '').startswith('actions/upload-artifact@'))
-    assert upload['with']['name'] == 'release-${{ github.run_id }}-${{ github.run_attempt }}'
+    assert upload['with']['name'] == 'release-${{ github.run_id }}'
     assert upload['with']['path'] == '${{ runner.temp }}/release.tar'
     assert upload['with']['if-no-files-found'] == 'error'
     attest = jobs['attest']
@@ -160,7 +160,7 @@ def test_hosted_setup_uses_pinned_dependencies_without_deploy_access():
     text = path.read_text()
     assert 'npm ci --ignore-scripts' in text
     assert 'pip install -r requirements.lock' in text
-    assert './node_modules/.bin/playwright install --with-deps chromium' in text
+    assert './node_modules/.bin/playwright install chromium' in text and 'playwright install-deps chromium' in text
     assert 'PLAYWRIGHT_BROWSERS_PATH' in text
     for step in setup['runs']['steps']:
         if 'uses' in step:

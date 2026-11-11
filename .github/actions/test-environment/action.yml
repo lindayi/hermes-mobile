@@ -37,7 +37,10 @@ runs:
       shell: bash
       run: |
         export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/pw-browsers"
-        ./node_modules/.bin/playwright install --with-deps chromium
+        ./node_modules/.bin/playwright install chromium
+        # Hosted images already carry Chromium's system libraries; an apt mirror
+        # outage must not fail CI. Browser tests still fail if a library is missing.
+        timeout 300 ./node_modules/.bin/playwright install-deps chromium || echo '::warning::playwright install-deps failed; relying on runner image libraries'
         browser=$(node -p "require('playwright').chromium.executablePath()")
         test -x "$browser"
         printf 'PLAYWRIGHT_BROWSERS_PATH=%s\nHERMES_BROWSER=%s\n' "$PLAYWRIGHT_BROWSERS_PATH" "$browser" >> "$GITHUB_ENV"

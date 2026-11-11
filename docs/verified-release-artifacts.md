@@ -17,15 +17,15 @@ full every time; host evidence is not cached or uploaded.
 
 1. `build` checks out the exact event SHA, builds generated assets once, and runs:
    `python -B -m deploy.release_artifact build --bundle "$RUNNER_TEMP/release.tar"`.
-2. The artifact is named `release-${{ github.run_id }}-${{ github.run_attempt }}`.
+2. The artifact is named `release-${{ github.run_id }}` (overwritten if `build` reruns).
    Every browser shard downloads that artifact, validates/unpacks it against its
    own checkout with `deploy.release_artifact unpack`, and passes its `public`
    directory to the managed CI runner. Browser jobs never rebuild those assets.
 3. The fail-closed `source-ci` aggregate requires `build`, syntax/secret checks,
    JavaScript, both Python shards, all four browser shards and the disposable
    hosted `native` job. Failure, cancellation and skipping cannot satisfy it.
-   The native job covers the explicit public-runtime subset; the complete
-   installed/private host partition still runs separately at deployment.
+   The native job covers the explicit public-runtime subset; deployment runs only
+   the remaining private-host files of `.github/host-tests.json`.
 4. The always-evaluated `integration-tests` job depends on `source-ci` and succeeds
    only when that complete hosted aggregate succeeds in the same run. Only
    successful `push`/`refs/heads/main` runs in `lindayi/hermes-mobile` reach
@@ -35,8 +35,9 @@ full every time; host evidence is not cached or uploaded.
    No deployment credential, SSH key, native evidence or private runtime is
    uploaded. All external actions are full-commit pinned.
 
-A partial rerun cannot reuse an earlier attempt's artifact or jobs. **Rerun all
-jobs** when another attempt is required. Artifact retention is seven days;
+"Re-run failed jobs" is supported: verification reads the latest result of every
+job in the run (each must be a success from an attempt no later than the run's
+current attempt), and the single per-run artifact is reused. Artifact retention is seven days;
 expired/unavailable artifacts block deployment, not trigger a rebuild.
 
 ## Public format and bounds
@@ -78,11 +79,11 @@ All members are checked before any destination files are written.
   pins repository `lindayi/hermes-mobile` / ID `1399942965`, workflow
   `.github/workflows/ci.yml` / ID `372155405`, `push`, `main`, exact source SHA,
   completed success and the latest run attempt.
-- Requires the exact complete set of successful attempt-specific jobs:
+- Requires the exact complete set of successful jobs (latest result per job):
   `build`, `checks`, `js`, `python (0)`, `python (1)`, `browser (0..3)`,
   `native`, `source-ci`, `integration-tests`, and `attest`. Job IDs must be unique;
-  missing, duplicate, extra, skipped or previous-attempt jobs fail closed.
-- Selects one unexpired exact-run/attempt artifact, validates its repository/SHA
+  missing, duplicate, extra or skipped jobs fail closed.
+- Selects one unexpired exact-run artifact, validates its repository/SHA
   metadata, downloads by numeric artifact ID and checks GitHub's transport
   SHA-256 when supplied.
 - Invokes the real installed `gh attestation verify` with explicit repository,
