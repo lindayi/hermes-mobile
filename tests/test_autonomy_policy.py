@@ -60,7 +60,7 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
     'deploy/ci_selection.py': '653844a40c1cc924991d3f574aba4707f02fb3de4afbc277d11842ae518d13d5',
-    'deploy/test_workspace.py': 'd316b53c9950e26e3f1e47ea0385150211008288ec5667b609cebe446b21fc4a',
+    'deploy/test_workspace.py': '5528dcdbb75073178fb97b57555fc26589bf10c3bbb6293aae2e1e6860444adc',
     'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
     'scripts/prepare_native_test_runtime.py': '798195e6d9b284bae69cb6e27cf8dc7ad5ffc6dce62939b137fb6c6b370b58a8',
     'scripts/test.py': 'e6a53a5c0f7ff98f35b2efb2282cd65db65eacc2d94af9b07516ceaaffc4ec7c',

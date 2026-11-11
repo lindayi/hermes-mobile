@@ -270,3 +270,45 @@ def test_cleanup_cli_is_dry_run_until_apply(tmp_path, capsys):
     assert stale.exists() and 'would remove' in capsys.readouterr().out
     assert cli.main(['--root', str(root), '--apply']) == 0
     assert not stale.exists()
+
+
+def test_cleanup_never_deletes_unrecognized_marker(tmp_path):
+    root = tmp_path / 'managed'
+    module._root(root)
+    foreign = root / 'r-foreign1'
+    foreign.mkdir()
+    (foreign / '.run.json').write_text('{"created": 1}')
+    (foreign / '.lock').write_text('')
+    module.cleanup(root, apply=True)
+    assert foreign.exists()
+
+
+def test_concurrent_first_runs_see_marked_root(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    root = tmp_path / 'managed'
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _: module._root(root), range(8)))
+    assert all(r == root for r in results)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['managed']
+
+
+def test_sigterm_to_runner_kills_tests_and_cleans_scratch(tmp_path):
+    source = fixture_source(tmp_path)
+    started = tmp_path / 'started'
+    (source / 'tests/test_wait.py').write_text(
+        'import time, pathlib\n'
+        f'def test_wait():\n    pathlib.Path({str(started)!r}).write_text("x")\n    time.sleep(60)\n')
+    root = tmp_path / 'managed'
+    script = (f'import sys; sys.path.insert(0, {str(SOURCE)!r}); from deploy.test_workspace import run_suite; '
+              f'run_suite({str(source)!r}, python={sys.executable!r}, node={NODE!r}, suite="python", '
+              f'root={str(root)!r}, extra_args=("tests/test_wait.py",))')
+    runner = subprocess.Popen([sys.executable, '-c', script], stdout=subprocess.DEVNULL)
+    deadline = time.time() + 20
+    while not started.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert started.exists()
+    runner.terminate()
+    assert runner.wait(timeout=15) != 0
+    [record] = root.glob('r-*')
+    assert json.loads((record / '.run.json').read_text())['state'] == 'failed'
+    assert not (record / 'home').exists()

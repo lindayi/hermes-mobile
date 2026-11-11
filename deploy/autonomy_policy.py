@@ -180,7 +180,7 @@ SOURCE_FINGERPRINTS = {
     'deploy/release_artifact.py': '59c5b1960e2aed430aa63cf4967bcfce28ca5d38c0aefbff1a6fc42b35ec5b50',
     'deploy/self_deploy.py': '1a72fcf9ac6018a449bcac7bb76764af3f144817e8f6e764eb49aa5a95241363',
     'deploy/ci_selection.py': '653844a40c1cc924991d3f574aba4707f02fb3de4afbc277d11842ae518d13d5',
-    'deploy/test_workspace.py': 'd316b53c9950e26e3f1e47ea0385150211008288ec5667b609cebe446b21fc4a',
+    'deploy/test_workspace.py': '5528dcdbb75073178fb97b57555fc26589bf10c3bbb6293aae2e1e6860444adc',
     'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
     'scripts/prepare_native_test_runtime.py': '798195e6d9b284bae69cb6e27cf8dc7ad5ffc6dce62939b137fb6c6b370b58a8',
     'scripts/test.py': 'e6a53a5c0f7ff98f35b2efb2282cd65db65eacc2d94af9b07516ceaaffc4ec7c',

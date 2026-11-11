@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT_MARKER = {'kind': 'hermes-mobile-tests-v1', 'uid': os.getuid()}
@@ -39,10 +40,15 @@ def _root(root=None):
     if root.resolve() != root:
         raise ValueError(f'Symlink or non-canonical root: {root}')
     if not root.exists():
-        root.mkdir(mode=0o700, exist_ok=True)
-        marker = root / '.managed.json'
-        if not marker.exists():
-            marker.write_text(json.dumps(ROOT_MARKER))
+        # Publish a fully marked directory atomically; concurrent first runs agree.
+        staging = Path(tempfile.mkdtemp(prefix=f'.{root.name}-', dir=root.parent))
+        (staging / '.managed.json').write_text(json.dumps(ROOT_MARKER))
+        try:
+            os.rename(staging, root)
+        except OSError:
+            shutil.rmtree(staging)
+            if not root.exists():
+                raise
     info = root.lstat()
     if not root.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError(f'Managed test root must be a private same-user directory: {root}')
@@ -89,6 +95,10 @@ def cleanup(root=None, *, apply=False, now=None, max_records=3,
             if path.is_symlink() or not path.is_dir():
                 raise ValueError
             data = json.loads((path / '.run.json').read_text())
+            if (not isinstance(data, dict) or {k: data.get(k) for k in ROOT_MARKER} != ROOT_MARKER
+                    or data.get('state') not in ('running', 'failed')
+                    or not isinstance(data.get('created'), (int, float))):
+                raise ValueError
             with _try_lock(path / '.lock') as free:
                 if not free:
                     report.append(dict(path=str(path), action='skip', bytes=0, reason='active'))
@@ -168,6 +178,7 @@ def run_suite(source, *, python, node, suite='all', assets=None,
     The injected ``run`` callback is a synchronous test seam that must honor
     ``check=True``; the real path streams output and kills the process group.
     """
+    _terminate_on_signals()
     if type(node_concurrency) is not int or not 1 <= node_concurrency <= 4:
         raise ValueError('node_concurrency must be an integer from 1 to 4')
     source = Path(source).absolute()
@@ -191,6 +202,14 @@ def run_suite(source, *, python, node, suite='all', assets=None,
     finally:
         os.close(lock)
         _auto_cleanup(root)
+
+
+def _terminate_on_signals():
+    """Turn SIGTERM/SIGHUP into SystemExit so finally blocks kill and clean up."""
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(sig) is signal.SIG_DFL:
+                signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
 
 
 def _execute(command, *, workspace, lock, check, **kwargs):
