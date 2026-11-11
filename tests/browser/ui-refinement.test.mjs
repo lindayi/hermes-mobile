@@ -23,7 +23,7 @@ test('deliberate swipe reveals only one guarded Delete; vertical intent, cancell
  assert.equal(swipe(h,rows[0],-150).defaultPrevented,true);assert.equal(remove.hidden,false);rows[0].click();await tick();assert.equal(h.doc.querySelector('.messages'),null,'drag synthetic click suppressed');assert.equal(h.doc.querySelector('[role=dialog]'),null,'full swipe never confirms or deletes');
  swipe(h,rows[1],-60);assert.equal(remove.hidden,true);assert.equal(h.doc.querySelector('[data-delete-id=s2]').hidden,false);
  swipe(h,rows[1],70);assert.equal(h.doc.querySelector('[data-delete-id=s2]').hidden,true);
- button(h.doc,'Conversation actions: First chat').click();assert.equal(remove.hidden,false);h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(remove.hidden,true);
+ button(h.doc,'Session actions: First chat').click();assert.equal(remove.hidden,false);h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(remove.hidden,true);
  rows[0].dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'F10',shiftKey:true,bubbles:true,cancelable:true}));assert.equal(remove.hidden,false);h.doc.body.dispatchEvent(new h.win.Event('pointerdown',{bubbles:true}));assert.equal(remove.hidden,true);
  rows[0].dispatchEvent(new h.win.MouseEvent('contextmenu',{bubbles:true,cancelable:true}));assert.equal(remove.hidden,false);remove.click();await tick();assert.ok(h.doc.querySelector('[role=dialog]'));assert.match(h.doc.querySelector('[role=dialog]').textContent,/First chat/);button(h.doc,'Cancel').click();assert.equal(h.calls.some(c=>c.options.method==='DELETE'),false);
  }finally{h.close();}
@@ -36,11 +36,11 @@ test('public context compression is folded process history with safe full text; 
 });
 test('filter dropdown shares New chat row, restores focus, and preserves typed query while resetting pagination',async()=>{
  const h=await setup();try{
- const filter=button(h.doc,'Filter conversations');assert.ok(filter,'icon filter trigger replaces permanent segments');assert.equal(filter.parentElement,button(h.doc,'New chat').parentElement);assert.equal(filter.parentElement,button(h.doc,'Search conversations').parentElement);assert.ok(filter.querySelector('svg'));assert.equal(filter.getAttribute('aria-expanded'),'false');
+ const filter=button(h.doc,'Filter sessions');assert.ok(filter,'icon filter trigger replaces permanent segments');assert.equal(filter.parentElement,button(h.doc,'New chat').parentElement);assert.equal(filter.parentElement,button(h.doc,'Search sessions').parentElement);assert.ok(filter.querySelector('svg'));assert.equal(filter.getAttribute('aria-expanded'),'false');
  const menu=h.doc.querySelector('#conversation-filter');assert.equal(menu.hidden,true);assert.deepEqual([...menu.querySelectorAll('[data-kind]')].map(b=>b.dataset.kind),['chats','all','cron','tests']);assert.equal(menu.querySelector('[aria-pressed=true]').dataset.kind,'chats');
  filter.click();assert.equal(menu.hidden,false);menu.dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(menu.hidden,true);assert.equal(h.doc.activeElement,filter);
- button(h.doc,'Next').click();await tick();button(h.doc,'Search conversations').click();h.doc.querySelector('[name=search]').value='typed & exact';button(h.doc,'Filter conversations').click();button(h.doc,'Cron').click();await tick();
- const url=new URL(h.calls.filter(c=>c.path.startsWith('/sessions?')).at(-1).path,'https://x');assert.equal(url.searchParams.get('kind'),'cron');assert.equal(url.searchParams.get('q'),'typed & exact');assert.equal(url.searchParams.get('offset'),'0');assert.equal(h.doc.querySelector('[name=search]').value,'typed & exact');assert.equal(h.doc.activeElement,button(h.doc,'Filter conversations'));assert.match(button(h.doc,'Filter conversations').title,/Cron/);
- button(h.doc,'Filter conversations').click();h.doc.body.dispatchEvent(new h.win.Event('pointerdown',{bubbles:true}));assert.equal(h.doc.querySelector('#conversation-filter').hidden,true);
+ button(h.doc,'Next').click();await tick();button(h.doc,'Search sessions').click();h.doc.querySelector('[name=search]').value='typed & exact';button(h.doc,'Filter sessions').click();button(h.doc,'Cron').click();await tick();
+ const url=new URL(h.calls.filter(c=>c.path.startsWith('/sessions?')).at(-1).path,'https://x');assert.equal(url.searchParams.get('kind'),'cron');assert.equal(url.searchParams.get('q'),'typed & exact');assert.equal(url.searchParams.get('offset'),'0');assert.equal(h.doc.querySelector('[name=search]').value,'typed & exact');assert.equal(h.doc.activeElement,button(h.doc,'Filter sessions'));assert.match(button(h.doc,'Filter sessions').title,/Cron/);
+ button(h.doc,'Filter sessions').click();h.doc.body.dispatchEvent(new h.win.Event('pointerdown',{bubbles:true}));assert.equal(h.doc.querySelector('#conversation-filter').hidden,true);
  }finally{h.close();}
 });

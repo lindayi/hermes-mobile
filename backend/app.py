@@ -13,6 +13,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.datastructures import Headers, MutableHeaders
 
 from .auth import AuthService, build_auth_router
@@ -1012,5 +1013,7 @@ def create_app(settings=None, *, gateway_client=None):
         return await runtime_for(user).decide(user,aid,body['decision'])
 
     # API routes precede the public-only static mount. No backend/state directory is served.
-    app.mount('/hermes',StaticFiles(directory=FRONTEND_ROOT,html=True),name='frontend')
+    # Compress only public static assets (ui.mjs is ~190 KB raw, ~45 KB gzipped).
+    # API responses stay uncompressed so secrets never share a compressed stream.
+    app.mount('/hermes',GZipMiddleware(StaticFiles(directory=FRONTEND_ROOT,html=True),minimum_size=1024),name='frontend')
     return app

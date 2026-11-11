@@ -31,6 +31,20 @@ def test_app_requires_auth_and_reads_native_sessions_without_mutations(tmp_path)
         assert client.get(BASE+'/sessions').headers['cache-control']=='no-store'
 
 
+def test_static_assets_are_compressed_but_api_responses_are_not(tmp_path):
+    from backend.app import create_app, Settings
+    home=tmp_path/'hermes'; home.mkdir(); create_native_db(home/'state.db')
+    settings=Settings(state_dir=tmp_path/'app-state', profiles={'default':home}, bootstrap_secret=BOOTSTRAP)
+    with TestClient(create_app(settings),base_url=ORIGIN) as client:
+        asset=client.get('/hermes/ui.mjs',headers={'Accept-Encoding':'gzip'})
+        assert asset.status_code==200
+        assert asset.headers['content-encoding']=='gzip'
+        assert len(asset.content)>100000  # decoded body is the full module
+        assert asset.headers['content-security-policy']
+        api=client.get(BASE+'/auth/me',headers={'Accept-Encoding':'gzip'})
+        assert 'content-encoding' not in api.headers
+
+
 def test_security_headers_origin_and_no_open_admin_proxy(tmp_path):
     from backend.app import create_app, Settings
     home=tmp_path/'hermes'; home.mkdir(); create_native_db(home/'state.db')

@@ -80,7 +80,7 @@ test('Clear read confirms all pages, cancel does nothing, no passkey and unread/
  const h=await setup();try{
   const clear=control(h.doc,'Clear read');assert.equal(clear.disabled,false);clear.click();await tick();
   const dialog=h.doc.querySelector('[role=dialog]');assert.ok(dialog);
-  assert.match(dialog.textContent,/all.*read/i);assert.match(dialog.textContent,/unread/i);assert.match(dialog.textContent,/approval/i);assert.match(dialog.textContent,/conversation/i);
+  assert.match(dialog.textContent,/all.*read/i);assert.match(dialog.textContent,/unread/i);assert.match(dialog.textContent,/approval/i);assert.match(dialog.textContent,/session history/i);
   control(h.doc,'Cancel').click();await tick();assert.equal(h.calls.some(c=>c.path==='/inbox/clear-read'),false);
   control(h.doc,'Clear read').click();await tick();control(h.doc,'Confirm change').click();await tick();
   assert.equal(h.calls.filter(c=>c.path==='/inbox/clear-read').length,1);

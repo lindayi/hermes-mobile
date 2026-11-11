@@ -138,7 +138,7 @@ test('count-saturated snapshots show newest receipts chronologically and disclos
   items.push(item('count-200',{body:'Newest completion'}));pending.resolve({items});await tick();pending=null;
   assert.ok(h.doc.querySelector('[data-background-id="count-200"]'),'latest completion survives count saturation');
   assert.deepEqual([...h.doc.querySelectorAll('[data-background-id]')].map(c=>c.dataset.backgroundId),items.slice(1).map(i=>i.id),'newest bounded window retains chronological display');
-  const note=h.doc.querySelector('.background-omitted');assert.ok(note && !note.hidden);assert.match(note.textContent,/older background results.*omitted.*Full reports remain stored with this conversation/i);
+  const note=h.doc.querySelector('.background-omitted');assert.ok(note && !note.hidden);assert.match(note.textContent,/older background results.*omitted.*Full reports remain stored with this session/i);
   assert.equal(h.doc.querySelector('[data-background-id="count-100"]'),retained);assert.equal(h.doc.querySelector('.assistant-message'),native);assert.equal(h.doc.querySelector('textarea'),textarea);assert.equal(h.doc.activeElement,textarea);assert.equal(textarea.value,'Keep saturated draft');assert.deepEqual([textarea.selectionStart,textarea.selectionEnd],[2,8]);
   await h.event('focus');assert.equal(h.doc.querySelectorAll('.background-omitted').length,1);assert.equal(h.doc.querySelector('[data-background-id="count-100"]'),retained);assert.equal([...h.timers.values()].filter(t=>t.delay===30000).length,1);assert.equal(withoutUnitPresence(h.calls).filter(c=>c.options.method && c.options.method!=='GET').length,0);
   items=[];await h.event('focus');assert.equal(h.doc.querySelectorAll('[data-background-id],.background-omitted').length,0,'reset also clears omission note');
@@ -157,7 +157,7 @@ test('body-saturated snapshots keep newest complete reports and fill remaining c
   assert.deepEqual([...h.doc.querySelectorAll('[data-background-id]')].map(c=>c.dataset.backgroundId),['small-old',...items.slice(2).map(i=>i.id)],'reappearing older reports stay chronological');
   assert.equal(h.doc.querySelector('[data-background-id="body-7"]'),retained);
   for(const card of h.doc.querySelectorAll('[data-background-id]'))assert.equal(card.querySelector('.markdown').textContent,items.find(i=>i.id===card.dataset.backgroundId).body,'individual reports are never truncated');
-  const bodies=[...h.doc.querySelectorAll('[data-background-id] .markdown')];assert.ok(bodies.reduce((sum,b)=>sum+b.textContent.length,0)<=2097152);assert.match(h.doc.querySelector('.background-omitted').textContent,/older background results.*omitted.*Full reports remain stored with this conversation/i);
+  const bodies=[...h.doc.querySelectorAll('[data-background-id] .markdown')];assert.ok(bodies.reduce((sum,b)=>sum+b.textContent.length,0)<=2097152);assert.match(h.doc.querySelector('.background-omitted').textContent,/older background results.*omitted.*Full reports remain stored with this session/i);
   items.push(item('new-small-2',{body:'Another new report'}));await h.event('focus');assert.ok(h.doc.querySelector('[data-background-id="new-small-2"]'));assert.equal(h.doc.querySelector('[data-background-id="body-7"]'),retained);
  }finally{h.close();}
 });
@@ -166,11 +166,11 @@ test('oversized reports are disclosed rather than silently dropped or truncated,
  let items=[oversized];const h=await setup(p=>p.endsWith('/background')?{items}:undefined,{items:[],run:null});
  try{
   await h.open();assert.equal(h.doc.querySelectorAll('[data-background-id]').length,0);
-  assert.match(h.doc.querySelector('.background-omitted')?.textContent||'',/reports.*too large.*Full reports remain stored with this conversation/i,'oversized-only snapshots must not pretend there are no results');
+  assert.match(h.doc.querySelector('.background-omitted')?.textContent||'',/reports.*too large.*Full reports remain stored with this session/i,'oversized-only snapshots must not pretend there are no results');
   assert.equal(h.doc.querySelector('.messages .empty'),null);
   items=[atLimit,oversized,item('after-large',{body:'Newest complete result'})];await h.event('focus');
   assert.deepEqual([...h.doc.querySelectorAll('[data-background-id]')].map(c=>c.dataset.backgroundId),['at-limit','after-large']);assert.equal(h.doc.querySelector('[data-background-id="at-limit"] .markdown').textContent,atLimit.body);assert.equal(h.doc.querySelector('[data-background-id="after-large"] .markdown').textContent,'Newest complete result');
-  assert.match(h.doc.querySelector('.background-omitted').textContent,/reports.*too large.*Full reports remain stored with this conversation/i);assert.doesNotMatch(h.doc.querySelector('.background-omitted').textContent,/older background results/i,'do not call an oversized newer report an omitted older result');
+  assert.match(h.doc.querySelector('.background-omitted').textContent,/reports.*too large.*Full reports remain stored with this session/i);assert.doesNotMatch(h.doc.querySelector('.background-omitted').textContent,/older background results/i,'do not call an oversized newer report an omitted older result');
   items=[atLimit,item('after-large',{body:'Newest complete result'})];await h.event('focus');assert.equal(h.doc.querySelector('.background-omitted'),null);
  }finally{h.close();}
 });
@@ -200,7 +200,7 @@ for(const transition of ['reset','delete'])test(`late saturated response cannot 
   await h.open();assert.ok(h.doc.querySelector('.background-omitted'));pending=deferred();const stale=pending;await h.event('focus');
   const oldMessages=h.doc.querySelector('.messages'),oldHTML=oldMessages.innerHTML,signal=h.calls.filter(c=>c.path.endsWith('/background')).at(-1).options.signal;
   click(h.doc,'Chats');await tick();assert.equal(signal.aborted,true);items=[];pending=null;
-  if(transition==='delete'){click(h.doc,'Conversation actions: First conversation');click(h.doc,'Delete conversation: First conversation');await tick();click(h.doc,'Delete conversation');await tick();assert.equal(h.app.state.session,null);}
+  if(transition==='delete'){click(h.doc,'Session actions: First conversation');click(h.doc,'Delete session: First conversation');await tick();click(h.doc,'Delete session');await tick();assert.equal(h.app.state.session,null);}
   else await h.open();
   stale.resolve({items:saturated});await tick();assert.equal(h.doc.querySelectorAll('[data-background-id],.background-omitted').length,0);assert.equal(oldMessages.innerHTML,oldHTML,'detached transcript is not changed by stale callbacks');
   if(transition==='reset'){await h.event('focus');assert.equal(h.doc.querySelectorAll('[data-background-id],.background-omitted').length,0);}
