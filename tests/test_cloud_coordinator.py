@@ -297,8 +297,21 @@ def test_legacy_state_keeps_active_enrollments_without_budget(tmp_path):
     path.write_text(json.dumps({"version": 1, "enrollments": {
         "7": {"issue": 7, "comment": 1, "head": HEAD, "active": True},
         "8": {"issue": 8, "comment": 2, "head": HEAD, "active": False}},
-        "actions": {}, "lifecycle_events": []}))
+        "actions": {
+            "fix:7:m": {"issue": 7, "head": HEAD, "status": "uncertain", "task_id": "t1"},
+            "fix:7:n": {"issue": 7, "head": HEAD, "status": "sent", "task_id": "t0"}},
+        "lifecycle_events": []}))
     path.chmod(0o600)
     state = StateStore(path).load()
     assert list(state["enrollments"]) == ["7"]
     assert state["enrollments"]["7"]["fixes"] == 5
+    assert list(state["actions"]) == ["v1:fix:7:m"]
+    # The unresolved v1 dispatch fences the PR instead of being forgotten.
+    api = FakeApi(pr=pull(mergeable_state="behind"), comments=[comment()])
+    assert outcome(Coordinator(api, StateStore(path), clock=lambda: 1790900000).run(
+        apply=True)) == "blocked"
+    assert api.writes == []
+    # A new owner command releases the fence; the old key is never replayed.
+    api.comments = [comment(), comment(id=2)]
+    assert outcome(Coordinator(api, StateStore(path), clock=lambda: 1790900000).run(
+        apply=True)) == "dispatched"

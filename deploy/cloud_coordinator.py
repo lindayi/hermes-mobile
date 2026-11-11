@@ -337,7 +337,7 @@ class StateStore:
 
     @classmethod
     def _migrate_v1(cls, data):
-        """Carry active enrollments (budgets spent) forward; drop retired ceremony state."""
+        """Carry active enrollments (budgets spent) and unresolved dispatches forward."""
         state = cls.empty()
         for key, record in (data.get("enrollments") or {}).items():
             if isinstance(record, dict) and record.get("active") is True:
@@ -345,6 +345,15 @@ class StateStore:
                     "issue": record.get("issue"), "comment": record.get("comment"),
                     "head": record.get("head"), "active": True,
                     "fixes": FIX_LIMIT, "reconciles": RECONCILE_LIMIT,
+                }
+        for key, action in (data.get("actions") or {}).items():
+            # Unresolved v1 dispatches stay as PR-level fences (see ``_process``).
+            if (isinstance(action, dict) and type(action.get("issue")) is int
+                    and action.get("status") not in ("sent", "recovered", "superseded",
+                                                     "exhausted", "consumed")):
+                state["actions"][f"v1:{key}"] = {
+                    "state": "reserved", "issue": action["issue"], "head": action.get("head"),
+                    "task_id": action.get("task_id"), "v1_status": action.get("status"),
                 }
         events = data.get("lifecycle_events")
         state["lifecycle_events"] = events if isinstance(events, list) else []
@@ -420,6 +429,12 @@ class Coordinator:
             enrollment = enrollment_from_comment(pull, latest)
             if enrollment is not None:
                 state["enrollments"][str(pull["number"])] = enrollment
+                if current:
+                    # A new owner command is the explicit disposition of earlier
+                    # unresolved dispatches; their keys stay so they never replay.
+                    for action in state["actions"].values():
+                        if action.get("issue") == pull["number"] and action.get("state") == "reserved":
+                            action["state"] = "owner_released"
 
     def _record_event(self, state, enrollment, reason, *, head=None, merge_sha=None,
                       occurred_at=None, incident=""):

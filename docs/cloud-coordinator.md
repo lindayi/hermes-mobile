@@ -53,7 +53,10 @@ It waits while any agent task touches the PR branch, and while mergeability or
 checks are pending. Every request is keyed (`kind:pr:enrollment-comment:head[:main]`)
 and the key is saved before the API call, so a key is never dispatched twice. An
 ambiguous task-creation response blocks the PR for owner attention instead of
-retrying. Exhausted budgets also block. Re-enrolling (a new owner comment) resets
+retrying. Exhausted budgets also block. Installed version-1 state migrates in place:
+active enrollments keep their identity with spent budgets, and every unresolved
+(uncertain or claimed) v1 dispatch is carried as a PR-level fence. A new owner
+`/hermes enroll` comment is the explicit release of such a fence. Re-enrolling (a new owner comment) resets
 budgets.
 
 ## Lifecycle events
