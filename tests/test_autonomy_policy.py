@@ -59,8 +59,8 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     'deploy/observe_release.py': '49d784af17d0807c95b460b2a285254f0a616361c390afa69b3cc0345a56b498',
     'deploy/public_http.py': 'dd352b8d0295f242f4a5d31a55eaaec523ef8405601461d4ab5fa8dc6dc302e7',
     'deploy/release_artifact.py': '8bb1e62a1a4cb1a0239e05ab3d4b54c7d2896f2e1a09125ece5e4c36a44fc94e',
-    'deploy/ci_selection.py': '07493f74bc4b932e26342e0d27fee8c3c38601af8211e0a950920935173b2f16',
-    'deploy/test_workspace.py': 'baeb1103608ff15db3903677fa8ec9c80c9c8b9a0246ce18ada27bf7c04a486a',
+    'deploy/ci_selection.py': '653844a40c1cc924991d3f574aba4707f02fb3de4afbc277d11842ae518d13d5',
+    'deploy/test_workspace.py': 'd316b53c9950e26e3f1e47ea0385150211008288ec5667b609cebe446b21fc4a',
     'scripts/ci_tests.py': '6ed905a90720fb17226472a0453fb762395424b8370df474fed4536827b398d6',
     'scripts/prepare_native_test_runtime.py': '798195e6d9b284bae69cb6e27cf8dc7ad5ffc6dce62939b137fb6c6b370b58a8',
     'scripts/test.py': 'e6a53a5c0f7ff98f35b2efb2282cd65db65eacc2d94af9b07516ceaaffc4ec7c',
@@ -280,8 +280,8 @@ _PENDING_ISSUE67_WORKFLOW_FIXTURE = {
 }
 
 _PENDING_ISSUE75_HOSTED_GATE_FIXTURE = {
-    '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
-    'deploy/release_artifact.py': 'ef47db3b7fa3e4805488ea4c941e770f26b6256842ad26ffb210476e5f86e721',
+    '.github/workflows/ci.yml': 'b8a9e2676ad38666ba8d570f26e46fdf401a265e8804bd903beae870d668543d',
+    'deploy/release_artifact.py': '59c5b1960e2aed430aa63cf4967bcfce28ca5d38c0aefbff1a6fc42b35ec5b50',
 }
 
 
@@ -363,11 +363,11 @@ _ISSUE133_MODEL_CONTROLS_FIXTURE = {
 
 # Issue #131 independent literals; never compute expected pins from candidate bytes.
 _ISSUE131_MOBILE_SCOPE_FIXTURE = {
-    '.github/workflows/ci.yml': '5a1b1a694d286d5f8a1a4188802af7e8f6ab46855d278224d9f248cccec844d9',
+    '.github/workflows/ci.yml': 'b8a9e2676ad38666ba8d570f26e46fdf401a265e8804bd903beae870d668543d',
     'backend/app.py': '72a78fd9ab9a57e26bfb2091068cc8f823550e1fd2af9d394db08a2c14cd0cc7',
     'deploy/assets.py': '4a18e1091132d3df5a510783fef2d48cb028873c5d813facc828243727a79923',
     'deploy/frontend_release.py': 'c4dfb36c57abdb22e3f1ad7b6f2b5455bccfaa854cf6aafa9419d0c780511d95',
-    'deploy/self_deploy.py': '53815dcd41d9848c94fbc6d38caa1860fcb633f8033ecb222f33eb010077f158',
+    'deploy/self_deploy.py': '6b22d864137ad67c6f43694f20212a5002ccb3a688e803e0fd37f4f28e607568',
     'package.json': '89b9b012176674bada40c7a010516703f85ed8cbe778e007db10084f35c15931',
     'package-lock.json': '63199915d106fefd775451eb7d4aed9a3c2d04ca6f670ef9f27ba0cd6098218a',
 }
