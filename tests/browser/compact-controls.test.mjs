@@ -49,7 +49,7 @@ test('read receipt dismiss is a top-level named close control outside the action
 });
 test('unambiguous toolbar controls are named monochrome icons, not text labels',async()=>{
  const h=await setup();try{
- for(const name of ['Search conversations','New chat']){const b=control(h.doc,name);assert.ok(b.querySelector('svg[aria-hidden="true"][stroke="currentColor"]'),name);assert.equal(b.textContent,'');assert.equal(b.title,name);}
+ for(const name of ['Search sessions','New chat']){const b=control(h.doc,name);assert.ok(b.querySelector('svg[aria-hidden="true"][stroke="currentColor"]'),name);assert.equal(b.textContent,'');assert.equal(b.title,name);}
  control(h.doc,'Inbox').click();await tick();const refresh=control(h.doc,'Refresh');assert.ok(refresh.querySelector('svg'));assert.equal(refresh.textContent,'');assert.equal(refresh.title,'Refresh');
  assert.equal(control(h.doc,'Clear read').textContent,'Clear read','destructive bulk action retains words');
  }finally{h.close();}

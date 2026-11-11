@@ -69,7 +69,7 @@ test('compact chat header preserves space, title editing, draft and connection s
   await back.click();await page.getByRole('button',{name:'Renamed fixture',exact:true}).waitFor();await page.reload();await page.getByRole('button',{name:'Renamed fixture',exact:true}).click();
   assert.match(await header.innerText(),/Renamed fixture/);assert.deepEqual(errors,[]);
   await back.click();await page.getByRole('button',{name:'New chat',exact:true}).click();
-  await page.waitForFunction(()=>document.querySelector('.conversation-head h1')?.textContent==='Untitled conversation');
+  await page.waitForFunction(()=>document.querySelector('.conversation-head h1')?.textContent==='Untitled session');
   await page.getByRole('textbox',{name:'Message Hermes'}).fill('Draft stays while native naming completes');
   const before=page.url();title='Automatically generated native title';
   await page.evaluate(()=>window.dispatchEvent(new Event('focus')));

@@ -613,7 +613,7 @@ test(`generated ordinary history recovery preserves discovery and reader (${outc
 test('sessions list has a compact heading and Search Filter New toolbar without summary',{timeout:30000},()=>fixture(async({page})=>{
  await page.getByRole('button',{name:'First conversation',exact:true}).waitFor();
  assert.equal(await page.getByRole('heading',{name:'Sessions',exact:true}).count(),1);
- assert.deepEqual(await page.locator('.history-toolbar > button').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-label'))),['Search conversations','Filter conversations','New chat']);
+ assert.deepEqual(await page.locator('.history-toolbar > button').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-label'))),['Search sessions','Filter sessions','New chat']);
  assert.equal(await page.locator('.list-summary').count(),0);
 }));
 test('notification choices are local drafts until the explicit Save button is pressed',{timeout:30000},()=>fixture(async({page,calls,control})=>{

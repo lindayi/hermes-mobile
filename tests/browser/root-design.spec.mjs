@@ -78,9 +78,9 @@ function contrast(foreground,background){
 test('selected navigation and filters meet normal-text contrast in both themes', {timeout:45000}, async()=>{
  const h=await fixture(),{page}=h;
  try{
-  await page.getByRole('button',{name:'Filter conversations',exact:true}).click();
+  await page.getByRole('button',{name:'Filter sessions',exact:true}).click();
   await page.locator('.filter-segment[data-kind=chats]').click();
-  await page.getByRole('button',{name:'Filter conversations',exact:true}).click();
+  await page.getByRole('button',{name:'Filter sessions',exact:true}).click();
   for(const width of [390,1280])for(const theme of ['light','dark']){
    await page.setViewportSize({width,height:844});
    await page.evaluate(value=>document.documentElement.dataset.theme=value,theme);
@@ -128,7 +128,7 @@ test('generated root routes share the calm design and retain their controls', {t
     assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
    }
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${width}px ${theme} Sessions has no horizontal overflow`);
-   for(const name of ['Search conversations','Filter conversations','New chat']){
+   for(const name of ['Search sessions','Filter sessions','New chat']){
     const target=page.getByRole('button',{name,exact:true}),box=await target.boundingBox();
     assert.ok(box.width>=44&&box.height>=44,`${width}px ${theme} ${name} remains reachable`);
    }

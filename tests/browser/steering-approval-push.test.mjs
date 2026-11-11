@@ -759,7 +759,7 @@ test(`held approval detail is cancelled with no timers on ${departure} teardown`
   }else app.destroy();
   assert.equal(signal.aborted,true,'leaving the identity must cancel its pending detail transport');
   assert.equal(timers.size,0,'teardown clears deadlines synchronously');
-  if(departure==='route')await waitFor(()=>!doc.querySelector('.conversation') && !doc.body.textContent.includes('Loading conversations'));
+  if(departure==='route')await waitFor(()=>!doc.querySelector('.conversation') && !doc.body.textContent.includes('Loading sessions'));
   const before=doc.body.textContent;
   detail.resolve({...approvalItem(),status:'pending'});
   await tick();
@@ -3826,7 +3826,7 @@ for(const query of ['notification','inbox'])test(`initial ${query} target shows 
  try{
   assert.ok(doc.querySelector('.inline-error'),'current message failure must replace Loading with a retryable error');
   assert.match(doc.querySelector('.inline-error').textContent,/Temporary service failure/);
-  const retry=[...doc.querySelectorAll('button')].find(button=>button.textContent==='Retry opening conversation');
+  const retry=[...doc.querySelectorAll('button')].find(button=>button.textContent==='Retry opening session');
   assert.ok(retry);
   fail=false;retry.click();await tick();await tick();
   assert.ok(doc.querySelector('[data-notification-run="r"]'));

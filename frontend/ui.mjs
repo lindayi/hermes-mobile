@@ -271,7 +271,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(name==='invites')section.append(h('p',{class:'caption'},'Invite someone into a separate Hermes profile. Profiles are not filesystem sandboxes.'),button('Create invitation',inviteForm,'secondary'));
       sections.append(section);
     }
-    sections.append(notificationSettings(version),h('section',{class:'card stack'},h('h2',{},'Recovery & privacy'),h('p',{class:'caption'},'Keep a second passkey and offline recovery codes. Drafts stay in this browser tab; conversations are never cached for offline reading.'),button('Generate recovery codes',e=>action(e.currentTarget,async()=>{if(!await confirmChange('Replace recovery codes?','Any previous unused codes will stop working. Save the new codes offline.'))return;await ceremony('verify');const result=await api.request('/auth/recovery/codes',{method:'POST',body:{}});oneTimeSecret('Your recovery codes',result.codes);}),'secondary'),button('Clear local drafts',()=>{drafts.clear();attempts.clear();try{for(const name of Object.keys(win.sessionStorage))if(name.startsWith(`hermes:${state.user.id}:draft:`)||name.startsWith(`hermes:${state.user.id}:attempt:`))win.sessionStorage.removeItem(name);}catch{}inform('Local drafts cleared. Server conversations are unchanged.');},'quiet'),button('Sign out',e=>action(e.currentTarget,()=>signOut()),'danger')));
+    sections.append(notificationSettings(version),h('section',{class:'card stack'},h('h2',{},'Recovery & privacy'),h('p',{class:'caption'},'Keep a second passkey and offline recovery codes. Drafts stay in this browser tab; sessions are never cached for offline reading.'),button('Generate recovery codes',e=>action(e.currentTarget,async()=>{if(!await confirmChange('Replace recovery codes?','Any previous unused codes will stop working. Save the new codes offline.'))return;await ceremony('verify');const result=await api.request('/auth/recovery/codes',{method:'POST',body:{}});oneTimeSecret('Your recovery codes',result.codes);}),'secondary'),button('Clear local drafts',()=>{drafts.clear();attempts.clear();try{for(const name of Object.keys(win.sessionStorage))if(name.startsWith(`hermes:${state.user.id}:draft:`)||name.startsWith(`hermes:${state.user.id}:attempt:`))win.sessionStorage.removeItem(name);}catch{}inform('Local drafts cleared. Server sessions are unchanged.');},'quiet'),button('Sign out',e=>action(e.currentTarget,()=>signOut()),'danger')));
     content.replaceChildren(h('div',{class:'page-heading'},h('div',{},h('h1',{},'Settings'))),sections);
   }
   function notificationSettings(version) {
@@ -482,7 +482,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     let hasRead=deliveries.status==='fulfilled' && (deliveries.value.read_count ?? (deliveries.value.items || []).filter(item=>item.read).length)>0,bulkBusy=false;
     const bulkStatus=h('div',{class:'inbox-read-status',role:'status','aria-live':'polite'});
     const clear=button('Clear read',e=>inboxAction(e.currentTarget,async()=>{
-      if(!await confirmChange('Clear read notifications?','Hide all read notifications, including older pages? Unread notifications, pending approvals and conversation history are kept. Already sent or in-flight pushes cannot be recalled.'))return;
+      if(!await confirmChange('Clear read notifications?','Hide all read notifications, including older pages? Unread notifications, pending approvals and session history are kept. Already sent or in-flight pushes cannot be recalled.'))return;
       await mutate('/inbox/clear-read');
     }),'secondary',{disabled:!hasRead});
     const bulk=button('Mark all read',markAll,'secondary',{disabled:deliveries.status!=='fulfilled'});
@@ -520,7 +520,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const feedback=h('div',{class:'inbox-read-status',role:'status','aria-live':'polite'});
         const dismiss=button('×',e=>{if(item.read)return inboxAction(e.currentTarget,()=>mutate(`/inbox/${encodeURIComponent(item.id)}/dismiss`));},'quiet icon-button inbox-dismiss',{'aria-label':'Dismiss',title:'Dismiss',hidden:!item.read});
         const summary=h('summary',{class:'inbox-summary'},disclosure(),h('span',{class:'inbox-summary-text'},h('strong',{},item.title || 'Notification'),h('span',{class:'inbox-summary-meta'},readState,h('time',{class:'caption'},date(item.created_at)))));
-        const actions=h('div',{class:'actions'},item.approval_id ? pendingApproval(item) ? button('Review approval',()=>{if(!current())return;const card=approvalCard(item);if(card)card.querySelector('details').open=true;card?.scrollIntoView?.({block:'center'});card?.querySelector('summary')?.focus();},'secondary') : h('p',{class:'caption'},approvals.status==='fulfilled'?'This approval is no longer pending.':'Approval status unavailable. Refresh to recheck.') : item.session_id ? button('Open conversation',()=>{if(current())void action(null,()=>openSession({id:item.session_id}));},'secondary') : null);
+        const actions=h('div',{class:'actions'},item.approval_id ? pendingApproval(item) ? button('Review approval',()=>{if(!current())return;const card=approvalCard(item);if(card)card.querySelector('details').open=true;card?.scrollIntoView?.({block:'center'});card?.querySelector('summary')?.focus();},'secondary') : h('p',{class:'caption'},approvals.status==='fulfilled'?'This approval is no longer pending.':'Approval status unavailable. Refresh to recheck.') : item.session_id ? button('Open session',()=>{if(current())void action(null,()=>openSession({id:item.session_id}));},'secondary') : null);
         const details=h('details',{class:'inbox-disclosure'},summary,h('div',{class:'inbox-body'},renderMarkdown(doc,item.body),feedback,actions));
         const card=h('article',{class:`card inbox-item ${item.read?'read':'unread'}`,'data-inbox-id':item.id},details,dismiss);
         const confirmRead=()=>{
@@ -561,7 +561,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const clearFeedback=()=>feedback.replaceChildren(h('span',{'aria-hidden':'true'},'\u00a0'));
     const feedback=h('div',{id:'conversation-list-status',class:'list-feedback caption',role:'status','aria-live':'polite'});
     clearFeedback();
-    const results=h('section',{class:'session-results','aria-label':'Conversation results'},feedback,list);
+    const results=h('section',{class:'session-results','aria-label':'Session results'},feedback,list);
     const count=h('span',{class:'caption'});
     const previous=button('Previous',()=>{if(!current())return;state.offset=Math.max(0,state.offset-30);void refresh();},'quiet',{disabled:true});
     const next=button('Next',()=>{if(!current())return;state.offset+=30;void refresh();},'quiet',{disabled:true});
@@ -578,7 +578,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       const latest=()=>current() && revision===requestVersion;
       const fetchPage=()=>api.request(`/sessions?limit=30&offset=${selection.offset}&q=${encodeURIComponent(selection.query)}&kind=${selection.kind}`);
       results.setAttribute('aria-busy','true');
-      feedback.replaceChildren(h('span',{title:`Loading ${describe(selection)}`},committed ? 'Updating results…' : 'Loading conversations…'));
+      feedback.replaceChildren(h('span',{title:`Loading ${describe(selection)}`},committed ? 'Updating results…' : 'Loading sessions…'));
       previous.disabled=true;next.disabled=true;
       lockStaleDeletes('Results updating. Wait for refreshed results before deleting.');
       try {
@@ -595,7 +595,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         state.offset=selection.offset;committed=selection;
         renderRows(result);
         updatePendingDeletions();
-        count.textContent=`${result.total ?? result.items?.length ?? 0} conversations`;
+        count.textContent=`${result.total ?? result.items?.length ?? 0} sessions`;
         previous.disabled=selection.offset===0;next.disabled=selection.offset+30 >= (result.total ?? 0);
         clearFeedback();
       } catch(error) {
@@ -605,7 +605,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         feedback.replaceChildren(h('span',{class:'inline-error'},`Couldn’t load ${describe(selection)}. ${errorMessage(error)}${committed ? ' Previous results remain below.' : ''}`),button('Try again',()=>void refresh(),'secondary'));
       } finally {if(latest())results.setAttribute('aria-busy','false');}
     }
-    const search = h('input',{type:'search',name:'search',placeholder:'Search your conversations',value:state.query,'aria-label':'Search conversations'});
+    const search = h('input',{type:'search',name:'search',placeholder:'Search your sessions',value:state.query,'aria-label':'Search sessions'});
     const closeSearch=async()=>{
       if(!current())return;
       const needsRefresh=Boolean(state.query) || state.offset!==0;
@@ -617,15 +617,15 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(!current())return;
       if(state.searchOpen){void closeSearch();return;}
       state.searchOpen=true;searchForm.hidden=false;searchToggle.setAttribute('aria-expanded','true');search.focus();
-    },'quiet icon-button',{'aria-label':'Search conversations',title:'Search conversations','aria-controls':'conversation-search','aria-expanded':String(state.searchOpen || Boolean(state.query))});
+    },'quiet icon-button',{'aria-label':'Search sessions',title:'Search sessions','aria-controls':'conversation-search','aria-expanded':String(state.searchOpen || Boolean(state.query))});
     const searchForm = h('form',{id:'conversation-search',class:'search',hidden:!state.searchOpen && !state.query,onsubmit:e => {e.preventDefault();if(!current())return;state.searchOpen=true;state.query=search.value;state.offset=0;void refresh();},onkeydown:e=>{if(e.key==='Escape'){e.preventDefault();void closeSearch();}}},search,h('button',{type:'submit',class:'quiet icon-button','aria-label':'Search',title:'Search'},icon('search')),button('×',()=>void closeSearch(),'quiet icon-button',{'aria-label':'Close search',title:'Close search'}));
     const closeFilter=(focus=false)=>{filter.hidden=true;filterToggle.setAttribute('aria-expanded','false');if(focus)filterToggle.focus();};
     const filterToggle=button(icon('settings'),()=>{
       if(!current())return;
       if(!filter.hidden){closeFilter();return;}
       filter.hidden=false;filterToggle.setAttribute('aria-expanded','true');filter.querySelector('[aria-pressed=true]')?.focus();
-    },'quiet icon-button filter-toggle',{'aria-label':'Filter conversations',title:`Filter conversations: ${state.kind[0].toUpperCase()+state.kind.slice(1)}`,'aria-controls':'conversation-filter','aria-expanded':'false','data-active':String(state.kind!=='all')});
-    const filter=h('div',{id:'conversation-filter',class:'session-filter',role:'group','aria-label':'Conversation filter',hidden:true,onkeydown:e=>{if(e.key==='Escape'){e.preventDefault();closeFilter(true);}}},...['chats','all','cron','tests'].map(value=>button(value[0].toUpperCase()+value.slice(1),()=>{if(!current())return;state.kind=value;state.query=search.value;state.offset=0;for(const control of filter.children)control.setAttribute('aria-pressed',String(control.dataset.kind===value));filterToggle.title=`Filter conversations: ${value[0].toUpperCase()+value.slice(1)}`;filterToggle.dataset.active=String(value!=='all');closeFilter(true);void refresh();},'filter-segment',{'data-kind':value,'aria-pressed':String(state.kind===value)})));
+    },'quiet icon-button filter-toggle',{'aria-label':'Filter sessions',title:`Filter sessions: ${state.kind[0].toUpperCase()+state.kind.slice(1)}`,'aria-controls':'conversation-filter','aria-expanded':'false','data-active':String(state.kind!=='all')});
+    const filter=h('div',{id:'conversation-filter',class:'session-filter',role:'group','aria-label':'Session filter',hidden:true,onkeydown:e=>{if(e.key==='Escape'){e.preventDefault();closeFilter(true);}}},...['chats','all','cron','tests'].map(value=>button(value[0].toUpperCase()+value.slice(1),()=>{if(!current())return;state.kind=value;state.query=search.value;state.offset=0;for(const control of filter.children)control.setAttribute('aria-pressed',String(control.dataset.kind===value));filterToggle.title=`Filter sessions: ${value[0].toUpperCase()+value.slice(1)}`;filterToggle.dataset.active=String(value!=='all');closeFilter(true);void refresh();},'filter-segment',{'data-kind':value,'aria-pressed':String(state.kind===value)})));
     const outsideFilter=e=>{if(!filter.contains(e.target) && !filterToggle.contains(e.target))closeFilter();};
     doc.addEventListener('pointerdown',outsideFilter);stopExtras=()=>{requestVersion++;doc.removeEventListener('pointerdown',outsideFilter);swipe?.destroy();};
     function renderRows(result) {
@@ -634,24 +634,24 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     list.replaceChildren(...visibleItems.map(session => {
       const rowRevision=requestVersion;
       const rowCurrent=()=>current() && rowRevision===requestVersion && control.isConnected;
-      const control = button('',()=>{if(current() && control.isConnected)void action(null,()=>openSession(session));},'session-row',{'aria-label':session.title || 'Untitled conversation'});
+      const control = button('',()=>{if(current() && control.isConnected)void action(null,()=>openSession(session));},'session-row',{'aria-label':session.title || 'Untitled session'});
       const statuses={queued:['◷','Queued'],running:['◔','Running'],waiting_for_approval:['!','Waiting for approval'],waiting_for_clarification:['?','Waiting for an answer'],stopping:['■','Stopping'],failed:['×','Last run failed'],unknown:['?','Status unavailable'],idle:['−','Idle'],completed:['−','Idle'],cancelled:['■','Stopped']};
       const status=Object.hasOwn(statuses,session.run_status)?session.run_status:'unknown';
-      control.append(h('span',{class:'session-info'},h('strong',{},session.title || 'Untitled conversation'),h('span',{class:'session-meta'},h('span',{class:'source'},session.source || 'unknown'),date(session.updated_at))),h('span',{class:'session-run-status','data-state':status,role:'img','aria-label':statuses[status][1],title:statuses[status][1]},['running','queued'].includes(status)?statusSymbol(status):statuses[status][0]));
+      control.append(h('span',{class:'session-info'},h('strong',{},session.title || 'Untitled session'),h('span',{class:'session-meta'},h('span',{class:'source'},session.source || 'unknown'),date(session.updated_at))),h('span',{class:'session-run-status','data-state':status,role:'img','aria-label':statuses[status][1],title:statuses[status][1]},['running','queued'].includes(status)?statusSymbol(status):statuses[status][0]));
       if(result.deletion_available!==true)return control;
       const runBusy=['queued','running','waiting_for_approval','waiting_for_clarification','stopping'].includes(status) || status==='unknown' && Boolean(session.run?.id);
       const deletionBusy=deletions.has(deletionKey(state.user?.id,session.id)) || runBusy;
-      const remove=button('Delete',e=>{const target=e.currentTarget;void action(target,()=>deleteSession(session,version,rowCurrent)).finally(()=>{if(version===routeVersion && target.isConnected && doc.activeElement===doc.body)target.focus();});},'session-delete',{'aria-label':`Delete conversation: ${session.title || 'Untitled conversation'}`,'data-delete-id':session.id,title:deletionBusy?'Finish or resolve this run or deletion before deleting':'Delete conversation',disabled:deletionBusy,hidden:true});
+      const remove=button('Delete',e=>{const target=e.currentTarget;void action(target,()=>deleteSession(session,version,rowCurrent)).finally(()=>{if(version===routeVersion && target.isConnected && doc.activeElement===doc.body)target.focus();});},'session-delete',{'aria-label':`Delete session: ${session.title || 'Untitled session'}`,'data-delete-id':session.id,title:deletionBusy?'Finish or resolve this run or deletion before deleting':'Delete session',disabled:deletionBusy,hidden:true});
       remove.dataset.runBusy=String(runBusy);remove.dataset.locked=String(deletionBusy);
       control.setAttribute('aria-describedby','session-action-help');
-      const actions=button('⋯',null,'quiet icon-button session-actions',{'aria-label':`Conversation actions: ${session.title || 'Untitled conversation'}`,title:'Conversation actions','aria-expanded':'false'});
+      const actions=button('⋯',null,'quiet icon-button session-actions',{'aria-label':`Session actions: ${session.title || 'Untitled session'}`,title:'Session actions','aria-expanded':'false'});
       const entry=h('div',{class:'session-entry'},control,actions,remove);
       swipe.attach(entry,control,remove,actions);return entry;
     }));
-    if(!visibleItems.length)list.append(empty('No conversations',state.query ? 'No conversations match this search and filter.' : 'No conversations in this filter.'));
+    if(!visibleItems.length)list.append(empty('No sessions',state.query ? 'No sessions match this search and filter.' : 'No sessions in this filter.'));
     }
     content.replaceChildren(h('div',{class:'page-heading conversation-list-heading'},h('div',{},h('h1',{},'Sessions')),h('div',{class:'history-toolbar'},searchToggle,filterToggle,button(icon('newchat'),e=>action(e.currentTarget,async()=>{if(!current())return;const session=await api.request('/sessions',{method:'POST',body:{title:'New chat'}});if(current())await openSession(session);}),'primary icon-button',{'aria-label':'New chat',title:'New chat'}),filter)),searchForm,
-      h('p',{id:'session-action-help',class:'sr-only'},'Swipe left to reveal Delete, or use Conversation actions, right-click, or Shift+F10. Deletion requires confirmation.'),pendingDeletionPanel(version),results,
+      h('p',{id:'session-action-help',class:'sr-only'},'Swipe left to reveal Delete, or use Session actions, right-click, or Shift+F10. Deletion requires confirmation.'),pendingDeletionPanel(version),results,
       h('div',{class:'pagination'},previous,count,next));
     await refresh();
   }
@@ -689,7 +689,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         deletions.delete(identity);
         if(state.view==='chats' && !content.classList.contains('conversation')){
           const nextVersion=routeVersion+1;await navigate('chats');
-          if(nextVersion===routeVersion && owner===state.user?.id)inform('Conversation was not deleted. Deletion was safely refused; stored history is unchanged.',true);
+          if(nextVersion===routeVersion && owner===state.user?.id)inform('Session was not deleted. Deletion was safely refused; stored history is unchanged.',true);
         }
         return;
       }
@@ -711,20 +711,20 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const history=state.view==='chats' && !content.classList.contains('conversation');
     if(!sameTranscript && !history)return;
     if(state.session?.id===id)state.session=null;
-    const nextVersion=routeVersion+1;await navigate('chats');if(nextVersion===routeVersion && owner===state.user?.id)inform('Conversation deleted.');
+    const nextVersion=routeVersion+1;await navigate('chats');if(nextVersion===routeVersion && owner===state.user?.id)inform('Session deleted.');
   }
   async function deleteSession(session,version,rowCurrent=()=>true) {
     const owner=state.user?.id,current=()=>!destroyed && version===routeVersion && owner===state.user?.id && rowCurrent();
     const identity=deletionKey(owner,session.id);
     if(!current() || deletions.has(identity))return;
-    if(!await confirmChange('Delete conversation?',`Delete “${session.title || 'Untitled conversation'}”? This removes its stored history from shared Hermes storage. This cannot be undone. Close other clients first: an open conversation can recreate native history. WhatsApp messages, delivered notifications, memories, created files, logs and backups are not erased.`,{confirmLabel:'Delete conversation',destructive:true,plainText:true}) || !current())return;
+    if(!await confirmChange('Delete session?',`Delete “${session.title || 'Untitled session'}”? This removes its stored history from shared Hermes storage. This cannot be undone. Close other clients first: an open session can recreate native history. WhatsApp messages, delivered notifications, memories, created files, logs and backups are not erased.`,{confirmLabel:'Delete session',destructive:true,plainText:true}) || !current())return;
     if(deletions.has(identity))return;
     deletions.set(identity,'deleting');
     updatePendingDeletions();
     try {
       const result=await api.request(`/sessions/${encodeURIComponent(session.id)}`,{method:'DELETE',body:{confirm:true}});
       if(destroyed || owner!==state.user?.id)return;
-      if(result?.id!==session.id || result.deleted!==true)throw new Error('Deletion could not be confirmed. Refresh the conversation list before trying again.');
+      if(result?.id!==session.id || result.deleted!==true)throw new Error('Deletion could not be confirmed. Refresh the session list before trying again.');
       await completeDeletion(session.id,owner);
     } catch(error){
       if(destroyed || owner!==state.user?.id)return;
@@ -853,7 +853,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
   }
   async function openSession(session, notificationTarget=null) {
-    if(deletions.get(deletionKey(state.user?.id,session.id))==='deleted'){inform('This conversation was deleted. Its stored history is no longer available.');return;}
+    if(deletions.get(deletionKey(state.user?.id,session.id))==='deleted'){inform('This session was deleted. Its stored history is no longer available.');return;}
     disconnect();leaveConversation();
     approvalHistoryAnchors=null;
     const version = ++routeVersion,owner=state.user?.id;
@@ -861,22 +861,22 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     const resolveTitle=!Object.hasOwn(session,'title');
     state.view='chats';state.session=session;
     for(const item of nav.children)item.setAttribute('aria-current',item.dataset.view==='chats'?'page':'false');
-    const title=session.title || (resolveTitle?'Conversation':'Untitled conversation');
+    const title=session.title || (resolveTitle?'Session':'Untitled session');
     const header=h('header',{class:'topbar conversation-head'},button(icon('back'),()=>navigate('chats'),'quiet',{'aria-label':'Back to chats'}),h('div',{class:'conversation-title'},h('h1',{title},title),button(icon('edit'),()=>renameSession(session),'quiet',{'aria-label':'Rename session',disabled:resolveTitle})),h('span',{class:'conversation-status',role:'status','aria-live':'polite'}));
     content.classList.add('conversation');content.replaceChildren(header,h('p',{class:'loading'},'Loading…'));
     if(resolveTitle) {
       try {
         const metadata=await api.request(`/sessions/${encodeURIComponent(session.id)}`);
         if(!current())return;
-        if(metadata?.id!==session.id || (metadata.title!==null && typeof metadata.title!=='string'))throw new Error('Conversation metadata unavailable.');
+        if(metadata?.id!==session.id || (metadata.title!==null && typeof metadata.title!=='string'))throw new Error('Session metadata unavailable.');
         session.title=metadata.title;
-        const heading=header.querySelector('h1');heading.textContent=heading.title=session.title || 'Untitled conversation';
+        const heading=header.querySelector('h1');heading.textContent=heading.title=session.title || 'Untitled session';
         header.querySelector('[aria-label="Rename session"]').disabled=false;
       } catch(error) {
         if(!current())return;
         if(error.status===401){expiredSession();return;}
-        const heading=header.querySelector('h1');heading.textContent=heading.title='Conversation unavailable';
-        content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
+        const heading=header.querySelector('h1');heading.textContent=heading.title='Session unavailable';
+        content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),button('Retry opening session',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
         return;
       }
     }
@@ -885,7 +885,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         const metadata=await api.request(`/sessions/${encodeURIComponent(session.id)}`,{signal});
         if(!current() || !latest() || signal.aborted || metadata?.id!==session.id || (metadata.title!==null && typeof metadata.title!=='string'))return;
         session.title=metadata.title;
-        const heading=header.querySelector('h1');heading.textContent=heading.title=session.title?.trim() ? session.title : 'Untitled conversation';
+        const heading=header.querySelector('h1');heading.textContent=heading.title=session.title?.trim() ? session.title : 'Untitled session';
       } catch(error) {if(current() && latest() && !signal.aborted && error.status===401)expiredSession();}
     };
     const connection=watchConversation(session,version,header.querySelector('.conversation-status'),refreshTitle);headerState=connection;
@@ -897,7 +897,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(error.status===401){expiredSession();return;}
       connection.failure(initial);
       content.replaceChildren(header,h('p',{class:'inline-error',role:'status'},errorMessage(error)),
-        button('Retry opening conversation',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
+        button('Retry opening session',()=>{if(current())void action(null,()=>openSession({id:session.id},notificationTarget));},'secondary'));
       return;
     }
     if (!current()) return;
@@ -1086,7 +1086,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         run.status==='completed' && typeof run.output==='string' && run.output.trim()
           ? renderMarkdown(doc,run.output)
           : h('p',{class:'notification-request-result'},run.status==='failed'
-            ? 'The request failed. Review its conversation for details.'
+            ? 'The request failed. Review its session for details.'
             : `The request status is ${typeof run.status==='string'?run.status:'unavailable'}.`));
         messages.querySelector('.empty')?.remove();
         if(anchor)anchor.after(target);else messages.append(target);
@@ -2598,7 +2598,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           messages.querySelector('.empty')?.remove();backgroundCards.set(id,card);changed=true;
         }
         const placement=reflowBackground();changed ||= placement.changed;
-        const omittedText=[olderOmitted?'Older background results are omitted from this view.':null,largeOmitted?'Some reports are too large to show here.':null,olderOmitted || largeOmitted?'Full reports remain stored with this conversation.':null].filter(Boolean).join(' ');
+        const omittedText=[olderOmitted?'Older background results are omitted from this view.':null,largeOmitted?'Some reports are too large to show here.':null,olderOmitted || largeOmitted?'Full reports remain stored with this session.':null].filter(Boolean).join(' ');
         if(omittedText){
           if(!backgroundOmitted){backgroundOmitted=h('p',{class:'caption background-omitted'});messages.querySelector('.empty')?.remove();messages.append(backgroundOmitted);}
           if(backgroundOmitted.textContent!==omittedText){backgroundOmitted.textContent=omittedText;changed=true;}
@@ -2638,7 +2638,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         await trackRun(result.run,messages,composerAction,result.tool_replay,{follow:shouldFollowInitialRestore,finish:finishInitialRestore});
       } else if(result.last_run?.status==='unknown') {
         composerAction.set('unknown');
-        inform('Outcome unknown. Check the conversation before submitting again; Hermes will not replay this action.',true);
+        inform('Outcome unknown. Check the session before submitting again; Hermes will not replay this action.',true);
       } else storage.set(key(`run:${session.id}`),null,true);
     } else {
       const runId=storage.get(key(`run:${session.id}`),true);
@@ -3045,7 +3045,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         for(const card of article.querySelectorAll('.tool-activity'))refreshToolActivity(card);
         disconnect();
         connection?.refresh();
-        if(current.status==='unknown')inform('Outcome unknown. Check the conversation before submitting again; Hermes will not replay this action.',true);
+        if(current.status==='unknown')inform('Outcome unknown. Check the session before submitting again; Hermes will not replay this action.',true);
         else storage.set(key(`run:${sessionId}`),null,true);
       }
       if(atBottom)messages.scrollTop=messages.scrollHeight;
@@ -3101,7 +3101,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           if(error.status===401)expiredSession();
           else if(error.status===404 && currentRevision){
             apply({status:'failed'});
-            inform('This run is no longer available. Check the conversation before sending again.',true);
+            inform('This run is no longer available. Check the session before sending again.',true);
           }
         }
       } finally {
@@ -3124,7 +3124,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
         fn(data);
         composerAction.background?.();
         if(event.lastEventId)renderedIds.add(event.lastEventId);
-      }catch{inform('A live update could not be read. Reopen the conversation to check the saved result.',true);}
+      }catch{inform('A live update could not be read. Reopen the session to check the saved result.',true);}
     });
     on('status',data=>{
       apply(data);

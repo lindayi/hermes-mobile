@@ -28,7 +28,7 @@ test('compact controls fit 320/390 light/dark and Stop is separate in the Activi
   const shot=async view=>page.screenshot({path:`${artifacts}compact-controls-${view}-${width}-${theme}.png`});
   const fit=async()=>assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'no horizontal overflow');
   await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
-  for(const name of ['Search conversations','New chat']){const b=page.getByRole('button',{name,exact:true});await b.waitFor();const r=await b.boundingBox();assert.ok(r.width>=44&&r.width<=48&&r.height>=44,`${name} compact 44px target: ${JSON.stringify(r)}`);assert.equal(await b.locator('svg[stroke="currentColor"]').count(),1);}
+  for(const name of ['Search sessions','New chat']){const b=page.getByRole('button',{name,exact:true});await b.waitFor();const r=await b.boundingBox();assert.ok(r.width>=44&&r.width<=48&&r.height>=44,`${name} compact 44px target: ${JSON.stringify(r)}`);assert.equal(await b.locator('svg[stroke="currentColor"]').count(),1);}
   await fit();await shot('chats');
   await page.getByRole('button',{name:'Inbox',exact:true}).click();const dismiss=page.getByRole('button',{name:'Dismiss',exact:true});await dismiss.waitFor();
   const card=page.locator('.inbox-item.read'),c=await card.boundingBox(),d=await dismiss.boundingBox();assert.ok(d.width>=44&&d.height>=44);assert.ok(d.x+d.width<=c.x+c.width && d.x>c.x+c.width/2 && d.y<c.y+16,'Dismiss is top-right inside receipt');

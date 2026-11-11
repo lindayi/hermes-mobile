@@ -18,7 +18,7 @@ async function setup({request}={}) {
   return {items:[]};
  }};
  const app=await mountApp(doc,api,win);
- return {win,doc,app,reads,calls,slow(value=true){slow=value;},owner(value){owner=value;},search(value){button(doc,'Search conversations').getAttribute('aria-expanded')==='false' && button(doc,'Search conversations').click();const input=doc.querySelector('input[type=search]');input.value=value;input.focus();input.form.dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}));return input;},close(){app.destroy();win.close();}};
+ return {win,doc,app,reads,calls,slow(value=true){slow=value;},owner(value){owner=value;},search(value){button(doc,'Search sessions').getAttribute('aria-expanded')==='false' && button(doc,'Search sessions').click();const input=doc.querySelector('input[type=search]');input.value=value;input.focus();input.form.dispatchEvent(new win.Event('submit',{bubbles:true,cancelable:true}));return input;},close(){app.destroy();win.close();}};
 }
 
 test('detached list controls cannot change another owner’s query/filter/page or start a new chat',async()=>{
@@ -38,7 +38,7 @@ test('New chat button sends only the New chat placeholder and leaves untitled na
   button(h.doc,'New chat').click();await tick();
   const create=h.calls.find(call=>call.path==='/sessions' && call.options.method==='POST');
   assert.deepEqual(create.options.body,{title:'New chat'});
-  assert.equal(h.doc.querySelector('.conversation-head h1').textContent,'Untitled conversation');
+  assert.equal(h.doc.querySelector('.conversation-head h1').textContent,'Untitled session');
   assert.equal(h.doc.querySelector('.messages .empty h2').textContent,'New chat');
   assert.ok(h.calls.some(call=>call.path==='/sessions/native-untitled'),'untitled creation reads native metadata instead of treating the placeholder as a saved title');
  }finally{h.close();}
@@ -46,17 +46,17 @@ test('New chat button sends only the New chat placeholder and leaves untitled na
 
 test('old deletion actions explicitly lock through a failed refresh and recover only on a fresh result',async()=>{
  const h=await setup();try{
-  const remove=button(h.doc,'Delete conversation: Original');h.slow();h.search('pending');assert.equal(remove.disabled,true,'stale delete must not look actionable');assert.match(remove.title,/updating|refresh/i);
+  const remove=button(h.doc,'Delete session: Original');h.slow();h.search('pending');assert.equal(remove.disabled,true,'stale delete must not look actionable');assert.match(remove.title,/updating|refresh/i);
   h.reads[0].reject(new Error('Synthetic unavailable'));await tick();assert.equal(remove.disabled,true);assert.match(remove.title,/Try again/i);assert.ok(button(h.doc,'Try again'));
-  button(h.doc,'Try again').click();h.reads[1].resolve(page('Original'));await tick();assert.equal(button(h.doc,'Delete conversation: Original').disabled,false);assert.notEqual(button(h.doc,'Delete conversation: Original'),remove);
+  button(h.doc,'Try again').click();h.reads[1].resolve(page('Original'));await tick();assert.equal(button(h.doc,'Delete session: Original').disabled,false);assert.notEqual(button(h.doc,'Delete session: Original'),remove);
  }finally{h.close();}
 });
 
 test('filter and native pagination preserve controls while authoritative count and query advance together',async()=>{
  const h=await setup();try{
   h.slow();const input=h.search('draft query');h.reads[0].resolve(page('Matched',97));await tick();
-  const heading=h.doc.querySelector('.page-heading'),list=h.doc.querySelector('.session-list'),filter=button(h.doc,'Filter conversations'),next=button(h.doc,'Next'),previous=button(h.doc,'Previous');
-  input.value='new body text';button(h.doc,'All').click();assert.equal(h.doc.activeElement,filter);assert.ok(button(h.doc,'Matched'));assert.match(h.doc.querySelector('.pagination').textContent,/97 conversations/);
+  const heading=h.doc.querySelector('.page-heading'),list=h.doc.querySelector('.session-list'),filter=button(h.doc,'Filter sessions'),next=button(h.doc,'Next'),previous=button(h.doc,'Previous');
+  input.value='new body text';button(h.doc,'All').click();assert.equal(h.doc.activeElement,filter);assert.ok(button(h.doc,'Matched'));assert.match(h.doc.querySelector('.pagination').textContent,/97 sessions/);
   assert.equal(h.reads[1].url.searchParams.get('q'),'new body text');assert.equal(h.reads[1].url.searchParams.get('kind'),'all');
   input.focus();input.setSelectionRange(1,4);h.reads[1].resolve(page('All result',97));await tick();assert.equal(h.doc.activeElement,input,'late filter reply cannot steal newer focus');assert.equal(input.selectionEnd,4);
   next.click();assert.equal(h.reads[2].url.searchParams.get('offset'),'30');assert.equal(h.reads[2].url.searchParams.get('q'),'new body text');assert.ok(button(h.doc,'All result'));h.reads[2].resolve(page('Beyond first page',97));await tick();
@@ -69,22 +69,22 @@ for(const outcome of ['success','401','error'])test(`newest query wins over out-
  const h=await setup();try{
   h.slow();const input=h.search('old');h.search('new');h.reads[1].resolve(page('Newest',4));await tick();
   if(outcome==='success')h.reads[0].resolve({...page('Stale',900),pending_deletions:[{id:'private-stale',status:'unconfirmed'}]});else h.reads[0].reject(Object.assign(new Error('stale failure'),{status:outcome==='401'?401:503}));await tick();
-  assert.ok(button(h.doc,'Newest'));assert.equal(button(h.doc,'Stale'),undefined);assert.match(h.doc.querySelector('.pagination').textContent,/4 conversations/);assert.doesNotMatch(h.doc.body.textContent,/private-stale|stale failure|session expired/);assert.equal(h.doc.querySelector('input'),input);assert.equal(h.doc.querySelector('.session-results').getAttribute('aria-busy'),'false');
+  assert.ok(button(h.doc,'Newest'));assert.equal(button(h.doc,'Stale'),undefined);assert.match(h.doc.querySelector('.pagination').textContent,/4 sessions/);assert.doesNotMatch(h.doc.body.textContent,/private-stale|stale failure|session expired/);assert.equal(h.doc.querySelector('input'),input);assert.equal(h.doc.querySelector('.session-results').getAttribute('aria-busy'),'false');
  }finally{h.close();}
 });
 
 test('inline failure and retry retain honest old result labels/count and never overwrite newer unsent input',async()=>{
  const h=await setup();try{
   h.slow();const input=h.search('not loaded'),heading=h.doc.querySelector('.page-heading');h.reads[0].reject(new Error('Synthetic offline'));await tick();
-  assert.ok(button(h.doc,'Original'));assert.equal(h.doc.querySelector('.list-summary'),null);assert.doesNotMatch(h.doc.querySelector('.session-list').textContent,/not loaded/);assert.match(h.doc.querySelector('.pagination').textContent,/61 conversations/);assert.match(h.doc.querySelector('.list-feedback').textContent,/not loaded.*Synthetic offline.*Previous results/);
+  assert.ok(button(h.doc,'Original'));assert.equal(h.doc.querySelector('.list-summary'),null);assert.doesNotMatch(h.doc.querySelector('.session-list').textContent,/not loaded/);assert.match(h.doc.querySelector('.pagination').textContent,/61 sessions/);assert.match(h.doc.querySelector('.list-feedback').textContent,/not loaded.*Synthetic offline.*Previous results/);
   input.value='unsent editing';input.focus();input.setSelectionRange(2,5);button(h.doc,'Try again').click();assert.equal(h.reads[1].url.searchParams.get('q'),'not loaded');h.reads[1].resolve(page('Retry body match',1));await tick();
-  assert.equal(input.value,'unsent editing');assert.equal(h.doc.activeElement,input);assert.equal(input.selectionStart,2);assert.equal(h.doc.querySelector('.page-heading'),heading);assert.ok(button(h.doc,'Retry body match'));assert.match(h.doc.querySelector('.pagination').textContent,/1 conversations/);assert.equal(h.doc.querySelector('.list-feedback').textContent.trim(),'');
+  assert.equal(input.value,'unsent editing');assert.equal(h.doc.activeElement,input);assert.equal(input.selectionStart,2);assert.equal(h.doc.querySelector('.page-heading'),heading);assert.ok(button(h.doc,'Retry body match'));assert.match(h.doc.querySelector('.pagination').textContent,/1 sessions/);assert.equal(h.doc.querySelector('.list-feedback').textContent.trim(),'');
  }finally{h.close();}
 });
 
 test('closing search clears only submitted search in place and fences its late response',async()=>{
  const h=await setup();try{
-  h.slow();const input=h.search('pending'),heading=h.doc.querySelector('.page-heading'),toggle=button(h.doc,'Search conversations');
+  h.slow();const input=h.search('pending'),heading=h.doc.querySelector('.page-heading'),toggle=button(h.doc,'Search sessions');
   button(h.doc,'Close search').click();assert.equal(h.doc.activeElement,toggle);assert.equal(input.form.hidden,true);assert.equal(h.reads[1].url.searchParams.get('q'),'');h.reads[1].resolve(page('Unfiltered',61));await tick();h.reads[0].resolve(page('Late searched',1));await tick();
   assert.equal(h.doc.querySelector('.page-heading'),heading);assert.equal(h.doc.querySelector('input'),input);assert.ok(button(h.doc,'Unfiltered'));assert.equal(button(h.doc,'Late searched'),undefined);assert.equal(h.doc.activeElement,toggle);
  }finally{h.close();}
@@ -116,7 +116,7 @@ test('superseded empty-page repair cannot overwrite a newer query or its offset'
 
 test('verified deletion fences deferred list reads and never resurrects a deleted row',async()=>{
  const deletion=deferred();const h=await setup({request:(path,options)=>options.method==='DELETE'?deletion.promise:undefined});try{
-  button(h.doc,'Conversation actions: Original').click();button(h.doc,'Delete conversation: Original').click();await tick();button(h.doc,'Delete conversation').click();await tick();
+  button(h.doc,'Session actions: Original').click();button(h.doc,'Delete session: Original').click();await tick();button(h.doc,'Delete session').click();await tick();
   h.slow();h.search('pending');deletion.resolve({id:'Original',deleted:true});await tick();assert.equal(h.reads.length,2);h.reads[1].resolve(page('Original',1));await tick();h.reads[0].resolve(page('Original',1));await tick();assert.equal(button(h.doc,'Original'),undefined);assert.equal(h.doc.querySelectorAll('.session-row').length,0);
  }finally{h.close();}
 });
@@ -142,8 +142,8 @@ test('tool-limit runtime notice renders folded generic process history with unch
 
 test('filter replacement invalidates an already-open deletion confirmation',async()=>{
  const h=await setup();try{
-  button(h.doc,'Conversation actions: Original').click();button(h.doc,'Delete conversation: Original').click();await tick();
-  const confirm=button(h.doc,'Delete conversation');assert.ok(confirm);
+  button(h.doc,'Session actions: Original').click();button(h.doc,'Delete session: Original').click();await tick();
+  const confirm=button(h.doc,'Delete session');assert.ok(confirm);
   h.slow();button(h.doc,'All').click();h.reads[0].resolve({...page('Original'),deletion_available:false});await tick();
   confirm.click();await tick();
   assert.equal(h.calls.filter(c=>c.options.method==='DELETE').length,0,'a replaced capability/row cannot authorize the prior confirmation');
@@ -152,14 +152,14 @@ test('filter replacement invalidates an already-open deletion confirmation',asyn
 
 test('search keeps mounted shell, input focus/selection and old rows during authoritative deferred reads',async()=>{
  const h=await setup();try{
-  h.slow();const main=h.doc.querySelector('#main'),heading=h.doc.querySelector('.page-heading'),list=h.doc.querySelector('.session-list'),filter=button(h.doc,'Filter conversations');
+  h.slow();const main=h.doc.querySelector('#main'),heading=h.doc.querySelector('.page-heading'),list=h.doc.querySelector('.session-list'),filter=button(h.doc,'Filter sessions');
   const input=h.search('body only / literal%');input.setSelectionRange(2,7);
   assert.equal(h.doc.querySelector('.page-heading'),heading,'search must not replace the heading with whole-page Loading');
   assert.equal(h.doc.querySelector('.session-list'),list);assert.ok(button(h.doc,'Original'),'old rows remain while fetching');
   assert.equal(h.doc.activeElement,input);assert.equal(input.selectionStart,2);assert.equal(input.selectionEnd,7);
   assert.equal(h.reads[0].url.searchParams.get('q'),'body only / literal%');
   h.reads[0].resolve(page('Body-only match',97));await tick();
-  assert.equal(h.doc.querySelector('#main'),main);assert.equal(h.doc.querySelector('.page-heading'),heading);assert.equal(button(h.doc,'Filter conversations'),filter);assert.equal(h.doc.querySelector('.session-list'),list);assert.equal(h.doc.querySelector('input[type=search]'),input);assert.equal(h.doc.activeElement,input);assert.equal(input.selectionStart,2);assert.equal(input.selectionEnd,7);
-  assert.ok(button(h.doc,'Body-only match'));assert.match(h.doc.querySelector('.pagination').textContent,/97 conversations/);assert.equal(button(h.doc,'Original'),undefined);
+  assert.equal(h.doc.querySelector('#main'),main);assert.equal(h.doc.querySelector('.page-heading'),heading);assert.equal(button(h.doc,'Filter sessions'),filter);assert.equal(h.doc.querySelector('.session-list'),list);assert.equal(h.doc.querySelector('input[type=search]'),input);assert.equal(h.doc.activeElement,input);assert.equal(input.selectionStart,2);assert.equal(input.selectionEnd,7);
+  assert.ok(button(h.doc,'Body-only match'));assert.match(h.doc.querySelector('.pagination').textContent,/97 sessions/);assert.equal(button(h.doc,'Original'),undefined);
  }finally{h.close();}
 });

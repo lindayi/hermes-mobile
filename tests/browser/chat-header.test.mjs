@@ -76,9 +76,9 @@ for(const trigger of ['completion','watcher'])test(`native automatic title refre
   if(p==='/sessions/s1')return {id:'s1',title};
  },{items:[],run:trigger==='completion'?{id:'r1',session_id:'s1',status:'running',input:'Hello'}:null});
  try{
-  click(h.doc,'Untitled conversation');await tick();
+  click(h.doc,'Untitled session');await tick();
   const header=h.doc.querySelector('.conversation-head'),textarea=h.doc.querySelector('textarea');
-  textarea.value='Retained draft';assert.equal(header.querySelector('h1').textContent,'Untitled conversation');
+  textarea.value='Retained draft';assert.equal(header.querySelector('h1').textContent,'Untitled session');
   title='Generated native title';
   if(trigger==='completion')h.streams[0].emit('done',{status:'completed'});
   else {const entry=[...h.timers.entries()].find(([,v])=>v.delay===30000);h.timers.delete(entry[0]);entry[1].fn();}
@@ -97,9 +97,9 @@ for(const extraRefreshes of [0,5])test(`completion queues one native title refre
  },{items:[],run:{id:'r1',session_id:'s1',status:'running',input:'Hello'}});
  const reads=path=>h.calls.filter(c=>c.path===path).length;
  try{
-  click(h.doc,'Untitled conversation');await tick();
+  click(h.doc,'Untitled session');await tick();
   const header=h.doc.querySelector('.conversation-head'),textarea=h.doc.querySelector('textarea');
-  textarea.value='Retained draft';assert.equal(header.querySelector('h1').textContent,'Untitled conversation');
+  textarea.value='Retained draft';assert.equal(header.querySelector('h1').textContent,'Untitled session');
   assert.equal(reads('/sessions/s1'),1);assert.equal(reads('/sessions/s1/background'),1);
   title='Generated after the initial title read';h.streams[0].emit('done',{status:'completed'});await tick();
   for(let i=0;i<extraRefreshes;i++)h.win.dispatchEvent(new h.win.Event('focus'));

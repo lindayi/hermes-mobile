@@ -59,22 +59,22 @@ test('Inbox programmatic disclosure and child actions are not read intent',async
  const h=await setup();try{
  const card=h.doc.querySelector('[data-inbox-id="n1"]'),details=card.querySelector('details');details.open=true;await tick();assert.equal(reads(h).length,0);
  card.querySelector('a').addEventListener('click',e=>e.preventDefault());card.querySelector('a').click();assert.equal(reads(h).length,0);assert.equal(details.open,true);
- control(card,'Open conversation').click();await tick();assert.equal(reads(h).length,0);
+ control(card,'Open session').click();await tick();assert.equal(reads(h).length,0);
  }finally{h.close();}
 });
 
 for(const metadata of [()=>({id:'s1',title:null}),()=>Promise.reject(Object.assign(new Error('Unavailable'),{status:404}))])test(`Inbox absent metadata title is truthful (${metadata.toString()})`,async()=>{
  const h=await setup({metadata});try{
- control(h.doc,'Open conversation').click();await tick();
+ control(h.doc,'Open session').click();await tick();
  assert.doesNotMatch(h.doc.querySelector('.conversation-title h1').textContent,/Notification, not chat title|New conversation/);
  assert.equal(h.calls.filter(c=>c.path.startsWith('/sessions?')).length,1);
- if(control(h.doc,'Retry opening conversation'))assert.equal(h.calls.some(c=>c.path.includes('/messages?')),false);
+ if(control(h.doc,'Retry opening session'))assert.equal(h.calls.some(c=>c.path.includes('/messages?')),false);
  }finally{h.close();}
 });
 
 for(const departure of ['route','account'])test(`Inbox stale successful title cannot overwrite ${departure}`,async()=>{
  const gate=deferred(),h=await setup({metadata:()=>gate.promise});try{
- control(h.doc,'Open conversation').click();await tick();
+ control(h.doc,'Open session').click();await tick();
  if(departure==='account'){h.setUser('bob');await h.app.start();}else{control(h.doc,'Chats').click();await tick();control(h.doc,'Known chat').click();await tick();}
  const text=h.doc.body.textContent;gate.resolve({id:'s1',title:'Stale conversation title'});await tick();
  assert.equal(h.doc.body.textContent,text);assert.equal(h.calls.some(c=>c.path.startsWith('/sessions/s1/messages')),false);
@@ -110,7 +110,7 @@ test('bulk read is one explicit request, retains all rows/open state on failure 
 
 for(const deep of [false,true])test(`Inbox conversation resolves real title and selects Chats${deep?' after notification deep link':''}`,async()=>{
  const h=await setup(deep?{url:'https://example.test/hermes/?inbox=n1'}:{});try{
- h.doc.querySelector('[data-inbox-id="n1"] summary')?.click();await tick();control(h.doc,'Open conversation').click();await tick();
+ h.doc.querySelector('[data-inbox-id="n1"] summary')?.click();await tick();control(h.doc,'Open session').click();await tick();
  assert.equal(h.doc.querySelector('nav [aria-current=page]').dataset.view,'chats');
  assert.equal(h.doc.querySelector('.conversation-title h1').textContent,'Actual conversation title');
  assert.equal(h.calls.filter(c=>c.path==='/sessions/s1').length,1);assert.equal(h.calls.filter(c=>c.path.startsWith('/sessions?')).length,deep?0:1);
@@ -121,7 +121,7 @@ for(const operation of ['single','bulk','title'])for(const departure of ['route'
  const gate=deferred(),h=await setup({mutation:()=>gate.promise,metadata:()=>gate.promise});try{
  if(operation==='bulk')control(h.doc,'Mark all read')?.click();
  else if(operation==='single')h.doc.querySelector('[data-inbox-id="n1"] summary')?.click();
- else control(h.doc,'Open conversation').click();
+ else control(h.doc,'Open session').click();
  await tick();assert.ok(h.calls.some(c=>c.path===(operation==='title'?'/sessions/s1':operation==='bulk'?'/inbox/read-all':'/inbox/n1/read')),'operation actually started');
  if(departure==='account'){h.setUser('bob');await h.app.start();}else{control(h.doc,'Chats').click();await tick();}
  gate.reject(Object.assign(new Error('Expired old account'),{status:401}));await tick();

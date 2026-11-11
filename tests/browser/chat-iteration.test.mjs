@@ -30,7 +30,7 @@ test('monochrome controls keep accessible names and decorative icons hidden',asy
 });
 test('history search starts collapsed, focuses on open and clears on Escape without hidden filtering',async()=>{
  const h=await setup();try{
-  const toggle=()=>h.doc.querySelector('[aria-label="Search conversations"][aria-expanded]');
+  const toggle=()=>h.doc.querySelector('[aria-label="Search sessions"][aria-expanded]');
   assert.ok(toggle(),'search disclosure exists');assert.equal(toggle().getAttribute('aria-expanded'),'false');assert.equal(h.doc.querySelector('.search').hidden,true);
   toggle().click();const input=h.doc.querySelector('[name=search]');assert.equal(h.doc.querySelector('.search').hidden,false);assert.equal(h.doc.activeElement,input);
   input.value='needle';h.doc.querySelector('.search').dispatchEvent(new h.win.Event('submit',{cancelable:true}));await tick();click(h.doc,'Next');await tick();
@@ -60,9 +60,9 @@ test('live stop replaces composer Send outside disclosure and restores Send on c
 test('session kind filter defaults to chats, resets paging, preserves search/back and resets for another account',async()=>{
  const h=await setup();try{
   assert.equal(new URL(h.calls.at(-1).path,'https://x').searchParams.get('kind'),'chats');
-  const filter=h.doc.querySelector('[aria-label="Conversation filter"]');assert.ok(filter);assert.equal(filter.getAttribute('role'),'group');assert.deepEqual([...filter.querySelectorAll('button')].map(o=>o.textContent),['Chats','All','Cron','Tests']);assert.equal(filter.querySelector('[aria-pressed=true]').textContent,'Chats');assert.equal(filter.querySelector('svg,select'),null);
+  const filter=h.doc.querySelector('[aria-label="Session filter"]');assert.ok(filter);assert.equal(filter.getAttribute('role'),'group');assert.deepEqual([...filter.querySelectorAll('button')].map(o=>o.textContent),['Chats','All','Cron','Tests']);assert.equal(filter.querySelector('[aria-pressed=true]').textContent,'Chats');assert.equal(filter.querySelector('svg,select'),null);
   h.doc.querySelector('[name=search]').value='needle';h.doc.querySelector('.search').dispatchEvent(new h.win.Event('submit',{cancelable:true}));await tick();click(h.doc,'Next');await tick();
-  const next=h.doc.querySelector('[aria-label="Conversation filter"]');next.querySelector('[data-kind=cron]').click();await tick();
+  const next=h.doc.querySelector('[aria-label="Session filter"]');next.querySelector('[data-kind=cron]').click();await tick();
   let url=new URL(h.calls.at(-1).path,'https://x');assert.equal(url.searchParams.get('kind'),'cron');assert.equal(url.searchParams.get('offset'),'0');assert.equal(url.searchParams.get('q'),'needle');
   await h.open();click(h.doc,'Back to chats');await tick();assert.equal(h.doc.querySelector('.session-filter [aria-pressed=true]').textContent,'Cron');
   h.setUser('other');await h.app.start();assert.equal(h.doc.querySelector('.session-filter [aria-pressed=true]').textContent,'Chats');assert.equal(h.doc.querySelector('[name=search]').value,'');

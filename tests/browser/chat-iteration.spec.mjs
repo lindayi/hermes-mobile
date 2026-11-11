@@ -42,14 +42,14 @@ test('monochrome navigation, filtered sessions, chronological public activity an
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER||'/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  try{
   const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block',reducedMotion:'reduce'}),page=await context.newPage();page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);
-  const filter=page.getByRole('group',{name:'Conversation filter'}),filterToggle=page.getByRole('button',{name:'Filter conversations',exact:true});await filterToggle.waitFor();assert.equal(await filter.isVisible(),false);
-  const searchToggle=page.getByRole('button',{name:'Search conversations',exact:true});
-  assert.equal(await page.getByRole('searchbox',{name:'Search conversations'}).count(),0,'search input collapsed by default');
+  const filter=page.getByRole('group',{name:'Session filter'}),filterToggle=page.getByRole('button',{name:'Filter sessions',exact:true});await filterToggle.waitFor();assert.equal(await filter.isVisible(),false);
+  const searchToggle=page.getByRole('button',{name:'Search sessions',exact:true});
+  assert.equal(await page.getByRole('searchbox',{name:'Search sessions'}).count(),0,'search input collapsed by default');
   assert.equal(await page.locator('.session-symbol').count(),0,'no repeated generic icons');
   for(const width of [320,390,1280]){
    await page.setViewportSize({width,height:844});
    const fb=await filterToggle.boundingBox(),sb=await searchToggle.boundingBox(),nb=await page.getByRole('button',{name:'New chat',exact:true}).boundingBox();assert.ok(Math.abs(fb.y-sb.y)<5&&Math.abs(nb.y-sb.y)<5,'Search, Filter, New share the compact toolbar');assert.ok(sb.width>=44&&sb.height>=44);assert.ok(fb.x>=sb.x+sb.width&&nb.x>=fb.x+fb.width,'Search, Filter, New do not overlap');
-   await searchToggle.click();const input=page.getByRole('searchbox',{name:'Search conversations'});assert.equal(await input.evaluate(el=>el===document.activeElement),true);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+   await searchToggle.click();const input=page.getByRole('searchbox',{name:'Search sessions'});assert.equal(await input.evaluate(el=>el===document.activeElement),true);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
    await input.fill('Human');await input.press('Enter');await page.getByRole('button',{name:'Human fixture',exact:true}).waitFor();assert.equal(await input.inputValue(),'Human');
    await page.getByRole('button',{name:'Close search',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.search')?.hidden);assert.equal(await searchToggle.evaluate(el=>el===document.activeElement),true);
   }
@@ -62,7 +62,7 @@ test('monochrome navigation, filtered sessions, chronological public activity an
   assert.equal(await page.locator('.nav-icon svg[stroke=\"currentColor\"]').count(),4);
   await filterToggle.click();await filter.getByRole('button',{name:'Cron',exact:true}).click();await page.getByRole('button',{name:'Cron fixture',exact:true}).waitFor();
   await filterToggle.click();await filter.getByRole('button',{name:'Tests',exact:true}).click();await page.getByRole('button',{name:'Verification fixture',exact:true}).waitFor();
-  await page.getByRole('button',{name:'Inbox',exact:true}).click();await page.locator('[data-inbox-id="cron-result"] summary').click();await page.getByText('Fixture cron result is available without opening its chat.',{exact:true}).waitFor();await page.getByRole('button',{name:'Open conversation'}).click();await page.getByRole('textbox',{name:'Message Hermes'}).waitFor();
+  await page.getByRole('button',{name:'Inbox',exact:true}).click();await page.locator('[data-inbox-id="cron-result"] summary').click();await page.getByText('Fixture cron result is available without opening its chat.',{exact:true}).waitFor();await page.getByRole('button',{name:'Open session'}).click();await page.getByRole('textbox',{name:'Message Hermes'}).waitFor();
   await page.getByRole('button',{name:'Back to chats'}).click();await filterToggle.click();await filter.getByRole('button',{name:'Chats',exact:true}).click();await page.getByRole('button',{name:'Human fixture',exact:true}).click();await page.getByRole('button',{name:'Stop run',exact:true}).waitFor();
   const stop=page.getByRole('button',{name:'Stop run',exact:true});assert.equal(await stop.locator('xpath=ancestor::summary').count(),0,'stop is not nested in disclosure toggle');
   await page.waitForFunction(()=>document.querySelector('.live-message'));
