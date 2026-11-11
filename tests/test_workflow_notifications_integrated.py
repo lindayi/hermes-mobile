@@ -142,19 +142,20 @@ def test_cli_lifecycle_export_uses_real_v2_ledger_and_reaches_owner_inbox(
             raise AssertionError(f'Unexpected API read: {route}')
 
         def get_all(self, route, *, collection=None):
-            if route.startswith('repos/lindayi/hermes-mobile/issues?'):
-                return [self.issue]
-            if route.startswith('repos/lindayi/hermes-mobile/issues/16/comments?'):
-                return [self.comment]
+            if route.startswith('repos/lindayi/hermes-mobile/pulls?state=open'):
+                return []
+            if route.startswith('agents/repos/lindayi/hermes-mobile/tasks'):
+                return []
             raise AssertionError(f'Unexpected API list: {route}')
 
     coordinator_state = tmp_path / 'coordinator' / 'state.json'
     seed = StateStore(coordinator_state)
-    seed.enroll({
-        'issue': 16, 'comment': 123, 'head': 'a' * 40, 'base': BASE,
-        'pull_id': 160000016, 'pull_node_id': 'PR_node_16',
-        'repository_id': 1399942965, 'last_open_seen': True,
-    })
+    state = seed.empty()
+    state['enrollments']['16'] = {
+        'issue': 16, 'comment': 123, 'head': 'a' * 40, 'active': True,
+        'fixes': 0, 'reconciles': 0,
+    }
+    seed.save(state)
     source_paths = LifecycleSourcePaths(
         notifications=consumer_paths,
         starter_state=tmp_path / 'starter-state.json',

@@ -1,258 +1,73 @@
 # Cloud coordinator
 
-`scripts/cloud_coordinator.py` is a bounded, outbound GitHub poller for issues
-and pull requests explicitly enrolled by the repository owner. GitHub Copilot
-performs code work in its cloud environment; this process never checks out or
-executes pull-request code on the host.
-
-## Modes
+`scripts/cloud_coordinator.py` is a small outbound GitHub poller for pull requests
+the repository owner explicitly enrolls. GitHub Copilot does code work in its cloud
+environment; the coordinator never checks out or runs pull-request code on the host.
 
 ```sh
-python3 scripts/cloud_coordinator.py --help
-python3 scripts/cloud_coordinator.py --state /private/path/state.json
-python3 scripts/cloud_coordinator.py --once --state /private/path/state.json
+python3 scripts/cloud_coordinator.py --state /private/path/state.json          # read-only plan
 python3 scripts/cloud_coordinator.py --once --apply --state /private/path/state.json
 ```
 
-No arguments run one read-only plan and print a bounded JSON summary. `--once`
-also performs one read-only cycle. Writes are rejected unless `--apply` and
-`--once` are both present. GitHub access uses `gh api` for the fixed
-`lindayi/hermes-mobile` repository and requires the authenticated owner account.
-The state file and its directory must be private and owned by the running user.
-Only IDs, cursor/action state, and public notification metadata are persisted;
-credentials are never copied into coordinator state.
+Writes need both `--once` and `--apply`. The authenticated `gh` account must be the
+owner (user ID `5164171`) and the repository must be `lindayi/hermes-mobile`. The
+state file is owner-private JSON holding only enrollments, reserved action keys and
+lifecycle events.
 
-The unit templates
-`deploy/hermes-mobile-coordinator.service` and
-`deploy/hermes-mobile-coordinator.timer` are not installed or enabled by this
-change. The timer requires an explicit owner-reviewed activation after external
-policy wiring. No production service, GitHub setting, branch protection, or
-deployment behavior is changed here.
+## Enrollment
 
-The service uses the canonical checkout's `.venv/bin/python`, like the workflow
-notification consumer. Provision and verify that environment from the repository
-lockfile before activation; the unit never installs dependencies or falls back to
-system Python. Lifecycle owner/configuration reads import application dependencies,
-so a standard-library-only interpreter or a successful CLI `--help` alone is not
-sufficient qualification. The focused unit regression imports that lazy dependency
-path under a synthetic home without loading live settings or making API calls.
+An owner comment `/hermes enroll` (optionally `/hermes enroll <head-sha> ...`, as
+posted by the issue starter) on an open same-repository PR targeting `main`
+enrolls it. A SHA-bound command only enrolls when it matches the current head.
+Edited comments and comments from anyone else are ignored. Enrollment is not merge
+approval.
 
-## Issue-to-PR handoff
+## Merge gates
 
-The issue starter and coordinator are separate workers. As documented in
-[`issue-starter.md`](issue-starter.md), only the authenticated repository owner’s
-exact `/hermes start` comment on an eligible public issue authorizes the issue
-starter to dispatch a cloud task. The issue title and body are untrusted task
-context. The starter reserves the task before dispatch, polls only its persisted
-task ID, and verifies the resulting task, branch, pull request, and canonical
-closing-issue link. It can mark a verified draft PR ready and then submit the
-owner-authenticated, head- and body-bound enrollment command. A completed task or
-public closing text alone does not prove issue linkage or authorize coordinator
-work.
+A PR is merged only when all of these hold on its exact current head:
 
-The coordinator accepts only an owner-authored enrollment for an open,
-same-repository PR based on `main`. Starter enrollment additionally requires a
-non-draft PR at its exact current head and proves the originating issue, unchanged
-command, PR identity, body digest, and canonical closing edge. Manual bare and
-SHA-bound enrollment can admit draft PRs under the documented owner-command
-contract; repair and merge are deferred until the PR is ready. Enrollment is not merge
-approval; sensitive changes require separate exact-head owner authorization and
-targeted independent review.
+- the latest submitted review by the Copilot reviewer bot (`175728472`) is
+  `COMMENTED` or `APPROVED` and was made on that head;
+- every review thread is resolved;
+- the required checks `source-ci` (Actions app 15368), `integration-tests`, and
+  `issue-link` (Actions app 15368) succeeded on that head;
+- GitHub reports the PR as non-draft and mergeable.
 
-## Current coordinator capabilities
+The merge call passes the head SHA (`PUT .../merge` with `sha`), so GitHub rejects
+it if the head moved. Branch protection remains authoritative. There is no
+independent-review, `agent-review`, or owner sensitive-change authorization gate,
+and review prose is not parsed.
 
-- Explicit owner-ID enrollment and exact-current-head sensitive authorization.
-- Precollection watermark and overlapping reads, atomic owner-command/cursor
-  persistence, and retirement on close/merge (reopening needs a new owner
-  enrollment).
-- Reserved task-API dispatch with `base_ref=main`, current `head_ref`, durable
-  task ID reconciliation, per-PR serialization, three-attempt budget, and an
-  ambiguous-write fail-closed path. Public receipt/outcome comments never
-  dispatch a second task.
-- Generation-bound status transitions and a deduplicated public outcome outbox.
-- A 4 MiB state cap checked before replacement (prior state preserved on
-  failure) and compaction of positively terminal records into bounded per-PR
-  tombstones; unresolved claims and current-head evidence are retained.
-- Immutable shared-schema lifecycle events for coordinator outcomes, plus
-  receipt-backed issue-starter failure/uncertainty and controller-verified
-  deployment outcomes. Export is written to the configured application state
-  directory and bound to its sole ready default-profile owner, not the GitHub
-  account ID. Source readers never dispatch tasks or modify source state.
-- Current-head authenticated Copilot review and resolved-thread
-  validation, fail-closed check collection, and protected auto-merge eligibility.
-  The coordinator requests real Copilot review through the bounded action flow;
-  its owned advisory `cloud-review` status is not required review evidence.
-- Failure to read the required-check policy or to prove complete/current evidence
-  blocks auto-merge. The coordinator never reports tests as successful.
+## Actions
 
-For an enrolled, non-draft PR with computed GitHub mergeability, ordinary
-technical review/check findings can receive a bounded fixer task. A confirmed
-`dirty` conflict or `behind` PR instead receives a neutral reconciliation task
-through the same durable reservation, serialized task lock, persisted task-ID
-polling, and combined three-attempt budget. The task must preserve both branch
-intents, merge current `main` into the PR branch (never rebase or force-push),
-record conflict-hunk decisions, and test the combined behavior. Unknown or
-uncomputed mergeability defers dispatch without consuming an attempt. Exhausted
-budget, incompatible product requirements, or broken required policy blocks for
-owner attention; this is bounded task dispatch, not automatic conflict resolution
-or merge.
+Per enrolled PR and cycle the coordinator does at most one of:
 
-Task completion is accepted only against the durably saved task ID and
-authenticated task/session evidence. The receipt must bind that task to its
-unique session, dispatch nonce, repository, PR, branch, start head, dispatch-time
-main, and result head, and remain an unchanged authenticated PR comment. A valid
-`ready` receipt can authorize continuation to that result head; it is not evidence
-that tests passed, review was approved, required checks passed, a PR merged, or a
-release was deployed. The parent continues to require fresh evidence on the
-result head.
+- request a Copilot review once per head when none exists for that head;
+- dispatch a fix task (unresolved review threads or failed required checks),
+  at most 5 per enrollment;
+- dispatch a reconciliation task for a `dirty` or `behind` PR (merge `main` into
+  the branch, never rebase or force-push), at most 3 per enrollment;
+- merge, as above.
 
-Accepted task IDs are reconciled by GET, including when the PR head advances.
-Queued, running, waiting, uncertain, and completed tasks awaiting Copilot
-review retain the serialization lock; review waits consume neither handoff nor
-fixer budgets. An ambiguous task-creation response is never blindly resent;
-preserve the durable claim and state for verified recovery rather than resetting
-state or assuming a new enrollment stopped the earlier task. A receipt, task
-comment, or completed session never triggers a second dispatch by itself.
+It waits while any agent task touches the PR branch, and while mergeability or
+checks are pending. Every request is keyed (`kind:pr:enrollment-comment:head[:main]`)
+and the key is saved before the API call, so a key is never dispatched twice. An
+ambiguous task-creation response blocks the PR for owner attention instead of
+retrying. Exhausted budgets also block. Installed version-1 state migrates in place:
+active enrollments keep their identity with spent budgets, and every unresolved
+(uncertain or claimed) v1 dispatch is carried as a PR-level fence. A new owner
+`/hermes enroll` comment is the explicit release of such a fence. Re-enrolling (a new owner comment) resets
+budgets.
 
-## Review, merge, delivery, and Inbox are separate
+## Lifecycle events
 
-Issue #92 requires the latest authenticated Copilot review from reviewer bot ID
-`175728472`, `COMMENTED` or `APPROVED` on the exact head, complete review/thread
-pagination, resolved threads and all three successful CI checks. Coding bot ID
-`198982749` does not qualify. Missing, stale, pending, dismissed or rejecting
-reviews block. Request genuine review through the bounded action flow, not a
-synthetic pass. Do not dispatch independent review/report-correction tasks or
-owner independent-review publications for new decisions. Preserve historical
-records and active task occupancy; never cancel or repurpose active tasks.
+Merged, closed, exhausted and uncertain outcomes are recorded as lifecycle events
+and exported to the application's `workflow-events.json` for the separate Inbox
+consumer (see [`workflow-notifications.md`](workflow-notifications.md)), together
+with receipt-backed issue-starter failures and controller-verified deployments.
+Events acknowledged by the consumer are dropped.
 
-### Historical independent-report transport (retired by issue #92)
+## Units
 
-The following describes the former report transport for retained history only.
-It does not authorize new dispatch/publication or impose a merge requirement.
-After a source task reaches a verified `ready` receipt without current
-independent evidence, the coordinator posts one owner-authored review anchor
-comment and dispatches one reserved read-only reviewer task on that exact
-head/base. The reviewer replies to the saved anchor with
-`engine-tools-reply_to_comment`; the accepted transport is the observed quoted
-blockquote preamble plus one compact JSON
-`hermes-independent-review-report-v1` object outside the quote. The parent
-binds that report to the saved nonce, distinct reviewer session, repository,
-PR, head/base and source receipt evidence, then publishes the owner COMMENT
-review on the exact head. Positive reports publish `verdict:"pass"`; bounded
-findings publish `verdict:"changes_requested"` and feed one bounded fixer
-follow-up for that exact head. The completed source task lock is retained until
-that verified reviewer lifecycle completes, and every configured required check
-must still independently succeed.
-
-The reviewer prompt names every required report field and the exact finding
-shape: each finding has only `path` and a nonblank `comment` of at most 1,000
-characters. It includes the complete changed-path inventory. Every non-deleted
-file hash is independently computed from the exact Git-blob bytes; deleted paths
-use JSON `null`. The coordinator fetches and hashes the full inventory again and
-does not accept a partial or report-supplied substitute. If a positively terminal
-task has no usable report, the private action record keeps a bounded validation
-error and the outbox posts one deduplicated blocker. At most one separately
-reserved correction can follow, with a new anchor, task, session, and nonce; the
-original report is left unchanged and source-fixer attempts/authority are
-preserved. Active, unknown, or insufficiently authenticated task/session evidence
-does not authorize a correction. An ambiguous creation is never replayed, and
-failure of the single correction remains a blocker. A corrected negative verdict
-uses the existing bounded fixer flow; a pass status is still gated by the full
-strict review proof. Recovery session IDs are stored and considered for retry only
-when they are nonempty strings no longer than 128 characters; unsafe IDs remain
-out of state while the bounded diagnosis and deduplicated blocker are retained.
-After a corrected report is durably published, reconciliation repairs a still-
-reserved parent to `recovered` only from the positively bound completed correction;
-for a pass, the `agent-review` status must also already be durably complete. This
-restart repair does not repeat publication or dispatch.
-
-Recovery after main advances preserves the original report's saved base as audit
-evidence. It requires current exact-head owner authority, the original source
-receipt, and independently proven ancestry from that saved base through the PR
-base, current main, and reviewed head. The correction records the historical parent
-base separately from its current-main report binding; if either changes after
-reservation, the correction report cannot be published or grant `agent-review`.
-Its anchor marker, outbox key, and nonce include the reservation main SHA. A main
-advance before claim preserves uncertain anchors but may compact a positively
-sent obsolete preclaim anchor into bounded outbox tombstones; its public marker
-remains replay evidence. A distinct current-main anchor is permitted, while
-claimed/current-needed anchors remain retained. A claimed or uncertain correction
-task is never replaced by another correction task.
-
-Pending correction replay freshly verifies live PR identity, head, main, and
-authority immediately before formal review and status writes and before marking
-the parent recovered. Detected staleness is durably bounded, exhausts that
-correction reservation, and releases generic busy state. These client checks do
-not make the subsequent GitHub write atomic. A crash-repair transition after
-later main movement is permitted only when the completed correction and every
-required publication were already durably recorded and all original report,
-task, source, and parent bindings still match.
-An inventory that cannot be represented within the strict 64-file contract is
-blocked before reviewer dispatch, recorded on the source handoff, and reported
-once through the deduplicated outcome path. The blocked handoff does not keep a
-generic agent lock or create a fixer task. Once positively completed, it is
-retired after its head changes or enrollment becomes inactive; current active
-records and unresolved work remain retained.
-
-### Current merge and deployment guards
-
-Sensitive changes additionally need owner authorization bound to that exact SHA
-and the documented targeted independent review; neither approval nor authorization
-carries to a later head.
-
-The active required contexts are exactly `source-ci` (Actions app 15368),
-`integration-tests`, and `issue-link` (Actions app 15368), with
-strict/up-to-date checks and resolved review conversations. The coordinator may
-publish an owned advisory `cloud-review` status, but it is not required and never
-replaces genuine Copilot review. No repository settings or protections
-are changed by this source behavior. See [`autonomy-policy.md`](autonomy-policy.md)
-for the owner-controlled deployment boundary.
-
-When eligible, the coordinator requests GitHub protected auto-merge; branch
-protection and fresh current-head review, thread, check, and policy fences remain
-authoritative. This is not deployment. After merge, ordinary delivery remains a
-separate guarded operation from verified exact `main`, reusing the matching
-hosted artifact and running the installed-runtime host partition. Existing
-admission, drain, health, and rollback protections remain in force; already
-admitted sessions are allowed to finish rather than being interrupted. See
-[`verified-release-artifacts.md`](verified-release-artifacts.md) and
-[`self-deploy.md`](self-deploy.md).
-
-Coordinator export is also separate from owner mobile Inbox ingestion and push
-delivery. Export does not invoke or activate the Inbox consumer or sender; those
-remain separate explicit owner-controlled operations.
-
-## Activation boundary and historical scope
-
-The repository unit and timer files are templates, not proof of installation or
-activation. Recurring operation requires a separately reviewed owner activation
-after the canonical checkout’s locked application environment is provisioned and
-verified, a separately authorized read-only API qualification is complete, owner
-authentication and private state are qualified, and external reviewer,
-required-check, strict-up-to-date, and conversation-resolution policy is
-verified. Unsupported legacy active state must be preserved and resolved through
-reviewed operator recovery; it must not be reset or migrated by re-enrollment.
-This documentation makes no claim that a particular operator has completed
-these steps or activated a service.
-
-Earlier source-slice descriptions that deferred conflicted or behind PRs to a
-separately assigned reconciler are historical, not the assembled behavior
-described above. The historical boundary does not imply that current review,
-check, merge, deployment, or Inbox gates are automatically satisfied.
-
-Separate owner/policy work still required:
-
-- Keep the active required contexts and protections owner-controlled. The
-  coordinator does not configure Copilot reviewer requirements, publish
-  `cloud-review` as a required status, or change repository settings. Its owned
-  `cloud-review` status remains advisory and never substitutes for genuine Copilot
-  review. Exact current required contexts and review evidence are documented in
-  [`AGENTS.md`](../AGENTS.md) and
-  [`cloud-coordinator-spec.md`](cloud-coordinator-spec.md).
-- Install and enable the service/timer only after exact-head review and policy
-  wiring. They remain disabled templates in this repository change.
-- Keep Inbox ingestion as a separate explicit apply operation; coordinator
-  export does not activate or invoke the consumer or push sender.
-- Roll out native compatibility gating and routine deployment policy under #5.
-  This coordinator does not deploy, modify deployment/controller/artifact code,
-  or replace the current global `AGENTS.md` requirements.
+`deploy/hermes-mobile-coordinator.service` and `.timer` are templates; installing
+or enabling them is a separate owner operation. The coordinator never deploys.

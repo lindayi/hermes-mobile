@@ -37,7 +37,7 @@ The active required contexts are `source-ci` (Actions app 15368),
 strict/up-to-date checks and resolved conversations. Do not require, synthesize, or
 publish `cloud-review` as a required status. Any future policy change needs a
 separate owner-authorized protection change and verified current-head evidence.
-See [`docs/autonomy-policy.md`](docs/autonomy-policy.md). The installed/private
+See [docs/cloud-coordinator.md](docs/cloud-coordinator.md). The installed/private
 host-compatibility suite remains required at guarded exact-main deployment; never
 execute untrusted PR code on a production or self-hosted runner.
 
@@ -47,9 +47,6 @@ For behavior changes, write a focused regression that fails for the intended rea
 then make the smallest complete change and show it pass. Keep existing assertions;
 do not weaken or remove unrelated tests. Review the final diff for scope and data
 handling.
-
-Coordinator review-anchor markers and outbox keys must bind the frozen main SHA;
-base changes never authorize rewriting or replaying old task reservations.
 
 Use the managed runner for local checks and provide explicit test paths for focused
 work:
@@ -103,10 +100,6 @@ has that setting enabled unless verified. A Copilot suggestion is feedback, not 
 instruction: judge it against the code and tests. Authentication, deployment,
 migration, and semantic merge-conflict changes require targeted review.
 
-Body-only review evidence uses authenticated full-media `body_html`, never a raw
-Markdown fallback. Keep rendered code/pre/blockquote inert and entity-decoded text
-literal; see [docs/cloud-coordinator-spec.md](docs/cloud-coordinator-spec.md).
-
 Issue #92 supersedes the independent-review merge requirement. Every PR requires
 an authenticated, exact-head Copilot review from reviewer bot ID `175728472` in
 state `COMMENTED` or `APPROVED`, complete review/thread pagination, resolved threads,
@@ -121,9 +114,6 @@ operators validate the separate mandatory review evidence before merge. The
 internal `copilot-pull-request-reviewer` check is absent from GraphQL
 `statusCheckRollup` and cannot serve as a required branch context. Do not replace
 it with a synthetic status, workflow wrapper, review service, or human-review gate.
-The narrow supervised operator path for a generic non-required reviewer-role
-request is defined by [Supervised manual qualification](docs/git-development-spec.md#supervised-manual-qualification);
-it does not alter automatic evidence or add a reviewer gate.
 
 Required checks and protections are authoritative. Do not fabricate reviews,
 approvals, check results, or identities. Review and test evidence applies only to
