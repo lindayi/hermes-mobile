@@ -163,7 +163,7 @@ SOURCE_FINGERPRINTS = {
     '.github/workflows/issue-link.yml': 'dd722de884fba6c9d613a72baee43f3b81d2d6816954f6a8e77d972b0fd1eafc',
     '.github/native-tests.json': '2da051240c05c0c53192439a9dbc4e7cc80939d2f3089e502f34906bf658e5df',
     '.github/host-tests.json': 'fc1cf7b7acccae5a948d8cfbd67f3fc82c7d1fd645328b92e357f81b3827a9f9',
-    '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',
+    '.github/actions/test-environment/action.yml': 'cdd7a2902be8b13ca597649fbbcd6252b8d7b8551380fb0806f467efe74afa06',
     '.github/actions/native-test-environment/action.yml': 'b1e5af03a4aa397f585e541805b4a292d1b3529090d54932b8945b6743ecd993',
     '.github/native-runtime.json': '705351eff7420cf3cbd3f91f3edc605feb304eba86f99e5a94902e89d3fb4d88',
     'requirements.lock': 'ae9402d803d936191d63d62c8d0f577df1303777d7fd9f03eca6191f41804e04',

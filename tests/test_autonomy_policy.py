@@ -48,7 +48,7 @@ _MERGED_MAIN_SOURCE_FIXTURE = {
     '.github/workflows/issue-link.yml': '5569875b9fc45d686f857712bc035d75a100fcfc4f3862f48b0d8bd045eca415',
     '.github/native-tests.json': 'b97ddb088e595197cf65d97b0b4af89f4f83f5c4ad25463c566df7099817209f',
     '.github/host-tests.json': '8af5fc30188f81ba95d3d7c11ba6801f52795175c2cac7f634424f906947ce5a',
-    '.github/actions/test-environment/action.yml': '638ed56955c8c8202fdd41640abe3be8b8065129e2965b8dc67b69f024017604',
+    '.github/actions/test-environment/action.yml': 'cdd7a2902be8b13ca597649fbbcd6252b8d7b8551380fb0806f467efe74afa06',
     '.github/actions/native-test-environment/action.yml': 'b1e5af03a4aa397f585e541805b4a292d1b3529090d54932b8945b6743ecd993',
     '.github/native-runtime.json': '705351eff7420cf3cbd3f91f3edc605feb304eba86f99e5a94902e89d3fb4d88',
     'deploy/assets.py': '0b5fee70ac71f61384b6501a40df9b7125c080fffa9930975ec2542553dffcc1',

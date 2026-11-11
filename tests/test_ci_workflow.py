@@ -160,7 +160,7 @@ def test_hosted_setup_uses_pinned_dependencies_without_deploy_access():
     text = path.read_text()
     assert 'npm ci --ignore-scripts' in text
     assert 'pip install -r requirements.lock' in text
-    assert './node_modules/.bin/playwright install --with-deps chromium' in text
+    assert './node_modules/.bin/playwright install chromium' in text and 'playwright install-deps chromium' in text
     assert 'PLAYWRIGHT_BROWSERS_PATH' in text
     for step in setup['runs']['steps']:
         if 'uses' in step:
