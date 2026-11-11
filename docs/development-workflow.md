@@ -97,7 +97,7 @@ Issue #92 requires an authenticated exact-head Copilot review from reviewer bot 
 resolved threads and all three successful CI checks. Coding bot ID `198982749`
 does not qualify. Missing, stale, pending, dismissed or rejecting reviews block.
 No independent report or `agent-review` status is required. See
-[`autonomy-policy.md`](autonomy-policy.md) for the read-only evidence contract.
+[`cloud-coordinator.md`](cloud-coordinator.md) for the automated merge path.
 Installed/private compatibility remains required at
 guarded exact-main deployment; do not execute public PR code on a production-host
 self-hosted runner. Final integration is a merge gate, not a full local suite per
@@ -129,10 +129,6 @@ review and status evidence. Sensitive-path classification adds no separate owner
 grant or targeted-review requirement. Current Copilot evidence must include
 authenticated unchanged submission metadata; missing or edited metadata blocks.
 
-The narrow supervised operator path for a generic request for a non-required
-reviewer role is defined by
-[Supervised manual qualification](git-development-spec.md#supervised-manual-qualification).
-It does not change automatic evidence or add a reviewer gate.
 
 Use follow-up fix commits, reply in actual GitHub threads with the fix SHA and test
 evidence, and check findings before resolving them. Never fabricate the required

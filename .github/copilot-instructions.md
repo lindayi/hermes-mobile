@@ -48,8 +48,7 @@ The automatic `integration-tests` job succeeds only when the same-run complete
 hosted `source-ci` aggregate succeeds. Installed/private host compatibility is not
 PR-head evidence; the complete host partition remains a guarded exact-main
 deployment gate before activation.
-See [`docs/autonomy-policy.md`](../docs/autonomy-policy.md). Coding agents and the
-read-only validator never change settings, publish statuses, activate services, or
+See [`docs/cloud-coordinator.md`](../docs/cloud-coordinator.md). Coding agents never change settings, publish statuses, activate services, or
 execute untrusted PR code on the host.
 
 Native-controls maintenance normally requires the scheduler-bound run ID/source

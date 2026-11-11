@@ -30,7 +30,7 @@ Hosted CI check names and results:
 
 Mandatory final integration evidence for the active policy phase is verified on the exact head SHA:
 
-Governing gate and partition contract: docs/git-development-spec.md, docs/development-workflow.md, and docs/autonomy-policy.md.
+Governing gate and partition contract: docs/git-development-spec.md, docs/development-workflow.md, and docs/cloud-coordinator.md.
 
 Security and publication checks:
 

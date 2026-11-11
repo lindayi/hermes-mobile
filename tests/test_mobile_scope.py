@@ -13,9 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_mobile_has_no_personal_feature_source_routes_assets_or_build_dependencies(tmp_path):
     from backend.app import Settings, create_app
-    from deploy.autonomy_policy import (
-        REQUIRED_FILES, SOURCE_BLOCKERS, SOURCE_CONTROL_PYTHON_FILES, SOURCE_FINGERPRINTS,
-    )
     from deploy.frontend_release import build_frontend
 
     violations = []
@@ -23,8 +20,6 @@ def test_mobile_has_no_personal_feature_source_routes_assets_or_build_dependenci
         for path in (ROOT / directory).rglob('*'):
             if path.is_file() and 'finance' in path.relative_to(ROOT).as_posix().lower():
                 violations.append(f'retained source: {path.relative_to(ROOT)}')
-    for inventory in (REQUIRED_FILES, SOURCE_BLOCKERS, SOURCE_CONTROL_PYTHON_FILES, SOURCE_FINGERPRINTS):
-        violations.extend(f'required personal source: {path}' for path in inventory if 'finance' in path)
     for filename in ('package.json', 'package-lock.json'):
         manifest = json.dumps(json.loads((ROOT / filename).read_text())).lower()
         for dependency in ('finance', 'plotly', 'esbuild'):
