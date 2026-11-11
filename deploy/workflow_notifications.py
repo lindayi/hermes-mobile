@@ -378,7 +378,9 @@ def read_lifecycle_acknowledgements(state_path, owner):
     acknowledgements = {}
     with closing(_open_readonly(Path(state_path))) as db:
         try:
-            for row in db.execute('SELECT event_id,digest,status,inbox_id FROM events'):
+            for row in db.execute(
+                    'SELECT event_id,digest,status,inbox_id FROM events WHERE recipient_id=?',
+                    (owner,)):
                 acknowledgements[row['event_id']] = {
                     'digest': row['digest'], 'status': row['status'], 'inbox_id': row['inbox_id'],
                 }
