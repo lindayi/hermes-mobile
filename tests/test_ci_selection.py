@@ -8,13 +8,14 @@ import pytest
 def fixture(tmp_path):
     (tmp_path / '.github').mkdir()
     (tmp_path / 'tests/browser').mkdir(parents=True)
-    for name in ('alpha', 'beta', 'native', 'new'):
+    for name in ('alpha', 'beta', 'native', 'private', 'new'):
         (tmp_path / f'tests/test_{name}.py').write_text('')
     for name in ('a', 'b', 'c', 'd'):
         (tmp_path / f'tests/browser/{name}.spec.mjs').write_text('')
         (tmp_path / f'tests/browser/{name}.test.mjs').write_text('')
     manifest = tmp_path / '.github/host-tests.json'
-    manifest.write_text(json.dumps({'tests/test_native.py': 'Requires installed patched native runtime'}))
+    manifest.write_text(json.dumps({'tests/test_native.py': 'Requires installed patched native runtime',
+                                    'tests/test_private.py': 'Requires a private host operator'}))
     (tmp_path / '.github/native-tests.json').write_text(
         json.dumps({'tests/test_native.py': 'Reproduces the pinned public Hermes native runtime.'}))
     return manifest
@@ -26,11 +27,12 @@ def test_python_partition_is_complete_disjoint_and_new_files_are_hosted(tmp_path
     hosted = set(select_tests(tmp_path, 'python'))
     host = set(select_tests(tmp_path, 'host'))
     native = set(select_tests(tmp_path, 'native'))
-    assert not hosted & host
-    assert hosted | host == {f'tests/test_{name}.py' for name in ('alpha','beta','native','new')}
+    assert not hosted & (host | native)
+    assert hosted | host | native == {f'tests/test_{name}.py' for name in ('alpha','beta','native','private','new')}
     assert 'tests/test_new.py' in hosted
-    assert host == {'tests/test_native.py'}
-    assert native == host
+    # Deploy-time host gate runs only what hosted CI cannot (no duplicate native run).
+    assert host == {'tests/test_private.py'}
+    assert native == {'tests/test_native.py'}
 
 
 def test_native_manifest_must_be_a_reasoned_subset_of_host(tmp_path):
@@ -96,9 +98,8 @@ def test_repository_native_selection_is_exact_proven_host_subset():
         'tests/test_session_release_callers.py',
     }
     assert len(native) == 18
-    assert native < host
-    assert not native & private
-    assert host - native == private
+    assert not native & host
+    assert host == private
 
 
 @pytest.mark.parametrize('suite', ['python', 'browser', 'js'])

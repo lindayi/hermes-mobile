@@ -216,15 +216,18 @@ def _run_record(run_id, sha, *, run):
 
 
 def _check_jobs(run_id, attempt, sha, *, run):
-    jobs = _listed(f'actions/runs/{run_id}/attempts/{attempt}/jobs', 'jobs', run=run)
+    # Latest result per job: failed-only reruns legitimately reuse earlier attempts.
+    jobs = _listed(f'actions/runs/{run_id}/jobs', 'jobs', run=run)
     if (len(jobs) != len(EXPECTED_JOBS) or {job.get('name') for job in jobs} != EXPECTED_JOBS
             or len({job.get('id') for job in jobs}) != len(jobs)):
         raise ValueError('Source CI complete job set mismatch')
     for job in jobs:
-        expected = {'run_id': run_id, 'run_attempt': attempt, 'head_sha': sha,
+        expected = {'run_id': run_id, 'head_sha': sha,
                     'status': 'completed', 'conclusion': 'success'}
         if any(job.get(key) != value for key, value in expected.items()):
-            raise ValueError('Source CI job did not succeed in exact attempt')
+            raise ValueError('Source CI job did not succeed')
+        if type(job.get('run_attempt')) is not int or not 1 <= job['run_attempt'] <= attempt:
+            raise ValueError('Source CI job attempt is invalid')
 
 
 def _attestation(bundle, sha, run_id, attempt, *, run):
@@ -268,9 +271,9 @@ def acquire_verified_bundle(source: Path, run_id: int, destination: Path, *, run
     attempt = _run_record(run_id, sha, run=run)
     _check_jobs(run_id, attempt, sha, run=run)
     artifacts = _listed(f'actions/runs/{run_id}/artifacts', 'artifacts', run=run)
-    matches = [a for a in artifacts if a.get('name') == f'release-{run_id}-{attempt}']
+    matches = [a for a in artifacts if a.get('name') == f'release-{run_id}']
     if len(matches) != 1:
-        raise ValueError('Unique exact-attempt release artifact required')
+        raise ValueError('Unique release artifact required')
     artifact = matches[0]
     artifact_id, size = artifact.get('id'), artifact.get('size_in_bytes')
     if (artifact.get('expired') is not False or type(artifact_id) is not int or artifact_id <= 0
