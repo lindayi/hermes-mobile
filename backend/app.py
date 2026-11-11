@@ -1013,7 +1013,7 @@ def create_app(settings=None, *, gateway_client=None):
         return await runtime_for(user).decide(user,aid,body['decision'])
 
     # API routes precede the public-only static mount. No backend/state directory is served.
-    # Compress only public static assets (ui.mjs is ~190 KB raw, ~45 KB gzipped).
+    # Compress only public static assets; do not compress authenticated API data.
     # API responses stay uncompressed so secrets never share a compressed stream.
     app.mount('/hermes',GZipMiddleware(StaticFiles(directory=FRONTEND_ROOT,html=True),minimum_size=1024),name='frontend')
     return app

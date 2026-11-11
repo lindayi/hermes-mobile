@@ -35,13 +35,24 @@ def test_static_assets_are_compressed_but_api_responses_are_not(tmp_path):
     from backend.app import create_app, Settings
     home=tmp_path/'hermes'; home.mkdir(); create_native_db(home/'state.db')
     settings=Settings(state_dir=tmp_path/'app-state', profiles={'default':home}, bootstrap_secret=BOOTSTRAP)
-    with TestClient(create_app(settings),base_url=ORIGIN) as client:
+    app=create_app(settings)
+    with TestClient(app,base_url=ORIGIN) as client:
+        plain=client.get('/hermes/ui.mjs',headers={'Accept-Encoding':'identity'})
         asset=client.get('/hermes/ui.mjs',headers={'Accept-Encoding':'gzip'})
-        assert asset.status_code==200
+        assert plain.status_code==asset.status_code==200
+        assert 'content-encoding' not in plain.headers
         assert asset.headers['content-encoding']=='gzip'
-        assert len(asset.content)>100000  # decoded body is the full module
-        assert asset.headers['content-security-policy']
-        api=client.get(BASE+'/auth/me',headers={'Accept-Encoding':'gzip'})
+        assert 'Accept-Encoding' in asset.headers['vary']
+        assert asset.content==plain.content  # compression retains the entire module
+        assert len(asset.content)>1024
+        assert asset.headers['content-security-policy']==plain.headers['content-security-policy']
+        client.headers['Origin']=ORIGIN
+        enroll(client)
+        owner=client.get(BASE+'/auth/me').json()['user']['id']
+        app.state.notifications.ingest(owner,'compression-fixture','Synthetic update','Synthetic body. '*200)
+        api=client.get(BASE+'/inbox',headers={'Accept-Encoding':'gzip'})
+        assert api.status_code==200
+        assert len(api.content)>1024  # API exclusion, not merely below the size threshold
         assert 'content-encoding' not in api.headers
 
 
