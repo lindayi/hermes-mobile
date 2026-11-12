@@ -705,7 +705,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     deletions.set(deletionKey(owner,id),'deleted');
     drafts.delete(id);attempts.delete(id);
     for(const name of ['draft','attempt','run'])for(const persistent of [false,true])storage.set(`hermes:${owner}:${name}:${id}`,null,persistent);
-    storage.set(`hermes:${owner}:model-controls:${JSON.stringify([owner,id])}`,null);
+    for(const persistent of [false,true])storage.set(`hermes:${owner}:model-controls:${JSON.stringify([owner,id])}`,null,persistent);
     try{for(const name of Object.keys(win.sessionStorage)){const prefix=`hermes:${owner}:steer:`;if(name.startsWith(prefix) && name.slice(prefix.length,name.lastIndexOf(':'))===id)win.sessionStorage.removeItem(name);}}catch{}
     const sameTranscript=state.view==='chats' && content.classList.contains('conversation') && state.session?.id===id;
     const history=state.view==='chats' && !content.classList.contains('conversation');

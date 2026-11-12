@@ -11,8 +11,23 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
   let locked = false, destroyed = false;
   const current = () => !destroyed && isCurrent();
   const storageKey = `hermes:${userId}:model-controls:${JSON.stringify([userId, sessionId])}`;
-  let pendingSaved = false;
-  try { pendingSaved = win.sessionStorage.getItem(storageKey) !== null; } catch {}
+  function readSaved() {
+    let raw = null;
+    try { raw = win.localStorage.getItem(storageKey); } catch {}
+    if (raw === null) {
+      try { raw = win.sessionStorage.getItem(storageKey); } catch {}
+      if (raw !== null) {
+        // Copy even stale choices: losing one must not authorize Default.
+        try { win.localStorage.setItem(storageKey, raw); } catch { return raw; }
+      }
+    }
+    if (raw !== null) {
+      try { win.sessionStorage.removeItem(storageKey); } catch {}
+    }
+    return raw;
+  }
+  const initialSaved = readSaved();
+  let pendingSaved = initialSaved !== null && initialSaved !== '{}';
 
   function modelFor(selection) {
     return models.find(model => model.id === selection?.model
@@ -24,6 +39,7 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
   function validSaved(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const keys = Object.keys(value);
+    if (!keys.length) return true; // Explicit Default also suppresses legacy migration.
     if (keys.some(key => !['model', 'provider', 'reasoning_effort'].includes(key))) return false;
     const hasModel = Object.hasOwn(value, 'model'), hasProvider = Object.hasOwn(value, 'provider');
     if (hasModel !== hasProvider || (!hasModel && !Object.hasOwn(value, 'reasoning_effort'))) return false;
@@ -43,13 +59,13 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
     if (appliedModel) Object.assign(saved, {model: appliedModel.id, provider: appliedModel.provider});
     if (appliedEffort) saved.reasoning_effort = appliedEffort;
     try {
-      if (Object.keys(saved).length) win.sessionStorage.setItem(storageKey, JSON.stringify(saved));
-      else win.sessionStorage.removeItem(storageKey);
+      win.localStorage.setItem(storageKey, JSON.stringify(saved));
+      win.sessionStorage.removeItem(storageKey);
     } catch { /* Storage can be disabled in private browsing. */ }
   }
   function restore() {
     try {
-      const raw = win.sessionStorage.getItem(storageKey);
+      const raw = readSaved();
       if (raw === null) { pendingSaved = false; return; }
       pendingSaved = true;
       try {

@@ -35,7 +35,9 @@ test('uncertain retry preserves the original selection and key across chat reent
  const h=await fixture((body,count)=>{if(count===1)throw new Error('Response lost');return {id:'r',session_id:'s',status:'completed',input:body.input,output:'Synthetic saved answer'};});try{
   await h.choose();h.draft('Retry once');h.control('Send message').click();await tick();
   assert.equal(h.control('Model').disabled,true,'uncertain selection cannot be retargeted');
-  h.control('Back to chats').click();await tick();h.control('Settings fixture').click();await tick();
+  h.control('Back to chats').click();await tick();
+  h.win.localStorage.setItem('hermes:owner:model-controls:'+JSON.stringify(['owner','s']),JSON.stringify({model:'fixture-b',provider:'fixture'}));
+  h.control('Settings fixture').click();await tick();
   assert.equal(h.control('Model').disabled,true,'reentry restores the uncertain-attempt lock');
   h.control('Send message').click();await tick();
   const sent=h.requests.filter(r=>r.path==='/runs').map(r=>r.params.body);assert.equal(sent.length,2);assert.deepEqual(sent[1],sent[0]);
