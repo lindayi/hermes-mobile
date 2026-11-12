@@ -12,6 +12,20 @@ async function setup({available=true,status='idle',remove,listing,request}={}){
  return {win,doc,calls,app,changeUser(value){user=value;},deleteButton(){const remove=button(doc,'Delete session: Saved chat');if(remove?.hidden)button(doc,'Session actions: Saved chat').click();return remove;},close(){app.destroy();win.close();}};
 }
 
+test('confirmed deletion removes persistent and legacy model preferences only for its owner/session',async()=>{
+ const h=await setup();try{
+  const key=(owner,id)=>`hermes:${owner}:model-controls:${JSON.stringify([owner,id])}`;
+  for(const store of [h.win.localStorage,h.win.sessionStorage]){
+   store.setItem(key('owner','session /1'),'{}');store.setItem(key('owner','other'),'{}');store.setItem(key('other','session /1'),'{}');
+  }
+  await confirmDeletion(h);
+  for(const store of [h.win.localStorage,h.win.sessionStorage]){
+   assert.equal(store.getItem(key('owner','session /1')),null);
+   assert.equal(store.getItem(key('owner','other')),'{}');assert.equal(store.getItem(key('other','session /1')),'{}');
+  }
+ }finally{h.close();}
+});
+
 test('supported history offers a separate delete control and cancellation sends nothing',async()=>{
  const h=await setup();try{
   const control=h.deleteButton();assert.ok(control,'delete action is discoverable');assert.equal(control.closest('.session-row'),null,'never nest delete in row button');

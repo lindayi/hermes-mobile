@@ -871,10 +871,13 @@ test('recovery codes are displayed once and signing out clears account-local dra
     return {items:[]};
   },win=>{win.PublicKeyCredential=class {};win.navigator.credentials={get:async()=>fakeCredential()};});
   dom.window.sessionStorage.setItem('hermes:u:draft:s','secret');
+  const preference=id=>`hermes:${id}:model-controls:${JSON.stringify([id,'s'])}`;
+  for(const store of [dom.window.localStorage,dom.window.sessionStorage]){store.setItem(preference('u'),'{}');store.setItem(preference('other'),'{}');}
   click(doc,'Settings');await tick();click(doc,'Generate recovery codes');await tick();click(doc,'Confirm change');await tick();
   assert.match(doc.body.textContent,/TEST-RECOVERY/);click(doc,'Done');await tick();
   click(doc,'Sign out');await tick();
   assert.equal(dom.window.sessionStorage.getItem('hermes:u:draft:s'),null);
+  for(const store of [dom.window.localStorage,dom.window.sessionStorage]){assert.equal(store.getItem(preference('u')),null);assert.equal(store.getItem(preference('other')),'{}');}
   assert.ok([...doc.querySelectorAll('button')].some(b=>b.textContent==='Sign in with a passkey'));
 });
 

@@ -23,6 +23,47 @@ const changeReasoning=h=>h.controls.reasoningElement.dispatchEvent(new h.win.Eve
 function choose(h,value){h.controls.element.value=value;change(h);}
 function chooseEffort(h,value){h.controls.reasoningElement.value=value;changeReasoning(h);}
 
+test('legacy tab preference migrates durably before validation, including stale choices',async()=>{
+ for(const effort of ['deep','retired']){
+  const win=new JSDOM('',{url:'https://fixture.test/hermes/'}).window;
+  const saved=JSON.stringify({model:'alpha',provider:'one',reasoning_effort:effort});
+  win.sessionStorage.setItem(storageKey(),saved);
+  const gate=deferred(),h=setup({win,request:()=>gate.promise});try{
+   assert.equal(h.controls.canSubmit(),false);
+   assert.equal(win.localStorage.getItem(storageKey()),saved,'migration survives closing before GET');
+   assert.equal(win.sessionStorage.getItem(storageKey()),null);
+   gate.resolve(catalog());await tick();
+   assert.equal(h.controls.canSubmit(),effort==='deep');
+   assert.deepEqual(h.controls.selection(),effort==='deep'?JSON.parse(saved):null);
+  }finally{h.close();win.close();}
+ }
+});
+test('explicit Default survives stale legacy copies and unavailable catalog on reopening',async()=>{
+ const h=setup();try{
+  await tick();choose(h,'0');chooseEffort(h,'deep');choose(h,'');
+  assert.equal(h.win.localStorage.getItem(storageKey()),'{}');
+  h.controls.destroy();
+  // Another old tab can still hold its original legacy selection.
+  h.win.sessionStorage.setItem(storageKey(),JSON.stringify({model:'alpha',provider:'one'}));
+  const next=setup({win:h.win,response:{available:false}});try{
+   assert.equal(next.controls.canSubmit(),true,'explicit Default has no override to validate');
+   await tick();assert.equal(next.controls.selection(),null);assert.equal(next.controls.canSubmit(),true);
+   assert.equal(h.win.sessionStorage.getItem(storageKey()),null);
+  }finally{next.close();}
+ }finally{h.close();}
+});
+test('persistent preference takes precedence over an old tab model and migrates only its own scope',async()=>{
+ const win=new JSDOM('',{url:'https://fixture.test/hermes/'}).window;
+ const old=JSON.stringify({model:'alpha',provider:'one'}),wanted={model:'alpha',provider:'two'};
+ win.sessionStorage.setItem(storageKey(),old);win.sessionStorage.setItem(storageKey('other'),old);
+ win.localStorage.setItem(storageKey(),JSON.stringify(wanted));
+ const h=setup({win});try{
+  await tick();assert.deepEqual(h.controls.selection(),wanted);
+  assert.equal(win.sessionStorage.getItem(storageKey()),null);
+  assert.equal(win.sessionStorage.getItem(storageKey('other')),old);
+ }finally{h.close();win.close();}
+});
+
 test('native Model dropdown commits exact selection immediately without a modal or POST',async()=>{
  const h=setup();try{
   await tick();const select=h.controls.element;
@@ -33,11 +74,11 @@ test('native Model dropdown commits exact selection immediately without a modal 
   assert.equal(h.controls.selection(),null,'default display must not pin an override');
   choose(h,'1');
   assert.deepEqual(h.controls.selection(),{model:'alpha',provider:'two'});
-  assert.deepEqual(JSON.parse(h.win.sessionStorage.getItem(storageKey())),{model:'alpha',provider:'two'});
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem(storageKey())),{model:'alpha',provider:'two'});
   assert.equal(h.controls.reasoningElement.hidden,true,'models without exact efforts expose no reasoning control');
   assert.equal(h.doc.querySelector('[role=dialog],.dialog-overlay'),null);
   assert.equal(button(h.doc,'Apply'),undefined);assert.equal(h.calls.length,1,'change is local, not a POST');
-  choose(h,'');assert.equal(h.controls.selection(),null);assert.equal(h.win.sessionStorage.getItem(storageKey()),null);
+  choose(h,'');assert.equal(h.controls.selection(),null);assert.equal(h.win.localStorage.getItem(storageKey()),'{}');
  }finally{h.close();}
 });
 test('separate native Reasoning select commits exact effort and restores the model-bound choice',async()=>{
@@ -50,7 +91,7 @@ test('separate native Reasoning select commits exact effort and restores the mod
   const expected={model:'alpha',provider:'one',reasoning_effort:'deep'};
   assert.deepEqual(h.controls.selection(),expected);
   const copy=h.controls.selection();copy.model='tampered';assert.deepEqual(h.controls.selection(),expected);
-  assert.deepEqual(JSON.parse(h.win.sessionStorage.getItem(storageKey())),expected);
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem(storageKey())),expected);
   h.controls.destroy();
   const next=setup({win:h.win});try{await tick();assert.deepEqual(next.controls.selection(),expected);assert.equal(next.controls.element.value,'0');assert.equal(next.controls.reasoningElement.value,'deep');}finally{next.close();}
  }finally{h.close();}
@@ -61,7 +102,7 @@ test('native dropdown never reflects an unadvertised catalogue default',async()=
 test('saved choice cannot silently become Default while its catalog is pending or unavailable',async()=>{
  for(const result of ['ready','failed','unavailable']){
   const win=new JSDOM('<button id="outside">Outside</button>',{url:'https://fixture.test/hermes/'}).window;
-  win.sessionStorage.setItem(storageKey(),JSON.stringify({model:'alpha',provider:'one'}));
+  win.localStorage.setItem(storageKey(),JSON.stringify({model:'alpha',provider:'one'}));
   const gate=deferred(),h=setup({win,request:()=>gate.promise});try{
    assert.equal(h.controls.canSubmit(),false,'saved explicit choice waits for validation');
    assert.equal(h.controls.element.disabled,true);
@@ -80,7 +121,7 @@ test('change rejects forged options, numeric coercion, missing selection and dup
   for(const value of ['invented','999','01','NaN','-1','0.0','1e0',' 1 ','__proto__','0:99','1:0','2','']){
    const forged=new h.win.Option('Forged',value);select.add(forged);forged.selected=true;change(h);
    assert.deepEqual(h.controls.selection(),wanted,`foreign ${JSON.stringify(value)} rejected`);
-   assert.deepEqual(JSON.parse(h.win.sessionStorage.getItem(storageKey())),wanted);
+   assert.deepEqual(JSON.parse(h.win.localStorage.getItem(storageKey())),wanted);
    assert.equal(select.value,'0','rejected DOM edit resets to the last committed selection');forged.remove();
   }
   select.selectedIndex=-1;change(h);assert.deepEqual(h.controls.selection(),wanted,'empty selection is not the trusted Default option');assert.equal(select.value,'0');
@@ -102,7 +143,7 @@ test('accepted catalog is snapshotted so later source mutation cannot retarget a
  const response=catalog(),h=setup({response});try{
   await tick();response.models[0].id='foreign';response.models[0].provider='foreign';response.models[0].reasoning_efforts.length=0;
   choose(h,'0');chooseEffort(h,'deep');assert.deepEqual(h.controls.selection(),{model:'alpha',provider:'one',reasoning_effort:'deep'});
-  assert.deepEqual(JSON.parse(h.win.sessionStorage.getItem(storageKey())),{model:'alpha',provider:'one',reasoning_effort:'deep'});
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem(storageKey())),{model:'alpha',provider:'one',reasoning_effort:'deep'});
  }finally{h.close();}
 });
 
@@ -110,11 +151,11 @@ test('route/account fences and destroy ignore late GETs without restoring storag
  for(const mode of ['stale','destroy']){
   let current=true;const gate=deferred(),h=setup({request:()=>gate.promise,isCurrent:()=>current});
   try{
-   const saved=JSON.stringify({model:'alpha',provider:'one'});h.win.sessionStorage.setItem(storageKey(),saved);
+   const saved=JSON.stringify({model:'alpha',provider:'one'});h.win.localStorage.setItem(storageKey(),saved);
    if(mode==='stale')current=false;else h.controls.destroy();
    h.doc.querySelector('#outside').focus();gate.resolve(catalog());await tick();
    assert.equal(h.controls.element.hidden,true,mode);assert.equal(h.controls.reasoningElement.hidden,true,mode);assert.equal(h.controls.selection(),null);
-   assert.equal(h.win.sessionStorage.getItem(storageKey()),saved);assert.equal(h.doc.activeElement.id,'outside');change(h);
+   assert.equal(h.win.localStorage.getItem(storageKey()),saved);assert.equal(h.doc.activeElement.id,'outside');change(h);
    assert.equal(h.doc.querySelector('[role="dialog"]'),null);
    h.controls.setLocked(false);   assert.equal(h.controls.element.disabled,true);assert.equal(h.controls.reasoningElement.disabled,true);
   }finally{h.close();}
@@ -124,12 +165,12 @@ test('route/account fences and destroy ignore late GETs without restoring storag
 test('stale change and navigation cleanup cannot mutate a selection or reactivate detached listeners',async()=>{
  for(const mode of ['stale','destroy']){
   let current=true;const h=setup({isCurrent:()=>current});try{
-   await tick();choose(h,'0');const saved=h.win.sessionStorage.getItem(storageKey());
+   await tick();choose(h,'0');const saved=h.win.localStorage.getItem(storageKey());
    h.controls.element.value='1';h.doc.querySelector('#outside').focus();
    if(mode==='stale')current=false;else h.controls.destroy();
-   change(h);assert.equal(h.win.sessionStorage.getItem(storageKey()),saved);
+   change(h);assert.equal(h.win.localStorage.getItem(storageKey()),saved);
    assert.equal(h.controls.selection(),null);assert.equal(h.doc.querySelector('[role="dialog"]'),null);assert.equal(h.doc.activeElement.id,'outside');
-   h.controls.destroy();h.controls.destroy();change(h);assert.equal(h.win.sessionStorage.getItem(storageKey()),saved);
+   h.controls.destroy();h.controls.destroy();change(h);assert.equal(h.win.localStorage.getItem(storageKey()),saved);
   }finally{h.close();}
  }
 });
@@ -137,11 +178,11 @@ test('stale change and navigation cleanup cannot mutate a selection or reactivat
 test('lock disables direct selection before and after load and rejects queued changes without mutation',async()=>{
  const h=setup();try{
   h.controls.setLocked(true);await tick();assert.equal(h.controls.element.disabled,true);
-  choose(h,'1');assert.equal(h.controls.selection(),null);assert.equal(h.win.sessionStorage.getItem(storageKey()),null);
-  h.controls.setLocked(false);choose(h,'0');const saved=h.win.sessionStorage.getItem(storageKey());
+  choose(h,'1');assert.equal(h.controls.selection(),null);assert.equal(h.win.localStorage.getItem(storageKey()),null);
+  h.controls.setLocked(false);choose(h,'0');const saved=h.win.localStorage.getItem(storageKey());
   h.controls.element.value='1';h.controls.setLocked(true);change(h);
   assert.equal(h.controls.element.disabled,true);assert.deepEqual(h.controls.selection(),{model:'alpha',provider:'one'});
-  assert.equal(h.win.sessionStorage.getItem(storageKey()),saved);
+  assert.equal(h.win.localStorage.getItem(storageKey()),saved);
   h.controls.setLocked(false);assert.equal(h.controls.element.disabled,false);assert.equal(h.controls.element.value,'0','blocked change must not leave an uncommitted provider on screen');
  }finally{h.close();}
 });
@@ -161,16 +202,16 @@ test('native keyboard events are not trapped and focus is not stolen by load or 
 test('stale saved effort blocks Default dispatch across reentry until an explicit model choice',async()=>{
  const win=new JSDOM('',{url:'https://fixture.test/hermes/'}).window;
  const saved=JSON.stringify({model:'alpha',provider:'one',reasoning_effort:'retired'});
- win.sessionStorage.setItem(storageKey(),saved);
+ win.localStorage.setItem(storageKey(),saved);
  try{
   for(let visit=0;visit<2;visit++){
    const h=setup({win});try{
     await tick();assert.equal(h.controls.canSubmit(),false);
     assert.equal(h.controls.selection(),null);
-    assert.equal(win.sessionStorage.getItem(storageKey()),saved);
+    assert.equal(win.localStorage.getItem(storageKey()),saved);
     assert.match(h.controls.element.selectedOptions[0].textContent,/choose model/i);
     chooseEffort(h,'brief');assert.equal(h.controls.canSubmit(),false,'hidden reasoning cannot bypass correction');
-    if(visit===1){choose(h,'');assert.equal(h.controls.canSubmit(),true);assert.equal(h.controls.selection(),null);assert.equal(win.sessionStorage.getItem(storageKey()),null);}
+    if(visit===1){choose(h,'');assert.equal(h.controls.canSubmit(),true);assert.equal(h.controls.selection(),null);assert.equal(win.localStorage.getItem(storageKey()),'{}');}
    }finally{h.close();}
   }
  }finally{win.close();}
@@ -180,16 +221,16 @@ test('valid selections persist per account/session and invalid saved overrides r
  const h=setup();try{
   await tick();choose(h,'0');chooseEffort(h,'deep');
   const expected={model:'alpha',provider:'one',reasoning_effort:'deep'};
-  assert.deepEqual(JSON.parse(h.win.sessionStorage.getItem(storageKey())),expected);h.controls.destroy();
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem(storageKey())),expected);h.controls.destroy();
   for(const [userId,sessionId,wanted] of [['user','session',expected],['other','session',null],['user','other',null]]){
    const next=setup({win:h.win,userId,sessionId});try{assert.equal(next.controls.selection(),null,'never restore before GET');await tick();assert.deepEqual(next.controls.selection(),wanted);}finally{next.close();}
   }
   const invalid=[{...expected,model:'retired'}, {...expected,provider:'unknown'}, {...expected,reasoning_effort:'invented'}, {...expected,extra:true}, {model:'alpha',provider:'two',reasoning_effort:'deep'}, [], null, 'broken-json'];
   for(const value of invalid){
-   h.win.sessionStorage.setItem(storageKey(),value==='broken-json'?value:JSON.stringify(value));
-   const next=setup({win:h.win});try{await tick();assert.equal(next.controls.selection(),null);assert.equal(next.controls.canSubmit(),false);assert.equal(h.win.sessionStorage.getItem(storageKey()),value==='broken-json'?value:JSON.stringify(value));}finally{next.close();}
+   h.win.localStorage.setItem(storageKey(),value==='broken-json'?value:JSON.stringify(value));
+   const next=setup({win:h.win});try{await tick();assert.equal(next.controls.selection(),null);assert.equal(next.controls.canSubmit(),false);assert.equal(h.win.localStorage.getItem(storageKey()),value==='broken-json'?value:JSON.stringify(value));}finally{next.close();}
   }
-  const next=setup({win:h.win});try{await tick();choose(next,'1');assert.ok(h.win.sessionStorage.getItem(storageKey()));choose(next,'');assert.equal(h.win.sessionStorage.getItem(storageKey()),null);}finally{next.close();}
+  const next=setup({win:h.win});try{await tick();choose(next,'1');assert.ok(h.win.localStorage.getItem(storageKey()));choose(next,'');assert.equal(h.win.localStorage.getItem(storageKey()),'{}');}finally{next.close();}
  }finally{h.close();}
 });
 
@@ -209,9 +250,9 @@ test('Default model effort snapshots the current catalog default and Default eff
  const h=setup();try{
   await tick();chooseEffort(h,'brief');
   assert.deepEqual(h.controls.selection(),{model:'alpha',provider:'one',reasoning_effort:'brief'});
-  assert.deepEqual(JSON.parse(h.win.sessionStorage.getItem(storageKey())),{reasoning_effort:'brief'});
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem(storageKey())),{reasoning_effort:'brief'});
   chooseEffort(h,'');assert.equal(h.controls.selection(),null);
-  assert.equal(h.win.sessionStorage.getItem(storageKey()),null);
+  assert.equal(h.win.localStorage.getItem(storageKey()),'{}');
  }finally{h.close();}
 });
 

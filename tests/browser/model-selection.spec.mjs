@@ -46,7 +46,7 @@ test('native next-turn model dropdown fits mobile with no overlay and preserves 
   assert.equal(await page.getByRole('combobox',{name:'Context',exact:true}).count(),0,'unsupported context tiers are not shown');
   await model.selectOption('0');await reasoning.selectOption('high');
   assert.equal(posts.length,0,'selection changes do not submit a run');
-  assert.deepEqual(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('hermes:owner:model-controls:'+JSON.stringify(['owner','s'])))),
+  assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('hermes:owner:model-controls:'+JSON.stringify(['owner','s'])))),
    {model:modelA,provider:'fixture',reasoning_effort:'high'});
   await model.selectOption('1');
   assert.equal(await reasoning.inputValue(),'','switching models clears an incompatible effort');
