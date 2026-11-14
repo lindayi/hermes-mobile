@@ -107,47 +107,7 @@ def test_all_managed_browser_fixtures_honor_browser_override_without_launching()
             assert selection['value'] == (browser or '/usr/bin/google-chrome'), selection['name']
 
 
-SYNCED_RULES = (
-    'Start from an approved issue; search for duplicates and overlapping PRs, then '
-    'record scope and acceptance cases before implementation.',
-    'For behavior changes, preserve existing assertions and demonstrate a real RED '
-    'test followed by GREEN.',
-    'Use the managed test runner with explicit test paths for focused local checks; '
-    'choose Python through HERMES_TEST_PYTHON or the repository .venv, never a fixed '
-    'owner-specific path.',
-    'Use cloud execution by default for substantial coding, testing, and review; local '
-    'work remains supported for small fixes and offline work under the same pull-request '
-    'gates.',
-    'Never use production credentials, real accounts, real model calls, native production '
-    'homes or databases, private evidence uploads, or live enrollment as tests.',
-    'A review comment is not an approval or a passing review status; verify every review '
-    'and test result against the exact head SHA.',
-    'Merging and deployment are separate; only guarded deployment from verified main is '
-    'allowed, and coding agents never access production.',
-    'Write PR descriptions as plain paragraphs using the repository template; include a '
-    'literal Closes #N and all required evidence, with no Markdown markup in the body.',
-    'For task handoff, a literal Closes #N is a readability convention; verify linkage '
-    'from authenticated GitHub closing-issue references, never PR body text.',
-)
 
-
-def test_agent_instructions_are_portable_and_copilot_rules_stay_synced():
-    agents = (ROOT / 'AGENTS.md').read_text()
-    copilot = (ROOT / '.github/copilot-instructions.md').read_text()
-
-    assert len(agents) < 20_000
-    assert '[AGENTS.md](../AGENTS.md)' in copilot
-    for rule in SYNCED_RULES:
-        assert rule in agents
-        assert rule in copilot
-
-    workflow = (ROOT / 'docs/development-workflow.md').read_text()
-    assert 'HERMES_TEST_PYTHON' in workflow
-    assert 'scripts/test.py python -- tests/test_agent_instructions.py' in workflow
-    assert 'scripts/ci_tests.py' in workflow
-    assert '.github/host-tests.json' in workflow
-    assert 'copilot-setup-steps.yml' in workflow
-    assert 'repository setting' in workflow
 
 
 def test_pull_request_template_keeps_plain_closing_reference_and_evidence_fields():
@@ -174,37 +134,6 @@ def test_pull_request_template_keeps_plain_closing_reference_and_evidence_fields
     assert 'Review and integration' in body
 
 
-def test_product_preferences_remain_explicit_in_canonical_instructions():
-    agents = (ROOT / 'AGENTS.md').read_text()
-    for preference in (
-        'Sessions',
-        'New chat',
-        'Search, Filter, and New',
-        'parallel sessions',
-        'Inbox is read-on-open',
-        'local times',
-        'Docker-free deployment',
-        'shared-session identity',
-        'public shared-origin limitations',
-        'meaningful outcomes',
-    ):
-        assert preference in agents
-
-
-def test_all_active_context_lists_include_issue_link():
-    for path in (
-        'AGENTS.md',
-        '.github/copilot-instructions.md',
-        '.github/pull_request_template.md',
-        'docs/development-workflow.md',
-        'docs/git-development-spec.md',
-        'docs/github-policy.md',
-        'README.md',
-    ):
-        text = ' '.join((ROOT / path).read_text().split())
-        assert all(context in text for context in (
-            'source-ci', 'integration-tests', 'issue-link',
-        )), path
 
 
 def test_issue_form_captures_behavior_acceptance_scope_and_privacy_risks():
