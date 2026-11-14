@@ -18,9 +18,14 @@ def test_mobile_has_no_personal_feature_source_routes_assets_or_build_dependenci
     violations = []
     for directory in ('backend', 'frontend', 'design', 'docs', 'scripts', 'tests'):
         for path in (ROOT / directory).rglob('*'):
+            if '__pycache__' in path.parts:
+                continue
             if path.is_file() and 'finance' in path.relative_to(ROOT).as_posix().lower():
                 violations.append(f'retained source: {path.relative_to(ROOT)}')
     for filename in ('package.json', 'package-lock.json'):
+        # Release stages copy only deployable sources, not root manifests.
+        if not (ROOT / filename).is_file():
+            continue
         manifest = json.dumps(json.loads((ROOT / filename).read_text())).lower()
         for dependency in ('finance', 'plotly', 'esbuild'):
             if dependency in manifest:
