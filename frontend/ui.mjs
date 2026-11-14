@@ -1512,7 +1512,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
           const hadFocus=card.contains(doc.activeElement);
           actionState.pending=true;actionState.error='';actionState.retentionBlocked=false;
           decisionRecord.status='verifying';renderApprovals();
-          if(hadFocus && !card.contains(doc.activeElement))card.focus({preventScroll:true});
+          if(hadFocus && (!card.contains(doc.activeElement) || doc.activeElement?.disabled))card.focus({preventScroll:true});
           let decisionStarted=false,decisionAuthGeneration=null,decisionRouteVersion=null;
           try{
             await ceremony('verify');
