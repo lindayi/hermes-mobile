@@ -7,6 +7,10 @@ or its window. Do not infer either from model names or global configuration.
 from contextlib import closing
 
 
+def _safe(value):
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 200 and not any(ord(c) < 32 for c in value)
+
+
 def unknown_run():
     return dict(status='unknown', last_status=None, id=None, source=None, observed_at=None)
 
@@ -25,12 +29,24 @@ def session_telemetry(catalog, journal, user, sid):
         values = dict(row)
     for key in ('model', 'provider'):
         value = values.get(key)
-        values[key] = value if isinstance(value, str) and value.strip() and len(value) <= 200 and not any(ord(c) < 32 for c in value) else None
+        values[key] = value if _safe(value) else None
     for key in ('input_tokens', 'output_tokens'):
         value = values.get(key)
         values[key] = value if type(value) is int and 0 <= value <= 9223372036854775807 else None
-    return dict(model=values.get('model'), provider=values.get('provider'),
-                metadata=dict(source='native_session', observed_at=None, freshness='persisted'),
+    model, provider = values.get('model'), values.get('provider')
+    # Native sessions.model is written once at creation; it is not per-turn truth.
+    metadata = dict(source='native_session', observed_at=None, freshness='persisted')
+    latest = journal.latest_selection(user['id'], user['profile'], sid)
+    if latest is not None:
+        chosen = latest['selection'] or {}
+        if all(_safe(chosen.get(k)) for k in ('model', 'provider')):
+            model, provider = chosen['model'], chosen['provider']
+            metadata = dict(source='web_run_selection', observed_at=latest['created_at'], freshness='last_run')
+        else:
+            # The newest turn used the then-current default, which is not recorded.
+            model = provider = None
+            metadata = dict(source=None, observed_at=None, freshness='unknown')
+    return dict(model=model, provider=provider, metadata=metadata,
                 context=dict(used_tokens=None, limit_tokens=None, source=None, observed_at=None, estimated=False),
                 usage=dict(scope='session_lifetime', input_tokens=values.get('input_tokens'), output_tokens=values.get('output_tokens'), source='native_session_totals' if {'input_tokens','output_tokens'} & columns else None, observed_at=None),
                 run=journal.session_statuses(user['id'], user['profile'], [sid])[sid])

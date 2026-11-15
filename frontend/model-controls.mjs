@@ -1,4 +1,4 @@
-export function createModelControls({doc, win, api, sessionId, userId, isCurrent}) {
+export function createModelControls({doc, win, api, sessionId, userId, isCurrent, onChange = () => {}}) {
   const element = doc.createElement('select');
   const reasoningElement = doc.createElement('select');
   element.hidden = reasoningElement.hidden = true;
@@ -156,6 +156,7 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       renderReasoning();
       element.hidden = false;
       element.disabled = locked;
+      onChange();
     } catch { /* Unknown capabilities stay hidden, including authorization failures. */ }
   }
   void load();
@@ -174,6 +175,7 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       persist();
       renderModel();
       renderReasoning();
+      onChange();
     }
   }
   function changeReasoning() {
@@ -215,5 +217,11 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       ...(appliedEffort ? {reasoning_effort: appliedEffort} : {})};
   }
   const canSubmit = () => current() && !pendingSaved;
-  return {element, reasoningElement, selection, setLocked, destroy, canSubmit};
+  // Effective model for the next message: explicit choice, else current default.
+  function effective() {
+    if (!current() || pendingSaved || element.hidden) return null;
+    const model = selectedModel();
+    return model ? {model: model.id, provider: model.provider} : null;
+  }
+  return {element, reasoningElement, selection, setLocked, destroy, canSubmit, effective};
 }
