@@ -192,9 +192,11 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
 
   function setLocked(value) {
     if (destroyed) return;
+    const changed = locked !== !!value;
     locked = !!value;
     element.disabled = locked || element.hidden;
     reasoningElement.disabled = locked || reasoningElement.hidden;
+    if (changed && current()) onChange();
   }
   function destroy() {
     if (destroyed) return;
@@ -219,7 +221,8 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
   const canSubmit = () => current() && !pendingSaved;
   // Effective model for the next message: explicit choice, else current default.
   function effective() {
-    if (!current() || pendingSaved || element.hidden) return null;
+    // A pending attempt retries with its original selection, so the picker is not truthful then.
+    if (!current() || pendingSaved || locked || element.hidden) return null;
     const model = selectedModel();
     return model ? {model: model.id, provider: model.provider} : null;
   }

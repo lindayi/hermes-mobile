@@ -2322,7 +2322,9 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       if(supported)send.setAttribute('aria-describedby','steering-help');else send.removeAttribute('aria-describedby');
     }};
     const modelOwner=state.user?.id;
-    let lastTelemetry=null;
+    let lastTelemetry=null,telemetrySeq=0;
+    // Newest request wins; route/account checks happen in renderTelemetry.
+    const loadTelemetry=()=>{const seq=++telemetrySeq,owner=state.user?.id;void api.request(`/sessions/${encodeURIComponent(session.id)}/telemetry`).then(data=>{if(seq===telemetrySeq && owner===state.user?.id)renderTelemetry(data);}).catch(error=>{if(version===routeVersion && error.status===401)expiredSession();});};
     const modelControls=createModelControls({doc,win,api,sessionId:session.id,userId:modelOwner,isCurrent:()=>version===routeVersion && state.user?.id===modelOwner,onChange:()=>{if(lastTelemetry)renderTelemetry(lastTelemetry);}});
     modelControls.element.className='quiet model-control-button';
     modelControls.reasoningElement.className='quiet model-control-button reasoning-control';
@@ -2439,6 +2441,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
       for(const photo of submittedPhotos){const position=selectedPhotos.indexOf(photo);if(position>=0){releasePreview(photo);selectedPhotos.splice(position,1);}}
       pendingPhotoSubmission=null;renderPhotoSelection();
       messages.scrollTop=messages.scrollHeight;
+      loadTelemetry();
       await trackRun({...run,session_id:session.id},messages,composerAction);
     }
     const expand=button(icon('expand'),()=>{
@@ -2623,7 +2626,7 @@ export async function mountApp(doc, api, win = doc.defaultView) {
     };
     // Opening already resolved missing metadata; only the initial receipt read reuses it.
     connection.background(refreshBackground,!resolveTitle);
-    void api.request(`/sessions/${encodeURIComponent(session.id)}/telemetry`).then(renderTelemetry).catch(error=>{if(version===routeVersion && error.status===401)expiredSession();});
+    loadTelemetry();
     content.classList.add('conversation');
     const priorExtras=stopExtras;stopExtras=()=>{stopInitialRestoreWatch();priorExtras?.();};
     messages.scrollTop=messages.scrollHeight;
