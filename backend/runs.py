@@ -354,6 +354,21 @@ class RunJournal:
                 last_status=last, id=row['id'], source='web_run_journal', observed_at=row['updated_at'])
         return result
 
+    def latest_selection(self, user_id, profile, session_id):
+        """Newest owned run's explicit model selection, never prompts or outputs."""
+        with closing(self.connect()) as c:
+            row = c.execute('''SELECT r.created_at, s.selection FROM runs r
+                LEFT JOIN run_selections s ON s.run_id=r.id
+                WHERE r.user_id=? AND r.profile=? AND r.session_id=?
+                ORDER BY r.rowid DESC LIMIT 1''', (user_id, profile, session_id)).fetchone()
+        if row is None:
+            return None
+        try:
+            selection = json.loads(row['selection']) if row['selection'] else None
+        except ValueError:
+            selection = None
+        return dict(created_at=row['created_at'], selection=selection if isinstance(selection, dict) else None)
+
     def latest(self, user_id, profile, session_id):
         """Discover only this principal's turn; rowid breaks timestamp ties."""
         with closing(self.connect()) as c:

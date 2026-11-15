@@ -55,3 +55,30 @@ test('Expand belongs beside the textarea at its top-right and restores the same 
 test('expanded editor is the same bounded draft, traps focus and collapses without sending',async()=>{
  const h=await setup();try{await h.open();const text=h.doc.querySelector('[name=message]');text.value='Long\nmessage';text.dispatchEvent(new h.win.Event('input'));text.setSelectionRange(3,7);click(h.doc,'Expand editor');const dialog=h.doc.querySelector('[data-editor-dialog][role=dialog]');assert.ok(dialog);assert.equal(dialog.getAttribute('aria-modal'),'true');assert.equal(dialog.querySelector('textarea'),text);assert.equal(text.maxLength,32000);assert.equal(text.selectionStart,3);text.dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));assert.equal(h.calls.filter(c=>c.path==='/runs').length,0);text.focus();text.dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));assert.equal(h.doc.activeElement.getAttribute('aria-label'),'Done');text.focus();text.setSelectionRange(5,5);dialog.dispatchEvent(new h.win.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));assert.equal(h.doc.querySelector('[data-editor-dialog]'),null);assert.equal(h.doc.querySelector('.composer textarea'),text);assert.equal(text.value,'Long\nmessage');assert.equal(text.selectionStart,5);assert.equal(h.doc.activeElement,text);click(h.doc,'Expand editor');click(h.doc,'Done');assert.equal(h.calls.filter(c=>c.path==='/runs').length,0);click(h.doc,'Expand editor');click(h.doc,'Chats');await tick();assert.equal(h.doc.querySelector('[data-editor-dialog]'),null);await h.open();assert.equal(h.doc.querySelector('textarea').value,'Long\nmessage');}finally{h.close();}
 });
+
+test('strip shows the next message model instead of the stale creation-time model and follows the picker',async()=>{
+ const h=await setup(p=>p.endsWith('/telemetry')?{model:'creation-model',provider:'old',metadata:{source:'native_session',freshness:'persisted',observed_at:null}}:p.endsWith('/model-options')?{available:true,default:{model:'default-model',provider:'p1'},models:[{id:'default-model',provider:'p1',label:'D',reasoning_efforts:[]},{id:'other-model',provider:'p2',label:'O',reasoning_efforts:[]}]}:undefined);
+ try{await h.open();await tick();const summary=()=>h.doc.querySelector('.technical-summary').textContent;
+  assert.equal(summary(),'Next: default-model · p1');assert.doesNotMatch(h.doc.querySelector('.technical-strip').textContent,/creation-model/);
+  const select=h.doc.querySelector('select[aria-label="Model"]');select.value='1';select.dispatchEvent(new h.win.Event('change'));
+  assert.equal(summary(),'Next: other-model · p2');}finally{h.close();}
+});
+test('strip shows the last run recorded model as is',async()=>{
+ const h=await setup(p=>p.endsWith('/telemetry')?{model:'ran-model',provider:'p9',metadata:{source:'web_run_selection',freshness:'last_run',observed_at:1790000000}}:p.endsWith('/model-options')?{available:true,default:{model:'default-model',provider:'p1'},models:[{id:'default-model',provider:'p1',label:'D',reasoning_efforts:[]}]}:undefined);
+ try{await h.open();await tick();assert.equal(h.doc.querySelector('.technical-summary').textContent,'ran-model · p9');assert.match(h.doc.querySelector('.technical-strip').textContent,/Model of last message/);}finally{h.close();}
+});
+
+test('consecutive sends refresh the strip without reopening and newer telemetry wins',async()=>{
+ let n=0;const opts={available:true,default:{model:'default-model',provider:'p1'},models:[{id:'default-model',provider:'p1',label:'D',reasoning_efforts:[]},{id:'b-model',provider:'p2',label:'B',reasoning_efforts:[]}]};
+ const h=await setup(p=>p.endsWith('/telemetry')?(n++===0?{model:'a-model',provider:'p0',metadata:{source:'web_run_selection',freshness:'last_run',observed_at:1}}:{model:'b-model',provider:'p2',metadata:{source:'web_run_selection',freshness:'last_run',observed_at:2}}):p.endsWith('/model-options')?opts:p==='/runs'?{id:'r'+n,session_id:'s1',status:'completed'}:p.startsWith('/runs/')?{id:'r',session_id:'s1',status:'completed'}:undefined);
+ try{await h.open();await tick();const summary=()=>h.doc.querySelector('.technical-summary').textContent;assert.equal(summary(),'a-model · p0');
+  const select=h.doc.querySelector('select[aria-label="Model"]');select.value='1';select.dispatchEvent(new h.win.Event('change'));
+  h.doc.querySelector('textarea').value='Hi';click(h.doc,'Send message');await tick();await tick();
+  assert.equal(summary(),'b-model · p2');assert.ok(h.calls.filter(c=>c.path.endsWith('/telemetry')).length>=2);}finally{h.close();}
+});
+test('a pending attempt suppresses the Next label because retry keeps its original model',async()=>{
+ const h=await setup(p=>p.endsWith('/telemetry')?{metadata:{freshness:'unknown'}}:p.endsWith('/model-options')?{available:true,default:{model:'default-model',provider:'p1'},models:[{id:'default-model',provider:'p1',label:'D',reasoning_efforts:[]}]}:p==='/runs'?new Promise(()=>{}):undefined);
+ try{await h.open();await tick();assert.equal(h.doc.querySelector('.technical-summary').textContent,'Next: default-model · p1');
+  h.doc.querySelector('textarea').value='Hi';click(h.doc,'Send message');await tick();
+  const strip=h.doc.querySelector('.technical-strip');assert.ok(strip.hidden || !/Next:/.test(strip.textContent));}finally{h.close();}
+});

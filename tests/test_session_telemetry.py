@@ -132,3 +132,25 @@ def test_malformed_metadata_is_unknown_not_raw_config(tmp_path):
         assert data['model'] is None and data['provider'] is None
         assert data['usage']['input_tokens'] is None
         assert 'SECRET' not in str(data)
+
+
+def test_last_run_selection_overrides_stale_native_creation_model(tmp_path):
+    from backend.session_telemetry import session_telemetry
+    app, home = setup(tmp_path)
+    with sqlite3.connect(home/'state.db') as db:
+        for column in ('model', 'model_config'):
+            db.execute(f'ALTER TABLE sessions ADD COLUMN {column} TEXT')
+        db.execute('UPDATE sessions SET model=?,model_config=? WHERE id=?', ('creation-model', '{"provider":"old-provider"}', 'cli-1'))
+    user = dict(id='owner', profile='default')
+    data = session_telemetry(app.state.catalog, app.state.journal, user, 'cli-1')
+    assert (data['model'], data['metadata']['freshness']) == ('creation-model', 'persisted')
+    run, _ = app.state.journal.submit('owner', 'default', 'cli-1', 'SECRET', 'k1', selection=dict(model='chosen-model', provider='chosen-provider'))
+    data = session_telemetry(app.state.catalog, app.state.journal, user, 'cli-1')
+    assert (data['model'], data['provider']) == ('chosen-model', 'chosen-provider')
+    assert data['metadata'] == dict(source='web_run_selection', observed_at=run['created_at'], freshness='last_run')
+    app.state.journal.finish('owner', run['id'], 'completed')
+    app.state.journal.submit('owner', 'default', 'cli-1', 'SECRET', 'k2')
+    data = session_telemetry(app.state.catalog, app.state.journal, user, 'cli-1')
+    assert data['model'] is None and data['provider'] is None
+    assert data['metadata']['freshness'] == 'unknown'
+    assert 'SECRET' not in str(data)

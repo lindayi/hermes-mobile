@@ -1,4 +1,4 @@
-export function createModelControls({doc, win, api, sessionId, userId, isCurrent}) {
+export function createModelControls({doc, win, api, sessionId, userId, isCurrent, onChange = () => {}}) {
   const element = doc.createElement('select');
   const reasoningElement = doc.createElement('select');
   element.hidden = reasoningElement.hidden = true;
@@ -156,6 +156,7 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       renderReasoning();
       element.hidden = false;
       element.disabled = locked;
+      onChange();
     } catch { /* Unknown capabilities stay hidden, including authorization failures. */ }
   }
   void load();
@@ -174,6 +175,7 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       persist();
       renderModel();
       renderReasoning();
+      onChange();
     }
   }
   function changeReasoning() {
@@ -190,9 +192,11 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
 
   function setLocked(value) {
     if (destroyed) return;
+    const changed = locked !== !!value;
     locked = !!value;
     element.disabled = locked || element.hidden;
     reasoningElement.disabled = locked || reasoningElement.hidden;
+    if (changed && current()) onChange();
   }
   function destroy() {
     if (destroyed) return;
@@ -215,5 +219,12 @@ export function createModelControls({doc, win, api, sessionId, userId, isCurrent
       ...(appliedEffort ? {reasoning_effort: appliedEffort} : {})};
   }
   const canSubmit = () => current() && !pendingSaved;
-  return {element, reasoningElement, selection, setLocked, destroy, canSubmit};
+  // Effective model for the next message: explicit choice, else current default.
+  function effective() {
+    // A pending attempt retries with its original selection, so the picker is not truthful then.
+    if (!current() || pendingSaved || locked || element.hidden) return null;
+    const model = selectedModel();
+    return model ? {model: model.id, provider: model.provider} : null;
+  }
+  return {element, reasoningElement, selection, setLocked, destroy, canSubmit, effective};
 }
