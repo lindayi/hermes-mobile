@@ -30,6 +30,8 @@ test('real HTTP/SSE narrow light and dark composer has compact separate Stop; ap
  const browser=await chromium.launch({executablePath:process.env.HERMES_BROWSER || '/usr/bin/google-chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  try{const page=await browser.newPage({viewport:{width:320,height:740},serviceWorkers:'block'});page.setDefaultTimeout(4000);const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}/hermes/`);await page.getByRole('button',{name:'Fixture',exact:true}).click();
   const steer=page.getByRole('button',{name:'Steer current run',exact:true}),stop=page.getByRole('button',{name:'Stop run',exact:true});await steer.waitFor();
+  // The technical strip renders the next model once model options load; measure after that layout settles.
+  await page.locator('.technical-summary',{hasText:'Next: fixture-long-model-identifier'}).waitFor();
   for(const size of [{width:320,height:740},{width:390,height:844},{width:390,height:450},{width:320,height:450}])for(const theme of ['light','dark']){
    await page.setViewportSize(size);await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
    const a=await stop.boundingBox(),b=await steer.boundingBox(),heading=await page.locator('.live-activity-heading').boundingBox(),model=await page.locator('select.model-control-button:not(.reasoning-control)').boundingBox();
